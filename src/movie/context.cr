@@ -1,6 +1,8 @@
 module Movie
   abstract class AbstractActorContext
     abstract def ref : ActorRefBase
+    abstract def path : ActorPath?
+    abstract def rebind_path(path : ActorPath?) : Nil
   end
 
   class ActorContext(T) < AbstractActorContext
@@ -35,7 +37,7 @@ module Movie
     @pending_terminations : Int32 = 0
     @pre_stop_completed : Bool = false
     @post_stop_sent : Bool = false
-    @restart_counters : Hash(Int32 | Symbol, NamedTuple(count: Int32, started_at: Time::Span)) = {} of Int32 | Symbol => NamedTuple(count: Int32, started_at: Time::Span)
+    @restart_counters : Hash(Int32 | Symbol, NamedTuple(count: Int32, started_at: Time::Instant)) = {} of Int32 | Symbol => NamedTuple(count: Int32, started_at: Time::Instant)
     @current_sender : ActorRefBase? = nil
 
     def initialize(
@@ -60,6 +62,11 @@ module Movie
 
     def ref : ActorRef(T)
       @ref.as(ActorRef(T))
+    end
+
+    def rebind_path(path : ActorPath?) : Nil
+      @path = path
+      @ref.path = path
     end
 
     def sender : ActorRefBase?
@@ -141,17 +148,18 @@ module Movie
         @system.path_registry.register(ref, p)
       end
 
+      attach_child(ref, notify_child: false)
       context.start
-      attach_child(ref)
       ref
     end
 
-    def attach_child(child : ActorRef(U)) forall U
+    def attach_child(child : ActorRef(U), *, notify_child : Bool = true) forall U
       @children << child unless @children.includes?(child)
+      @watching << child unless @watching.includes?(child)
       if child_ctx = @system.context(child.id)
         child_ctx.as(ActorContext(U)).register_watcher(@ref)
       end
-      watch child
+      child.send_system(Watch.new(@ref).as(SystemMessage)) if notify_child
     end
 
     def watch(actor : ActorRef(U)) forall U
@@ -276,6 +284,8 @@ module Movie
     protected def handle_failed(message : Failed)
       failed_actor = message.actor
       cause = message.cause
+      @active_behavior.on_signal(message)
+
       return unless @children.any? { |child| child.id == failed_actor.id }
       attempt, exceeded = track_restart(failed_actor, cause)
       return if exceeded
@@ -291,7 +301,7 @@ module Movie
 
     private def track_restart(failed_actor : ActorRefBase, cause : Exception?) : {Int32, Bool}
       key = supervision_key(failed_actor)
-      now = Time.monotonic
+      now = Time.instant
       entry = @restart_counters[key]?
       if entry
         elapsed = now - entry[:started_at]
@@ -340,8 +350,12 @@ module Movie
       case strategy
       when SupervisionStrategy::RESTART
         delay = compute_backoff_delay(attempt)
-        sleep delay if delay > Time::Span.zero
-        actor.send_system(Restart.new(cause).as(SystemMessage))
+        restart_message = Restart.new(cause).as(SystemMessage)
+        if delay > Time::Span.zero
+          @system.scheduler.schedule_system_message(delay, actor, restart_message)
+        else
+          actor.send_system(restart_message)
+        end
       when SupervisionStrategy::STOP
         actor.send_system(STOP)
       when SupervisionStrategy::RESUME
@@ -366,7 +380,7 @@ module Movie
       clamped = {base, @supervision_config.backoff_max}.min
       if @supervision_config.jitter > 0.0
         j = @supervision_config.jitter
-        factor = 1.0 + (Random::DEFAULT.rand * 2.0 * j - j)
+        factor = 1.0 + (rand * 2.0 * j - j)
         clamped *= factor
       end
       if clamped < Time::Span.zero
@@ -419,8 +433,9 @@ module Movie
       @active_behavior.on_signal(PRE_START)
       send_system_message(POST_START)
     rescue ex : Exception
+      notify_for_failure(ex)
       transition_to(State::FAILED)
-      # @last_failure = ex
+      send_system_message(STOP)
     end
 
     protected def handle_post_start
@@ -448,6 +463,7 @@ module Movie
       @active_behavior.on_signal(POST_STOP)
       transition_to(State::STOPPED)
       notify_for_termination
+      @system.deregister(@ref.id)
     end
 
     protected def handle_terminated(message : Terminated)

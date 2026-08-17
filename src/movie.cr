@@ -121,12 +121,11 @@ module Movie
   end
 
   class RootGuardian < AbstractBehavior(RootGuardianMessage)
-    def receive(message : RootGuardianMessage)
-      puts "RootGuardian received: #{message}"
+    def receive(message : RootGuardianMessage, context : ActorContext(RootGuardianMessage)) : AbstractBehavior(RootGuardianMessage)
+      Behaviors(RootGuardianMessage).same
     end
 
     def on_signal(signal : SystemMessage)
-      puts "RootGuardian received signal: #{signal}"
     end
   end
 
@@ -134,12 +133,11 @@ module Movie
   end
 
   class UserGuardian < AbstractBehavior(UserGuardianMessage)
-    def receive(message : UserGuardianMessage)
-      puts "UserGuardian received: #{message}"
+    def receive(message : UserGuardianMessage, context : ActorContext(UserGuardianMessage)) : AbstractBehavior(UserGuardianMessage)
+      Behaviors(UserGuardianMessage).same
     end
 
-    def on_signal(signal : Signal)
-      puts "UserGuardian received signal: #{signal}"
+    def on_signal(signal : SystemMessage)
     end
   end
 
@@ -147,12 +145,11 @@ module Movie
   end
 
   class SystemGuardian < AbstractBehavior(SystemGuardianMessage)
-    def receive(message : SystemGuardianMessage)
-      puts "SystemGuardian received: #{message}"
+    def receive(message : SystemGuardianMessage, context : ActorContext(SystemGuardianMessage)) : AbstractBehavior(SystemGuardianMessage)
+      Behaviors(SystemGuardianMessage).same
     end
 
-    def on_signal(signal : Signal)
-      puts "SystemGuardian received signal: #{signal}"
+    def on_signal(signal : SystemMessage)
     end
   end
 
@@ -160,7 +157,7 @@ module Movie
   end
 
   class DeadLetters < AbstractBehavior(DeadLetter)
-    def receive(message, ctx)
+    def receive(message, context)
       Movie::Behaviors(DeadLetter).same
     end
   end
@@ -188,35 +185,46 @@ module Movie
 
       # Create root with path "/"
       root_path = ActorPath.new(system.address, [] of String)
-      root_context = create_actor_context(RootGuardian.new, RestartStrategy::RESTART, @default_supervision_config, root_path)
+      root_context = create_actor_context(RootGuardian.new, RestartStrategy::RESTART, @default_supervision_config, root_path, start_immediately: false)
       root_ref = root_context.ref
       @root = root_ref
 
       # Create system guardian with path "/system"
       system_path = ActorPath.new(system.address, ["system"])
-      system_context = create_actor_context(SystemGuardian.new, RestartStrategy::RESTART, @default_supervision_config, system_path)
+      system_context = create_actor_context(SystemGuardian.new, RestartStrategy::RESTART, @default_supervision_config, system_path, start_immediately: false)
 
       # Create dead letters with path "/system/dead_letters"
       dead_letters_path = system_path / "dead_letters"
-      dead_letters_context = create_actor_context(DeadLetters.new, RestartStrategy::RESTART, @default_supervision_config, dead_letters_path)
+      dead_letters_context = create_actor_context(DeadLetters.new, RestartStrategy::RESTART, @default_supervision_config, dead_letters_path, start_immediately: false)
 
       # Create user guardian with path "/user"
       user_path = ActorPath.new(system.address, ["user"])
-      user_context = create_actor_context(UserGuardian.new, RestartStrategy::RESTART, @default_supervision_config, user_path)
+      user_context = create_actor_context(UserGuardian.new, RestartStrategy::RESTART, @default_supervision_config, user_path, start_immediately: false)
 
-      root_context.attach_child system_context.ref
-      system_context.attach_child dead_letters_context.ref
-      root_context.attach_child user_context.ref
+      root_context.attach_child(system_context.ref, notify_child: false)
+      system_context.attach_child(dead_letters_context.ref, notify_child: false)
+      root_context.attach_child(user_context.ref, notify_child: false)
       @user_guardian = user_context.ref
       @system_guardian = system_context.ref
       @dead_letters = dead_letters_context.ref
+
+      root_context.start
+      system_context.start
+      dead_letters_context.start
+      user_context.start
+    end
+
+    def root_guardian : ActorRef(RootGuardianMessage)?
+      @root
     end
 
     protected def create_actor_context(
       behavior : AbstractBehavior(T),
       restart_strategy : RestartStrategy = RestartStrategy::RESTART,
       supervision_config : SupervisionConfig = @default_supervision_config,
-      path : ActorPath? = nil
+      path : ActorPath? = nil,
+      *,
+      start_immediately : Bool = true
     ) : ActorContext(T) forall T
       raise "System not initialized" unless @system
       system = @system.as(AbstractActorSystem)
@@ -229,7 +237,7 @@ module Movie
       if p = path
         system.path_registry.register(ref, p)
       end
-      context.start
+      context.start if start_immediately
       context
     end
 
@@ -263,8 +271,9 @@ module Movie
       actor_name = name || "$#{system.next_id}"
       child_path = user_path / actor_name
 
-      child = create_actor_context(behavior, restart_strategy, supervision_config, child_path)
-      user_context.as(ActorContext(UserGuardianMessage)).attach_child(child.ref)
+      child = create_actor_context(behavior, restart_strategy, supervision_config, child_path, start_immediately: false)
+      user_context.as(ActorContext(UserGuardianMessage)).attach_child(child.ref, notify_child: false)
+      child.start
       child.ref
     end
 
@@ -306,9 +315,37 @@ module Movie
       end
     end
 
+    def rebind_paths(address : Address)
+      raise "System not initialized" unless @system
+      system = @system.as(AbstractActorSystem)
+
+      snapshots = [] of NamedTuple(context: AbstractActorContext, elements: Array(String))
+      @mutex.synchronize do
+        @actors.each_value do |context|
+          path = context.path
+          next unless path
+          next unless path.address.system == address.system
+
+          snapshots << {context: context, elements: path.elements.dup}
+        end
+      end
+
+      snapshots.each do |snapshot|
+        rebound_path = ActorPath.new(address, snapshot[:elements])
+        snapshot[:context].rebind_path(rebound_path)
+        system.path_registry.register(snapshot[:context].ref, rebound_path)
+      end
+    end
+
     def deregister(id : Int32)
       @mutex.synchronize do
         @actors.delete(id)
+      end
+    end
+
+    def empty? : Bool
+      @mutex.synchronize do
+        @actors.empty?
       end
     end
   end
@@ -566,10 +603,13 @@ module Movie
 
     # Stops all registered extensions.
     def stop_all
-      @mutex.synchronize do
-        @extensions.each_value(&.stop)
+      registered_extensions = @mutex.synchronize do
+        current_extensions = @extensions.values
         @extensions.clear
+        current_extensions
       end
+
+      registered_extensions.each(&.stop)
     end
 
     # Returns all registered extensions.
@@ -669,6 +709,7 @@ module Movie
       extension = Remote::RemoteExtension.new(self, host, port, stripe_count)
       @extensions.register(extension)
       @address = extension.address
+      @registry.try &.rebind_paths(@address)
       extension
     end
 
@@ -801,8 +842,8 @@ module Movie
       child_context = ActorContext(T).new(behavior, ref, self, restart_strategy, supervision_config, child_path)
       @registry.register_context(ref.id, child_context)
       @path_registry.register(ref, child_path)
+      system_context.as(ActorContext(SystemGuardianMessage)).attach_child(ref, notify_child: false)
       child_context.start
-      system_context.as(ActorContext(SystemGuardianMessage)).attach_child(ref)
       ref
     end
   end
@@ -811,6 +852,9 @@ module Movie
     @restart_strategy : RestartStrategy = RestartStrategy::RESTART
     @supervision_config : SupervisionConfig = SupervisionConfig.default
     @config : Config = Config.empty
+    @shutdown_mutex : Mutex = Mutex.new
+    @shutdown_started : Bool = false
+    @shutdown_completed : Bool = false
 
     # Creates an ActorSystem with explicit parameters.
     def self.new(
@@ -960,6 +1004,34 @@ module Movie
       state.promise.future
     end
 
+    def shutdown(timeout : Time::Span = 5.seconds) : Nil
+      root_guardian = nil.as(ActorRef(RootGuardianMessage)?)
+      should_initiate_shutdown = false
+
+      @shutdown_mutex.synchronize do
+        return if @shutdown_completed
+
+        unless @shutdown_started
+          @shutdown_started = true
+          should_initiate_shutdown = true
+          @scheduler.try &.stop
+          root_guardian = @registry.as(ActorRegistry).root_guardian if @registry
+        end
+      end
+
+      if should_initiate_shutdown
+        @extensions.stop_all
+        root_guardian.try &.send_system(STOP)
+      end
+
+      wait_for_shutdown(timeout)
+
+      @shutdown_mutex.synchronize do
+        @shutdown_completed = true
+      end
+      @root = nil
+    end
+
     # Spawns an actor under the user guardian.
     # If name is provided, the actor gets path /user/{name}
     def spawn(
@@ -982,6 +1054,19 @@ module Movie
     ) : ActorRef(U) forall U
       raise "System not initialized" unless @registry
       @registry.as(ActorRegistry).spawn_child(behavior, restart_strategy, supervision_config, name, parent_path)
+    end
+
+    private def wait_for_shutdown(timeout : Time::Span) : Nil
+      registry = @registry
+      return unless registry
+
+      deadline = Time.instant + timeout
+      actor_registry = registry.as(ActorRegistry)
+
+      until actor_registry.empty?
+        raise "ActorSystem shutdown timed out after #{timeout}" if Time.instant >= deadline
+        sleep 10.milliseconds
+      end
     end
   end
 

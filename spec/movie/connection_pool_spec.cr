@@ -12,10 +12,10 @@ module Movie
     def initialize(@id : String)
     end
 
-    def receive(message, ctx)
+    def receive(message, context)
       case message
       when Persistence::DbQueryString
-        Movie::Ask.reply_if_asked(ctx.sender, @id.as(String?))
+        Movie::Ask.reply_if_asked(context.sender, @id.as(String?))
       end
       Behaviors(Persistence::ConnectionMessage).same
     end
@@ -28,11 +28,11 @@ module Movie
     )
     end
 
-    def receive(message, ctx)
+    def receive(message, context)
       case message
       when PoolProbeStart
-        first = ctx.ask(@pool, Persistence::DbQueryString.new("SELECT 1"), String?).await(1.second)
-        second = ctx.ask(@pool, Persistence::DbQueryString.new("SELECT 1"), String?).await(1.second)
+        first = context.ask(@pool, Persistence::DbQueryString.new("SELECT 1"), String?).await(1.second)
+        second = context.ask(@pool, Persistence::DbQueryString.new("SELECT 1"), String?).await(1.second)
         @promise.try_success([first, second])
       end
       Behaviors(PoolProbeMessage).same

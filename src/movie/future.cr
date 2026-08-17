@@ -1,6 +1,9 @@
+require "log"
 require "mutex"
 
 module Movie
+  FutureLog = ::Log.for("Movie::Future")
+
   class FutureCancelled < Exception
   end
 
@@ -184,7 +187,13 @@ module Movie
         @waiters = [] of Channel(Nil)
         transitioned = true
       end
-      callbacks.each { |cb| cb.call(snapshot.not_nil!) }
+      callbacks.each do |cb|
+        begin
+          cb.call(snapshot.not_nil!)
+        rescue ex : Exception
+          FutureLog.error(exception: ex) { "Unhandled future callback error" }
+        end
+      end
       waiters.each do |waiter|
         begin
           waiter.send(nil)
@@ -209,7 +218,11 @@ module Movie
 
       if snapshot
         if callback_applicable?(kind, snapshot.status)
-          block.call(snapshot)
+          begin
+            block.call(snapshot)
+          rescue ex : Exception
+            FutureLog.error(exception: ex) { "Unhandled future callback error" }
+          end
         end
         return FutureSubscription.new(->{} )
       end

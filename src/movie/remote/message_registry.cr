@@ -7,21 +7,32 @@ module Movie::Remote
   end
 
   # Wrapper for deserialized messages.
-  class MessageWrapper
-    getter value : JSON::Serializable
-
-    def initialize(@value : JSON::Serializable)
-    end
+  abstract class MessageWrapper
+    abstract def value : JSON::Serializable
+    abstract def deliver_to(context : ::Movie::AbstractActorContext, sender : ::Movie::ActorRefBase?) : Nil
 
     def unwrap(type : T.class) : T forall T
-      @value.as(T)
+      value.as(T)
+    end
+  end
+
+  class TypedMessageWrapper(T) < MessageWrapper
+    def initialize(@value : T)
+    end
+
+    def value : JSON::Serializable
+      @value.as(JSON::Serializable)
+    end
+
+    def deliver_to(context : ::Movie::AbstractActorContext, sender : ::Movie::ActorRefBase?) : Nil
+      context.as(::Movie::ActorContext(T)).deliver(@value, sender)
     end
   end
 
   # Typed deserializer for a specific message type.
   class TypedDeserializer(T) < MessageDeserializer
     def deserialize(json : JSON::Any) : MessageWrapper
-      MessageWrapper.new(T.from_json(json.to_json))
+      TypedMessageWrapper(T).new(T.from_json(json.to_json))
     end
   end
 
@@ -70,6 +81,13 @@ module Movie::Remote
     # The type must include JSON::Serializable.
     def self.serialize(message : T) : {String, JSON::Any} forall T
       type_name = T.name
+      tag = @@mutex.synchronize { @@type_to_tag[type_name]? } || type_name
+      json = JSON.parse(message.to_json)
+      {tag, json}
+    end
+
+    def self.serialize(message : JSON::Serializable) : {String, JSON::Any}
+      type_name = message.class.name
       tag = @@mutex.synchronize { @@type_to_tag[type_name]? } || type_name
       json = JSON.parse(message.to_json)
       {tag, json}

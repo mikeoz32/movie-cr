@@ -5,6 +5,53 @@ require "./connection_pool"
 require "../path"
 
 module Movie::Remote
+  record RemoteFailedSystemPayload, actor_path : String, error_class : String, message : String do
+    include JSON::Serializable
+  end
+
+  class RemoteUnsupportedSystemMessageError < Exception
+  end
+
+  module SystemMessageCodec
+    extend self
+
+    def serialize(message : Movie::SystemMessage, path_registry : Movie::PathRegistry) : {String, JSON::Any}
+      case message
+      when Movie::Stop
+        {"Movie::Stop", JSON::Any.new({} of String => JSON::Any)}
+      when Movie::Watch
+        {"Movie::Watch", actor_payload(path_for!(message.actor, path_registry, "Movie::Watch"))}
+      when Movie::Unwatch
+        {"Movie::Unwatch", actor_payload(path_for!(message.actor, path_registry, "Movie::Unwatch"))}
+      when Movie::Terminated
+        {"Movie::Terminated", actor_payload(path_for!(message.actor, path_registry, "Movie::Terminated"))}
+      when Movie::Failed
+        cause = message.cause
+        payload = RemoteFailedSystemPayload.new(
+          actor_path: path_for!(message.actor, path_registry, "Movie::Failed").to_s,
+          error_class: cause.try(&.class.name) || "",
+          message: cause.try(&.message) || ""
+        )
+        {"Movie::Failed", JSON.parse(payload.to_json)}
+      else
+        raise RemoteUnsupportedSystemMessageError.new(
+          "Remote system message #{message.class.name} is not supported"
+        )
+      end
+    end
+
+    private def actor_payload(path : ActorPath) : JSON::Any
+      JSON::Any.new({"actor_path" => JSON::Any.new(path.to_s)})
+    end
+
+    private def path_for!(actor : Movie::ActorRefBase, path_registry : Movie::PathRegistry, message_type : String) : ActorPath
+      path_registry.path_for(actor) ||
+        raise RemoteUnsupportedSystemMessageError.new(
+          "#{message_type} requires a registered actor path"
+        )
+    end
+  end
+
   # RemoteActorRef provides a type-safe reference to an actor in a remote system.
   # Messages sent through this reference are serialized and transmitted over TCP.
   # Uses striped connection pools for parallel sending while preserving per-actor ordering.
@@ -74,7 +121,7 @@ module Movie::Remote
 
     # Sends a system message to the remote actor.
     def send_system(message : Movie::SystemMessage)
-      tag, payload = serialize_system_message(message)
+      tag, payload = SystemMessageCodec.serialize(message, @path_registry)
 
       envelope = WireEnvelope.system_message(
         target_path: @target_path.to_s,
@@ -117,9 +164,17 @@ module Movie::Remote
         when response = response_channel.receive?
           if response
             begin
-              wrapper = MessageRegistry.deserialize(response.message_type, response.payload)
-              result = wrapper.unwrap(R)
-              promise.success(result)
+              case response.message_type
+              when RemoteAskResponseSenderRef::ASK_FAILURE_TAG
+                failure = RemoteAskFailurePayload.from_json(response.payload.to_json)
+                promise.failure(RemoteAskError.new(failure.error_class, failure.message))
+              when RemoteAskResponseSenderRef::ASK_CANCELLED_TAG
+                promise.cancel
+              else
+                wrapper = MessageRegistry.deserialize(response.message_type, response.payload)
+                result = wrapper.unwrap(R)
+                promise.success(result)
+              end
             rescue ex
               promise.failure(ex)
             end
@@ -140,44 +195,17 @@ module Movie::Remote
     def connection : Connection
       @dedicated_connection
     end
-
-    private def serialize_system_message(message : Movie::SystemMessage) : {String, JSON::Any}
-      # System messages need special handling since they're not user-registered types
-      case message
-      when Movie::Stop
-        {"Movie::Stop", JSON::Any.new({} of String => JSON::Any)}
-      when Movie::PreStart
-        {"Movie::PreStart", JSON::Any.new({} of String => JSON::Any)}
-      when Movie::PostStart
-        {"Movie::PostStart", JSON::Any.new({} of String => JSON::Any)}
-      when Movie::PreStop
-        {"Movie::PreStop", JSON::Any.new({} of String => JSON::Any)}
-      when Movie::PostStop
-        {"Movie::PostStop", JSON::Any.new({} of String => JSON::Any)}
-      when Movie::Watch
-        # Watch contains an actor ref - we need to serialize the path
-        watch = message.as(Movie::Watch)
-        actor_path = @path_registry.path_for(watch.actor)
-        payload = JSON::Any.new({"actor_path" => JSON::Any.new(actor_path.try(&.to_s) || "")})
-        {"Movie::Watch", payload}
-      when Movie::Unwatch
-        unwatch = message.as(Movie::Unwatch)
-        actor_path = @path_registry.path_for(unwatch.actor)
-        payload = JSON::Any.new({"actor_path" => JSON::Any.new(actor_path.try(&.to_s) || "")})
-        {"Movie::Unwatch", payload}
-      when Movie::Terminated
-        terminated = message.as(Movie::Terminated)
-        actor_path = @path_registry.path_for(terminated.actor)
-        payload = JSON::Any.new({"actor_path" => JSON::Any.new(actor_path.try(&.to_s) || "")})
-        {"Movie::Terminated", payload}
-      else
-        # Generic fallback - just use the class name
-        {message.class.name, JSON::Any.new({} of String => JSON::Any)}
-      end
-    end
   end
 
   # Error raised when a message cannot be delivered to a remote actor.
   class RemoteDeliveryError < Exception
+  end
+
+  class RemoteAskError < Exception
+    getter remote_class : String
+
+    def initialize(@remote_class : String, message : String)
+      super("#{remote_class}: #{message}")
+    end
   end
 end

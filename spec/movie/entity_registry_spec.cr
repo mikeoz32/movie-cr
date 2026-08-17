@@ -11,8 +11,8 @@ module Movie
   end
 
   class PathActor < AbstractBehavior(PathRequest)
-    def receive(message, ctx)
-      path_str = ctx.path.try(&.to_s) || ""
+    def receive(message, context)
+      path_str = context.path.try(&.to_s) || ""
       message.reply_to << path_str
       Behaviors(PathRequest).same
     end
@@ -22,7 +22,7 @@ module Movie
     def initialize(@promise : Promise(String))
     end
 
-    def receive(message, ctx)
+    def receive(message, context)
       @promise.try_success(message)
       Behaviors(String).same
     end

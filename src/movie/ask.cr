@@ -86,14 +86,14 @@ module Movie
     # Best-effort reply that only responds when the sender is an ask listener.
     def self.reply_if_asked(sender : ActorRefBase?, value : T) forall T
       return unless sender
-      return unless sender.as?(ActorRef(Response(T)))
+      return unless sender.as?(ActorRef(Response(T))) || sender.as?(::Movie::Remote::RemoteAskResponseSenderRef)
       reply(sender, Success(T).new(value))
     end
 
     # Best-effort failure reply that only responds when the sender is an ask listener.
     def self.fail_if_asked(sender : ActorRefBase?, error : Exception, response_type : T.class) forall T
       return unless sender
-      return unless sender.as?(ActorRef(Response(T)))
+      return unless sender.as?(ActorRef(Response(T))) || sender.as?(::Movie::Remote::RemoteAskResponseSenderRef)
       reply(sender, Failure(T).new(error))
     end
 
@@ -101,6 +101,19 @@ module Movie
       return unless sender
       if ref = sender.as?(ActorRef(Response(T)))
         ref.tell_from(nil, response)
+      elsif ref = sender.as?(::Movie::Remote::RemoteAskResponseSenderRef)
+        case response
+        when Success(T)
+          if serializable = response.value.as?(JSON::Serializable)
+            ref.reply_success(serializable)
+          else
+            ref.reply_failure(Exception.new("Remote ask response type #{T} is not JSON::Serializable"))
+          end
+        when Failure(T)
+          ref.reply_failure(response.error)
+        when Cancelled(T)
+          ref.reply_cancelled
+        end
       else
         Log.for("Movie::Ask").warn { "Ask reply dropped: sender #{sender.id} is not ActorRef(Response(#{T}))" }
       end

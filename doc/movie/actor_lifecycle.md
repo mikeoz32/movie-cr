@@ -272,6 +272,8 @@ Sender                   ActorRef              Context              Mailbox     
   │                         │                     │                    │                 │
   │                         │                     │                    │──check queue───>│
   │                         │                     │                    │                 │
+```
+
 ### Envelope senders & ask/ack pattern
 
 - Every user message travels inside an `Envelope` that now carries an optional `sender : ActorRefBase?`. While a behavior handles a message it can retrieve the sender via `context.sender`.
@@ -306,7 +308,47 @@ end
 ```
 
 - If the target terminates before replying, the future fails with `Movie::Ask::TargetTerminated`. Optional timeouts passed to `ask` force `FutureTimeout` and stop the temporary listener.
-```
+
+### Async primitives: futures, scheduler, and executor
+
+The actor runtime now relies on three explicit async building blocks. They are related, but they serve different layers of the system and should not be treated as interchangeable.
+
+#### `Future(T)` and `Promise(T)`
+
+- `Future(T)` is the read-side contract used by `ask`, stream materialization, and executor work. A future transitions exactly once from `Pending` to one terminal state: `Success`, `Failure`, or `Cancelled`.
+- `Future#await(timeout)` is a waiting convenience only. If the timeout expires before completion it raises `FutureTimeout`; it does not mutate the future itself and it does not cancel upstream work.
+- `on_complete`, `on_success`, `on_failure`, and `on_cancel` are safe to register both before and after completion. Late subscribers run immediately against the completed result.
+- Exceptions raised by future callbacks are logged and swallowed so they do not corrupt the future's terminal state or break other subscribers.
+- `Promise(T)` is the write-side primitive. Application code can use it when adapting callback-based APIs, but normal actor-to-actor flows should prefer `ask` and typed messages over manual promise completion.
+
+#### `Scheduler`
+
+- `Scheduler#schedule_once` is the public timer primitive. `schedule_message` and `schedule_system_message` are convenience wrappers on top of the same one-shot mechanism.
+- `TimerHandle#cancel` is best-effort before fire. It prevents future delivery if the timer has not fired yet, but it does not preempt a callback that is already executing.
+- Stopping the scheduler prevents new timers from being accepted and suppresses callbacks that have not fired yet.
+- Exceptions raised inside scheduled callbacks are isolated, logged, and do not stop the scheduler dispatcher.
+
+#### `ExecutorExtension`
+
+- `Movie::Execution.get(system)` exposes a bounded worker pool intended for blocking I/O, CPU-heavy mapping, and other work that should not run inline on an actor mailbox.
+- `execute` returns `Future(T)`. `execute_with_reply` bridges the same work into an actor reply channel using `TaskSuccess(T)` and `TaskFailure(T)`.
+- Executor timeouts are response-level guarantees, not cooperative cancellation. A timed out task completes its future or reply path with `FutureTimeout`, but the underlying block may continue running until it returns or raises. Any later result is ignored.
+- After `ExecutorExtension#stop`, new submissions fail fast with `ExecutorStopped` instead of silently dropping work.
+- Queue saturation is backpressure, not rejection. When the bounded queue is full, submission blocks until capacity is available.
+
+#### Stability boundary
+
+Stable for application code:
+
+- `Future(T)` consumption and callback APIs
+- `ActorRef#ask` / `ActorContext#ask`
+- `Scheduler` one-shot timer APIs
+
+Internal or advanced integration surface:
+
+- `Promise(T)` as a manual completion primitive
+- `Execution` / `ExecutorExtension` as a runtime helper
+- `TaskReply(T)`, `TaskSuccess(T)`, and `TaskFailure(T)` as executor-specific protocol messages
 
 #### 3. Graceful Stop
 
@@ -3008,7 +3050,7 @@ The lifecycle from spawning to message processing is well-defined, with clear se
 
 ---
 
-**Document Version**: 1.0  
-**Framework Version**: Movie (Ametist 0.1.0)  
-**Last Updated**: 2024  
-**Author**: System Architecture Documentation
+- **Document Version**: 1.0
+- **Framework Version**: Movie (Ametist 0.1.0)
+- **Last Updated**: 2026
+- **Author**: System Architecture Documentation

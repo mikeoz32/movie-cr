@@ -59,7 +59,7 @@ module Movie
     def initialize(@promise : Promise(Int32))
     end
 
-    def receive(message : Int32, ctx : ActorContext(Int32))
+    def receive(message : Int32, context : ActorContext(Int32))
       @promise.try_success(message)
       Behaviors(Int32).same
     end

@@ -69,20 +69,20 @@ module Movie
       def initialize(@db_uri : String)
       end
 
-      def receive(message, ctx)
+      def receive(message, context)
         case message
         when DbExec
           exec(message)
-          Movie::Ask.reply_if_asked(ctx.sender, true)
+          Movie::Ask.reply_if_asked(context.sender, true)
         when DbExecLastId
           id = exec_last_id(message)
-          Movie::Ask.reply_if_asked(ctx.sender, id)
+          Movie::Ask.reply_if_asked(context.sender, id)
         when DbQueryString
           value = query_string(message)
-          Movie::Ask.reply_if_asked(ctx.sender, value)
+          Movie::Ask.reply_if_asked(context.sender, value)
         when DbQueryStrings
           values = query_strings(message)
-          Movie::Ask.reply_if_asked(ctx.sender, values)
+          Movie::Ask.reply_if_asked(context.sender, values)
         end
         Movie::Behaviors(ConnectionMessage).same
       end
@@ -143,10 +143,10 @@ module Movie
       def initialize(@connections : Array(Movie::ActorRef(ConnectionMessage)))
       end
 
-      def receive(message, ctx)
+      def receive(message, context)
         raise "Connection pool is empty" if @connections.empty?
         connection = next_connection
-        connection.tell_from(ctx.sender, message)
+        connection.tell_from(context.sender, message)
         Movie::Behaviors(ConnectionMessage).same
       end
 
@@ -186,18 +186,18 @@ module Movie
         @entities = {} of Id => Movie::ActorRefBase
       end
 
-      def receive(message, ctx)
+      def receive(message, context)
         case message
         when GetEntity
           if ref = @entities[message.persistence_id]?
-            Movie::Ask.reply_if_asked(ctx.sender, ref)
+            Movie::Ask.reply_if_asked(context.sender, ref)
           else
-            ref = message.spawn.call(ctx, message.persistence_id)
+            ref = message.spawn.call(context, message.persistence_id)
             if ref.path.nil?
-              ref.path = ctx.path.try { |p| p / Persistence.entity_name(message.persistence_id) }
+              ref.path = context.path.try { |p| p / Persistence.entity_name(message.persistence_id) }
             end
             @entities[message.persistence_id] = ref
-            Movie::Ask.reply_if_asked(ctx.sender, ref)
+            Movie::Ask.reply_if_asked(context.sender, ref)
           end
         end
         Movie::Behaviors(RegistryMessage).same
@@ -256,15 +256,15 @@ module Movie
       def initialize(@pool : Movie::ActorRef(ConnectionMessage), @timeout : Time::Span = 5.seconds)
       end
 
-      def receive(message, ctx)
-        ensure_schema(ctx)
+      def receive(message, context)
+        ensure_schema(context)
         case message
         when AppendEvent
-          seq = append_event(ctx, message.persistence_id, message.payload)
-          Movie::Ask.reply_if_asked(ctx.sender, seq)
+          seq = append_event(context, message.persistence_id, message.payload)
+          Movie::Ask.reply_if_asked(context.sender, seq)
         when LoadEvents
-          events = load_events(ctx, message.persistence_id)
-          Movie::Ask.reply_if_asked(ctx.sender, events)
+          events = load_events(context, message.persistence_id)
+          Movie::Ask.reply_if_asked(context.sender, events)
         end
         Movie::Behaviors(EventStoreMessage).same
       end
@@ -317,18 +317,18 @@ module Movie
       def initialize(@pool : Movie::ActorRef(ConnectionMessage), @timeout : Time::Span = 5.seconds)
       end
 
-      def receive(message, ctx)
-        ensure_schema(ctx)
+      def receive(message, context)
+        ensure_schema(context)
         case message
         when SaveState
-          save_state(ctx, message.persistence_id, message.payload)
-          Movie::Ask.reply_if_asked(ctx.sender, true)
+          save_state(context, message.persistence_id, message.payload)
+          Movie::Ask.reply_if_asked(context.sender, true)
         when LoadState
-          payload = load_state(ctx, message.persistence_id)
-          Movie::Ask.reply_if_asked(ctx.sender, payload)
+          payload = load_state(context, message.persistence_id)
+          Movie::Ask.reply_if_asked(context.sender, payload)
         when DeleteState
-          delete_state(ctx, message.persistence_id)
-          Movie::Ask.reply_if_asked(ctx.sender, true)
+          delete_state(context, message.persistence_id)
+          Movie::Ask.reply_if_asked(context.sender, true)
         end
         Movie::Behaviors(StateStoreMessage).same
       end
