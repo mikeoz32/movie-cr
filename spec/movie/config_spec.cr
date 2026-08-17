@@ -160,6 +160,19 @@ describe Movie::Config do
     end
   end
 
+  describe "canonical runtime configuration keys" do
+    it "publishes dotted defaults for all runtime extensions" do
+      defaults = Movie::ActorSystemConfig.default
+
+      defaults.get_int("supervision.max.restarts").should eq(3)
+      defaults.get_int("remoting.stripe.count").should eq(8)
+      defaults.get_int("executor.pool.size").should eq(4)
+      defaults.get_int("executor.queue.capacity").should eq(128)
+      defaults.get_string("persistence.db.path").should eq("data/movie_persistence.sqlite3")
+      defaults.get_int("persistence.pool.size").should eq(1)
+    end
+  end
+
   describe "#get_string" do
     it "returns string value" do
       config = Movie::Config.builder.set("key", "value").build
@@ -514,6 +527,27 @@ describe Movie::Config do
       ensure
         ENV.delete("MOVIE_TEST_REMOTING_HOST")
         ENV.delete("MOVIE_TEST_REMOTING_PORT")
+      end
+    end
+
+    it "maps runtime environment variables to canonical dotted keys" do
+      ENV["MOVIE_TEST_EXECUTOR_POOL_SIZE"] = "12"
+      ENV["MOVIE_TEST_EXECUTOR_QUEUE_CAPACITY"] = "64"
+      ENV["MOVIE_TEST_REMOTING_STRIPE_COUNT"] = "6"
+      ENV["MOVIE_TEST_PERSISTENCE_DB_PATH"] = "/tmp/movie.sqlite3"
+
+      begin
+        config = Movie::Config.empty.with_env_overrides("MOVIE_TEST")
+
+        config.get_int("executor.pool.size").should eq(12)
+        config.get_int("executor.queue.capacity").should eq(64)
+        config.get_int("remoting.stripe.count").should eq(6)
+        config.get_string("persistence.db.path").should eq("/tmp/movie.sqlite3")
+      ensure
+        ENV.delete("MOVIE_TEST_EXECUTOR_POOL_SIZE")
+        ENV.delete("MOVIE_TEST_EXECUTOR_QUEUE_CAPACITY")
+        ENV.delete("MOVIE_TEST_REMOTING_STRIPE_COUNT")
+        ENV.delete("MOVIE_TEST_PERSISTENCE_DB_PATH")
       end
     end
 

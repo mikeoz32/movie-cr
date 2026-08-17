@@ -147,4 +147,18 @@ describe Movie::ActorSystem do
     system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same, config)
     system.shutdown
   end
+
+  it "uses the canonical remoting stripe key" do
+    config = Movie::ActorSystemConfig.default.with_override(
+      Movie::Config.builder
+        .set("remoting.enabled", true)
+        .set("remoting.port", 0)
+        .set("remoting.stripe.count", 3)
+        .build
+    )
+
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same, config)
+    system.remote.not_nil!.stripe_count.should eq(3)
+    system.shutdown
+  end
 end

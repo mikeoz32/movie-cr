@@ -934,7 +934,7 @@ module Movie
 
       host = @config.get_string("remoting.host", "127.0.0.1")
       port = @config.get_int("remoting.port", 2552)
-      stripe_count = @config.get_int("remoting.stripe-count", Remote::StripedConnectionPool::DEFAULT_STRIPE_COUNT)
+      stripe_count = @config.get_int("remoting.stripe.count", Remote::StripedConnectionPool::DEFAULT_STRIPE_COUNT)
       enable_remoting(host, port, stripe_count)
     end
 
