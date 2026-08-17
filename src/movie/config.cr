@@ -163,7 +163,7 @@ module Movie
 
     # Returns true if the given path exists in the config.
     def has_path?(path : String) : Bool
-      !get_value(path).nil?
+      lookup(path)[:found]
     end
 
     # --- String accessors ---
@@ -183,15 +183,8 @@ module Movie
 
     # Returns the string value at the given path, or default if not found.
     def get_string(path : String, default : String) : String
-      value = get_value(path)
-      case value
-      when String
-        value
-      when Nil
-        default
-      else
-        raise WrongTypeConfigError.new(path, "String", value.class.name)
-      end
+      return default unless has_path?(path)
+      get_string(path)
     end
 
     # --- Integer accessors ---
@@ -384,31 +377,15 @@ module Movie
 
     # Returns the raw value at the given path, or nil if not found.
     def get_value(path : String) : ConfigValue
-      parts = path.split('.')
-      current : ConfigValue = @root
-
-      parts.each do |part|
-        case current
-        when Hash(String, ConfigValue)
-          if current.has_key?(part)
-            current = current[part]
-          else
-            return nil
-          end
-        else
-          return nil
-        end
-      end
-
-      current
+      lookup(path)[:value]
     end
 
     # Returns the raw value at the given path.
     # Raises MissingConfigError if path doesn't exist.
     def get_value!(path : String) : ConfigValue
-      value = get_value(path)
-      raise MissingConfigError.new(path) if value.nil?
-      value
+      result = lookup(path)
+      raise MissingConfigError.new(path) unless result[:found]
+      result[:value]
     end
 
     # Subscript access - returns raw ConfigValue
@@ -419,6 +396,23 @@ module Movie
     # Subscript access with nil for missing paths
     def []?(path : String) : ConfigValue
       get_value(path)
+    end
+
+    private def lookup(path : String) : NamedTuple(found: Bool, value: ConfigValue)
+      parts = path.split('.')
+      current : ConfigValue = @root
+
+      parts.each do |part|
+        case current
+        when Hash(String, ConfigValue)
+          return {found: false, value: nil} unless current.has_key?(part)
+          current = current[part]
+        else
+          return {found: false, value: nil}
+        end
+      end
+
+      {found: true, value: current}
     end
 
     # --- Merging ---
@@ -693,6 +687,11 @@ module Movie
     end
 
     def set(path : String, value : Bool) : self
+      set_value(path, value.as(ConfigValue))
+      self
+    end
+
+    def set(path : String, value : Nil) : self
       set_value(path, value.as(ConfigValue))
       self
     end

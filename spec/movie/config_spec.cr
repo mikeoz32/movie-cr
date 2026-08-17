@@ -72,6 +72,45 @@ describe Movie::Config do
     end
   end
 
+  describe "explicit null values" do
+    it "keeps null paths present and distinguishes them from missing paths" do
+      config = Movie::Config.from_json(%({"nullable": null, "nested": {"value": null}}))
+
+      config.has_path?("nullable").should be_true
+      config.has_path?("nested.value").should be_true
+      config.has_path?("missing").should be_false
+
+      config.get_value!("nullable").should be_nil
+      config["nullable"].should be_nil
+      config["nullable"]?.should be_nil
+
+      expect_raises(Movie::MissingConfigError) do
+        config.get_value!("missing")
+      end
+    end
+
+    it "treats null as a wrong type for typed accessors instead of missing" do
+      config = Movie::Config.from_yaml("nullable: null")
+
+      expect_raises(Movie::WrongTypeConfigError) do
+        config.get_string("nullable")
+      end
+
+      expect_raises(Movie::WrongTypeConfigError) do
+        config.get_string("nullable", "fallback")
+      end
+    end
+
+    it "allows explicit null values in the config builder" do
+      config = Movie::Config.builder
+        .set("nullable", nil)
+        .build
+
+      config.has_path?("nullable").should be_true
+      config.get_value!("nullable").should be_nil
+    end
+  end
+
   describe "#get_string" do
     it "returns string value" do
       config = Movie::Config.builder.set("key", "value").build
