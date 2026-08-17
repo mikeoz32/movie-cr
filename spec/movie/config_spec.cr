@@ -146,6 +146,20 @@ describe Movie::Config do
     end
   end
 
+  describe "ActorSystemConfig strategy parsing" do
+    it "keeps actor restart strategy independent from supervision strategy" do
+      config = Movie::ActorSystemConfig.default.with_override(
+        Movie::Config.builder
+          .set("actor.restart.strategy", "stop")
+          .set("supervision.strategy", "resume")
+          .build
+      )
+
+      Movie::ActorSystemConfig.restart_strategy(config).should eq(Movie::RestartStrategy::STOP)
+      Movie::ActorSystemConfig.supervision_config(config).strategy.should eq(Movie::SupervisionStrategy::RESUME)
+    end
+  end
+
   describe "#get_string" do
     it "returns string value" do
       config = Movie::Config.builder.set("key", "value").build

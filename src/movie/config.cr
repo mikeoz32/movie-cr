@@ -810,6 +810,7 @@ module Movie
   #
   # Configuration paths:
   #   name                           - Actor system name (default: auto-generated)
+  #   actor.restart.strategy         - Root actor restart strategy: restart|stop
   #   supervision.strategy           - Default supervision strategy: restart|stop|resume|escalate
   #   supervision.scope              - Supervision scope: one-for-one|all-for-one
   #   supervision.max-restarts       - Max restarts before giving up
@@ -829,6 +830,7 @@ module Movie
       Config.builder
         # System
         .set("name", "")  # Empty means auto-generate
+        .set("actor.restart.strategy", "restart")
 
         # Supervision defaults
         .set("supervision.strategy", "restart")
@@ -897,7 +899,7 @@ module Movie
 
     # Creates a RestartStrategy from a Config.
     def self.restart_strategy(config : Config) : RestartStrategy
-      parse_restart_strategy(config.get_string("supervision.strategy", "restart"))
+      parse_restart_strategy(config.get_string("actor.restart.strategy", "restart"))
     end
   end
 end

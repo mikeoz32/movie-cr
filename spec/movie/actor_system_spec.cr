@@ -138,4 +138,13 @@ describe Movie::ActorSystem do
 
     receive_events(events, 1, 300.milliseconds).should be_empty
   end
+
+  it "allows resume supervision without using it as the root restart strategy" do
+    config = Movie::ActorSystemConfig.default.with_override(
+      Movie::Config.builder.set("supervision.strategy", "resume").build
+    )
+
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same, config)
+    system.shutdown
+  end
 end
