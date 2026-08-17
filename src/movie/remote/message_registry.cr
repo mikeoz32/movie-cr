@@ -25,7 +25,7 @@ module Movie::Remote
     end
 
     def deliver_to(context : ::Movie::AbstractActorContext, sender : ::Movie::ActorRefBase?) : Nil
-      context.as(::Movie::ActorContext(T)).deliver(@value, sender)
+      context.deliver_serializable(@value, sender)
     end
   end
 

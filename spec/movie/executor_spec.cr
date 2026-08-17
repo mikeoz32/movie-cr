@@ -104,6 +104,44 @@ describe Movie::ExecutorExtension do
     third.await(100.milliseconds).should eq(3)
   end
 
+  it "starts the configured worker pool only once under concurrent first submissions" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    executor = Movie::ExecutorExtension.new(system, 1, 64)
+    ready = Channel(Nil).new(32)
+    start = Channel(Nil).new(32)
+    submitted = Channel(Movie::Future(Int32)).new(32)
+    active = Atomic(Int32).new(0)
+    maximum_active = Atomic(Int32).new(0)
+
+    32.times do
+      spawn do
+        ready.send(nil)
+        start.receive
+        submitted.send(executor.execute do
+          current = active.add(1) + 1
+          loop do
+            previous = maximum_active.get
+            break if previous >= current
+            _, updated = maximum_active.compare_and_set(previous, current)
+            break if updated
+          end
+          sleep 10.milliseconds
+          active.add(-1)
+          1
+        end)
+      end
+    end
+
+    32.times { ready.receive }
+    32.times { start.send(nil) }
+
+    futures = Array(Movie::Future(Int32)).new(32)
+    32.times { futures << submitted.receive }
+    futures.each(&.await(2.seconds))
+
+    maximum_active.get.should eq(1)
+  end
+
   it "reports task exceptions through futures and keeps workers alive" do
     system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
     executor = Movie::ExecutorExtension.new(system, 1, 2)

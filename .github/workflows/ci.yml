@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  specs:
+    runs-on: ubuntu-latest
+    container: crystallang/crystal:1.19.1
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install shards
+        run: shards install
+      - name: Run specs
+        run: crystal spec spec/movie -Dpreview_mt -Dexecution_context
+      - name: Build examples
+        run: |
+          for file in examples/*.cr; do
+            crystal build "$file" -Dpreview_mt -Dexecution_context -o "/tmp/movie-$(basename "$file" .cr)"
+          done

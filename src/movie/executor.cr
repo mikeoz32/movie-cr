@@ -11,12 +11,12 @@ module Movie
     @pool_size : Int32
     @queue_capacity : Int32
     @task_queue : Channel(Proc(Nil))
-    @started : Bool
+    @started : Atomic(Bool)
     @stopped : Atomic(Bool)
 
     def initialize(@system : AbstractActorSystem, @pool_size : Int32 = 4, @queue_capacity : Int32 = 128)
       @task_queue = Channel(Proc(Nil)).new(@queue_capacity)
-      @started = false
+      @started = Atomic(Bool).new(false)
       @stopped = Atomic(Bool).new(false)
     end
 
@@ -34,8 +34,10 @@ module Movie
     end
 
     private def ensure_started
-      return if @started || @stopped.get
-      @started = true
+      return if @stopped.get
+      _, started = @started.compare_and_set(false, true)
+      return unless started
+      return if @stopped.get
 
       @pool_size.times do
         @system.dispatchers.internal.execute do

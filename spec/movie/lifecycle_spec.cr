@@ -61,6 +61,27 @@ private class FailingOnStart < Movie::AbstractBehavior(String)
   end
 end
 
+private class StartsAfterFirstFailure < Movie::AbstractBehavior(Symbol)
+  def initialize(@events : Channel(String))
+    @failed_once = Atomic(Bool).new(false)
+  end
+
+  def receive(message, context)
+    Movie::Behaviors(Symbol).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    return unless signal.is_a?(Movie::PreStart)
+
+    _, should_fail = @failed_once.compare_and_set(false, true)
+    if should_fail
+      raise "boom during first pre-start"
+    else
+      @events.send("started")
+    end
+  end
+end
+
 private class StartupFailureObserver < Movie::AbstractBehavior(Symbol)
   def initialize(@events : Channel(String))
     @spawn_count = 0
@@ -71,7 +92,9 @@ private class StartupFailureObserver < Movie::AbstractBehavior(Symbol)
     when :spawn_failing_child
       child_name = "failing-child-#{@spawn_count}"
       @spawn_count += 1
-      context.spawn(FailingOnStart.new, name: child_name)
+      context.spawn(FailingOnStart.new, Movie::RestartStrategy::STOP, name: child_name)
+    when :spawn_restartable_child
+      context.spawn(StartsAfterFirstFailure.new(@events), name: "restartable-startup-child")
     end
 
     Movie::Behaviors(Symbol).same
@@ -155,6 +178,32 @@ describe "Movie actor lifecycle" do
 
     received.count(&.starts_with?("failed:")).should eq(20)
     received.count(&.starts_with?("terminated:")).should eq(20)
+  end
+
+  it "restarts a child whose first pre-start attempt fails" do
+    events = Channel(String).new(4)
+    supervision = Movie::SupervisionConfig.new(
+      strategy: Movie::SupervisionStrategy::RESTART,
+      scope: Movie::SupervisionScope::ONE_FOR_ONE,
+      max_restarts: 3,
+      within: 1.second,
+      backoff_min: 100.milliseconds,
+      backoff_max: 100.milliseconds,
+      backoff_factor: 1.0,
+      jitter: 0.0
+    )
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same, Movie::RestartStrategy::RESTART, supervision)
+    observer = system.spawn(StartupFailureObserver.new(events), name: "startup-restart-observer")
+
+    observer << :spawn_restartable_child
+    events.receive.should start_with("failed:")
+
+    select
+    when event = events.receive
+      event.should eq("started")
+    when timeout(500.milliseconds)
+      fail "startup failure did not restart the child"
+    end
   end
 
   it "does not block unrelated messages during supervision backoff" do

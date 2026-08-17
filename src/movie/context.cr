@@ -1,8 +1,11 @@
+require "json"
+
 module Movie
   abstract class AbstractActorContext
     abstract def ref : ActorRefBase
     abstract def path : ActorPath?
     abstract def rebind_path(path : ActorPath?) : Nil
+    abstract def deliver_serializable(message : Object, sender : ActorRefBase?) : Nil
   end
 
   class ActorContext(T) < AbstractActorContext
@@ -215,6 +218,13 @@ module Movie
       raise "Mailbox not initialized" unless @mailbox
       mbox = @mailbox.as(Mailbox(T))
       mbox << Envelope(T).new(message.as(T), sender || @system.dead_letters)
+    end
+
+    # Delivers a deserialized wire value without requiring the wire wrapper to
+    # know the actor's full generic message type (which may be a union).
+    def deliver_serializable(message : Object, sender : ActorRefBase?) : Nil
+      typed_message = message.as?(T) || raise TypeCastError.new("Remote message is not accepted by actor context")
+      deliver(typed_message, sender)
     end
 
     def send_system_message(message : SystemMessage)
@@ -435,7 +445,7 @@ module Movie
     rescue ex : Exception
       notify_for_failure(ex)
       transition_to(State::FAILED)
-      send_system_message(STOP)
+      apply_restart_strategy(ex)
     end
 
     protected def handle_post_start

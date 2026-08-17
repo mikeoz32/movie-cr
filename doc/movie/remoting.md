@@ -13,7 +13,7 @@ The current protocol supports:
 - TCP connections managed through striped connection pools;
 - binding to port `0` for test or dynamically allocated local ports.
 
-The protocol does not currently provide authentication, encryption, reconnection, delivery acknowledgements, protocol version negotiation, or durable delivery guarantees.
+The protocol does not currently provide authentication, encryption, reconnection, delivery acknowledgements, protocol version negotiation, or durable delivery guarantees. Remote watcher registrations are tied to the connection that created them; a disconnect does not currently purge those watcher references automatically, so applications must unwatch or recreate watchers after reconnecting.
 
 ## Message Registration
 
@@ -111,7 +111,7 @@ client.shutdown
 server.shutdown
 ```
 
-`ActorSystem#shutdown` stops registered extensions, closes remoting connections, stops actors, and is idempotent.
+`ActorSystem#shutdown` stops the actor tree first, then registered extensions and remoting connections, and finally scheduler infrastructure. This ordering lets actor `PreStop`/`PostStop` cleanup use registered extensions and the scheduler. Shutdown is idempotent.
 
 ## Verification
 

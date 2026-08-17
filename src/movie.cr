@@ -1014,14 +1014,19 @@ module Movie
         unless @shutdown_started
           @shutdown_started = true
           should_initiate_shutdown = true
-          @scheduler.try &.stop
           root_guardian = @registry.as(ActorRegistry).root_guardian if @registry
         end
       end
 
       if should_initiate_shutdown
-        @extensions.stop_all
         root_guardian.try &.send_system(STOP)
+        begin
+          wait_for_shutdown(timeout)
+        ensure
+          # Let actors use extensions and scheduler during PreStop/PostStop.
+          @extensions.stop_all
+          @scheduler.try &.stop
+        end
       end
 
       wait_for_shutdown(timeout)

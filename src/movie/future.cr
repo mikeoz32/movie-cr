@@ -144,7 +144,8 @@ module Movie
         if terminal?
           snapshot = FutureResult(T).new(@status, @value, @error)
         else
-          wait_ch = Channel(Nil).new
+          # Completion must never block if a timeout has already abandoned the waiter.
+          wait_ch = Channel(Nil).new(1)
           @waiters << wait_ch
         end
       end

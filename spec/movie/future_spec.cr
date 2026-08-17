@@ -147,6 +147,31 @@ describe Movie::Future do
     future.await(200.milliseconds).should eq(11)
   end
 
+  it "does not block completion when timeout races with a waiter" do
+    200.times do
+      promise = Movie::Promise(Int32).new
+      completed = Channel(Nil).new(1)
+
+      spawn do
+        begin
+          promise.future.await(1.nanosecond)
+        rescue Movie::FutureTimeout
+        end
+      end
+
+      spawn do
+        promise.try_success(1)
+        completed.send(nil)
+      end
+
+      select
+      when completed.receive
+      when timeout(100.milliseconds)
+        fail "future completion blocked behind a timed-out waiter"
+      end
+    end
+  end
+
   it "rejects a second completion attempt" do
     promise = Movie::Promise(Int32).new
 

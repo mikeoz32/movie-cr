@@ -105,7 +105,7 @@ describe Movie::ActorSystem do
     sender_id.should eq(system.dead_letters.id)
   end
 
-  it "shuts down extensions before stopping actors and is idempotent" do
+  it "stops actors before extensions and is idempotent" do
     events = Channel(String).new(8)
     system = Movie::ActorSystem(Symbol).new(ShutdownRootProbe.new(events))
     extension = ShutdownRecordingExtension.new(events)
@@ -117,9 +117,11 @@ describe Movie::ActorSystem do
     system.shutdown
 
     received = receive_events(events, 3, 1.second)
-    received.first?.should eq("extension_stop")
     received.should contain("child_pre_stop")
     received.should contain("root_pre_stop")
+    extension_index = received.index("extension_stop").not_nil!
+    received.index("child_pre_stop").not_nil!.should be < extension_index
+    received.index("root_pre_stop").not_nil!.should be < extension_index
     extension.stop_count.get.should eq(1)
 
     system.shutdown
