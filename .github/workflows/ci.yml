@@ -11,6 +11,10 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: |
+          apt-get update
+          apt-get install -y libsqlite3-dev
       - name: Install shards
         run: shards install
       - name: Run specs
