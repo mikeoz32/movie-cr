@@ -111,6 +111,41 @@ describe Movie::Config do
     end
   end
 
+  describe "configuration parser errors" do
+    it "wraps invalid integer and float strings as ConfigError" do
+      config = Movie::Config.builder
+        .set("integer", "not-an-integer")
+        .set("float", "not-a-float")
+        .build
+
+      expect_raises(Movie::ConfigError) do
+        config.get_int("integer")
+      end
+
+      expect_raises(Movie::ConfigError) do
+        config.get_float("float")
+      end
+    end
+
+    it "wraps invalid duration strings as ConfigError" do
+      config = Movie::Config.builder.set("timeout", "not-a-duration").build
+
+      expect_raises(Movie::ConfigError) do
+        config.get_duration("timeout")
+      end
+    end
+
+    it "wraps malformed YAML and JSON as ConfigError" do
+      expect_raises(Movie::ConfigError) do
+        Movie::Config.from_yaml("name: [unterminated")
+      end
+
+      expect_raises(Movie::ConfigError) do
+        Movie::Config.from_json(%({"name": "unterminated"))
+      end
+    end
+  end
+
   describe "#get_string" do
     it "returns string value" do
       config = Movie::Config.builder.set("key", "value").build

@@ -80,6 +80,10 @@ module Movie
       else
         raise ConfigError.new("YAML root must be a mapping/object")
       end
+    rescue ex : ConfigError
+      raise ex
+    rescue ex : Exception
+      raise ConfigError.new("Invalid YAML configuration: #{ex.message}")
     end
 
     # Loads a Config from a YAML file.
@@ -118,6 +122,10 @@ module Movie
       else
         raise ConfigError.new("JSON root must be an object")
       end
+    rescue ex : ConfigError
+      raise ex
+    rescue ex : Exception
+      raise ConfigError.new("Invalid JSON configuration: #{ex.message}")
     end
 
     # Loads a Config from a JSON file.
@@ -212,7 +220,11 @@ module Movie
       when Float64
         value.to_i64
       when String
-        value.to_i64
+        begin
+          value.to_i64
+        rescue ex : ArgumentError
+          raise ConfigError.new("Invalid Int64 at '#{path}': #{ex.message}")
+        end
       else
         raise WrongTypeConfigError.new(path, "Int64", value.class.name)
       end
@@ -238,7 +250,11 @@ module Movie
       when Int64
         value.to_f64
       when String
-        value.to_f64
+        begin
+          value.to_f64
+        rescue ex : ArgumentError
+          raise ConfigError.new("Invalid Float64 at '#{path}': #{ex.message}")
+        end
       else
         raise WrongTypeConfigError.new(path, "Float64", value.class.name)
       end
