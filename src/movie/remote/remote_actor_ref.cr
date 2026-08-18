@@ -68,11 +68,20 @@ module Movie::Remote
       @system : Movie::AbstractActorSystem,
       @pool : StripedConnectionPool,
       @target_path : ActorPath,
-      @path_registry : Movie::PathRegistry
+      @path_registry : Movie::PathRegistry,
     )
-      super(@system.next_id)
+      super(0, @target_path)
       # Get consistent connection for this actor (preserves message ordering)
       @dedicated_connection = @pool.connection_for(@target_path)
+    end
+
+    def ==(other : Movie::ActorRefBase) : Bool
+      other_path = other.path
+      !other_path.nil? && other_path == @target_path
+    end
+
+    def hash(hasher)
+      @target_path.hash(hasher)
     end
 
     # Sends a message to the remote actor (fire-and-forget).
@@ -83,10 +92,10 @@ module Movie::Remote
     # Sends a message to the remote actor with sender information.
     def tell_from(sender : Movie::ActorRefBase?, message : T)
       sender_path_str = if sender
-        @path_registry.path_for(sender).try(&.to_s)
-      else
-        nil
-      end
+                          @path_registry.path_for(sender).try(&.to_s)
+                        else
+                          nil
+                        end
 
       tag, payload = MessageRegistry.serialize(message)
 

@@ -41,6 +41,7 @@ module Movie::Remote
   class MessageRegistry
     @@deserializers = {} of String => MessageDeserializer
     @@type_to_tag = {} of String => String
+    @@tag_to_type = {} of String => String
     @@mutex = Mutex.new
 
     # Registers a message type with optional custom tag.
@@ -62,11 +63,18 @@ module Movie::Remote
     def self.register_type(
       tag : String,
       type_name : String,
-      deserializer : MessageDeserializer
+      deserializer : MessageDeserializer,
     )
       @@mutex.synchronize do
+        if existing_type = @@tag_to_type[tag]?
+          raise ArgumentError.new("Message tag #{tag} is already registered for #{existing_type}") unless existing_type == type_name
+        end
+        if existing_tag = @@type_to_tag[type_name]?
+          raise ArgumentError.new("Message type #{type_name} is already registered with tag #{existing_tag}") unless existing_tag == tag
+        end
         @@deserializers[tag] = deserializer
         @@type_to_tag[type_name] = tag
+        @@tag_to_type[tag] = type_name
       end
     end
 
@@ -117,6 +125,7 @@ module Movie::Remote
       @@mutex.synchronize do
         @@deserializers.clear
         @@type_to_tag.clear
+        @@tag_to_type.clear
       end
     end
   end

@@ -10,11 +10,24 @@ record CounterMessage, count : Int32 do
   include JSON::Serializable
 end
 
+private class StressDeliveryProbe < Movie::AbstractBehavior(StressMessage)
+  getter received : Atomic(Int32)
+
+  def initialize
+    @received = Atomic(Int32).new(0)
+  end
+
+  def receive(message, context)
+    @received.add(1)
+    Movie::Behaviors(StressMessage).same
+  end
+end
+
 # Helper to wait with timeout
-def wait_until_stress(timeout_ms : Int32 = 5000, interval_ms : Int32 = 10)
-  deadline = Time.monotonic + timeout_ms.milliseconds
+def wait_until_stress(timeout_ms : Int32 = 5000, interval_ms : Int32 = 10, &)
+  deadline = Time.instant + timeout_ms.milliseconds
   until yield
-    raise "Timeout waiting for condition" if Time.monotonic >= deadline
+    raise "Timeout waiting for condition" if Time.instant >= deadline
     sleep(interval_ms.milliseconds)
   end
 end
@@ -54,7 +67,7 @@ describe "Movie Remote Stress Tests" do
       puts "  Successful: #{successful_connections.get}"
       puts "  Rate: #{(cycles / elapsed.total_seconds).round(0)} connections/sec"
 
-      successful_connections.get.should be >= (cycles * 0.9).to_i  # 90% success rate
+      successful_connections.get.should be >= (cycles * 0.9).to_i # 90% success rate
 
       extension.stop
     end
@@ -247,27 +260,31 @@ describe "Movie Remote Stress Tests" do
       successful_ops = Atomic(Int32).new(0)
 
       elapsed = Time.measure do
-        operations.times do |i|
-          ref = system.spawn(Movie::Behaviors(String).same)
-          path = Movie::ActorPath.new(address, ["user", "temp-#{i}"])
+        workers = 5
+        per_worker = operations // workers
+        channels = (0...workers).map do |worker|
+          done = Channel(Nil).new(1)
+          spawn do
+            per_worker.times do |offset|
+              i = worker * per_worker + offset
+              ref = system.spawn(Movie::Behaviors(String).same)
+              path = Movie::ActorPath.new(address, ["user", "temp-#{i}"])
 
-          registry.register(ref, path)
+              registry.register(ref, path)
+              successful_ops.add(1) if registry.resolve(path) == ref.id
 
-          # Verify registration
-          if registry.resolve(path) == ref.id
-            successful_ops.add(1)
+              registry.unregister(ref)
+              successful_ops.add(1) if registry.resolve(path).nil?
+            end
+            done.send(nil)
           end
-
-          registry.unregister(ref)
-
-          # Verify unregistration
-          if registry.resolve(path).nil?
-            successful_ops.add(1)
-          end
+          done
         end
+
+        channels.each(&.receive)
       end
 
-      expected_ops = operations * 2  # register + unregister verification
+      expected_ops = operations * 2 # register + unregister verification
       puts "\n  Registration churn: #{operations} actors in #{elapsed.total_milliseconds.round(2)}ms"
       puts "  Rate: #{(operations / elapsed.total_seconds).round(0)} actors/sec"
       puts "  Successful verifications: #{successful_ops.get}/#{expected_ops}"
@@ -285,6 +302,8 @@ describe "Movie Remote Stress Tests" do
       )
       server_ext = server_system.enable_remoting("127.0.0.1", 0)
       server_port = server_ext.local_port
+      probe = StressDeliveryProbe.new
+      server_system.spawn(probe, name: "actor")
 
       # Client connects
       client_socket = TCPSocket.new("127.0.0.1", server_port)
@@ -294,10 +313,12 @@ describe "Movie Remote Stress Tests" do
       sent = Atomic(Int32).new(0)
       errors = Atomic(Int32).new(0)
 
-      payload = JSON::Any.new({"id" => JSON::Any.new(0_i64), "payload" => JSON::Any.new("test")})
+      handshake = Movie::Remote::WireEnvelope.handshake("tcp-client", "movie.tcp://tcp-client@127.0.0.1:0")
+      Movie::Remote::FrameCodec.encode(handshake, client_socket)
 
       elapsed = Time.measure do
         num_messages.times do |i|
+          payload = JSON::Any.new({"id" => JSON::Any.new(i.to_i64), "payload" => JSON::Any.new("test")})
           envelope = Movie::Remote::WireEnvelope.user_message(
             target_path: "movie://tcp-server/user/actor",
             message_type: "StressMessage",
@@ -318,6 +339,7 @@ describe "Movie Remote Stress Tests" do
       puts "  Errors: #{errors.get}"
 
       sent.get.should be >= (num_messages * 0.95).to_i
+      wait_until_stress { probe.received.get == sent.get }
 
       client_socket.close
       server_ext.stop

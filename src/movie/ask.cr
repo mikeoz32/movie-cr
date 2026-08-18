@@ -31,17 +31,35 @@ module Movie
     class AskState(T)
       getter promise : Promise(T)
       @timer_handle : Atomic(TimerHandle?)
+      @timer_cancelled : Atomic(Bool)
+      @listener : Atomic(ActorRefBase?)
+      @listener_stop_requested : Atomic(Bool)
 
       def initialize(@promise : Promise(T))
         @timer_handle = Atomic(TimerHandle?).new(nil)
+        @timer_cancelled = Atomic(Bool).new(false)
+        @listener = Atomic(ActorRefBase?).new(nil)
+        @listener_stop_requested = Atomic(Bool).new(false)
       end
 
       def timer_handle=(handle : TimerHandle)
         @timer_handle.set(handle)
+        handle.cancel if @timer_cancelled.get
       end
 
       def cancel_timer
+        @timer_cancelled.set(true)
         @timer_handle.get.try &.cancel
+      end
+
+      def listener=(listener : ActorRefBase)
+        @listener.set(listener)
+        listener.send_system(STOP) if @listener_stop_requested.get
+      end
+
+      def stop_listener
+        @listener_stop_requested.set(true)
+        @listener.get.try &.send_system(STOP)
       end
     end
 
@@ -70,6 +88,7 @@ module Movie
           if terminated.actor == @target && @state.promise.future.pending?
             @state.cancel_timer
             @state.promise.try_failure(TargetTerminated.new(@target))
+            @state.stop_listener
           end
         end
       end

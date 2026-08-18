@@ -49,7 +49,7 @@ reply = remote.ask(Request.new("hello"), Response).await(2.seconds)
 
 Remote ask failures, connection loss, and timeouts complete the returned future with an exception. The supported remote system messages are `Stop`, `Watch`, `Unwatch`, `Terminated`, and `Failed`. Lifecycle messages such as `PreStart`, `PostStart`, `PreStop`, `PostStop`, and `Restart` are intentionally unsupported and raise `RemoteUnsupportedSystemMessageError` when sent through the remote protocol.
 
-The high-level `ActorContext#watch` and `ActorContext#ask` APIs currently accept local typed `ActorRef` values only. Use `RemoteActorRef#ask` for remote request/response, and use the low-level `send_system` API for remote watch operations when the watcher has a registered actor path. Binding to port `0` is supported; use `RemoteExtension#local_port` and the actor's rebound path after startup.
+The high-level `ActorRef#ask`, `ActorContext#watch`, and `ActorContext#ask` APIs currently accept local typed `ActorRef` values only. Use `RemoteActorRef#ask` for remote request/response, and use the low-level `send_system` API for remote watch operations when the watcher has a registered actor path. Binding to port `0` is supported; use `RemoteExtension#local_port` and the actor's rebound path after startup.
 
 See [doc/movie/remoting.md](doc/movie/remoting.md) and [examples/remoting_example.cr](examples/remoting_example.cr) for the complete supported workflow.
 

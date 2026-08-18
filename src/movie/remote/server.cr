@@ -22,7 +22,7 @@ module Movie::Remote
       @host : String,
       @port : Int32,
       @path_registry : Movie::PathRegistry,
-      @on_message : Proc(WireEnvelope, InboundConnection, Nil)
+      @on_message : Proc(WireEnvelope, InboundConnection, Nil),
     )
       @connections = [] of InboundConnection
       @connections_mutex = Mutex.new
@@ -138,7 +138,7 @@ module Movie::Remote
       @socket : TCPSocket,
       @server : Server,
       @path_registry : Movie::PathRegistry,
-      @on_message : Proc(WireEnvelope, InboundConnection, Nil)
+      @on_message : Proc(WireEnvelope, InboundConnection, Nil),
     )
       @write_mutex = Mutex.new
     end
@@ -198,16 +198,21 @@ module Movie::Remote
 
         envelope = begin
           FrameCodec.decode(@socket)
-        rescue ex : IO::Error
-          Log.debug { "Read error: #{ex.message}" }
+        rescue ex : Exception
+          Log.debug { "Read/protocol error: #{ex.message}" }
           break
         end
 
         break if envelope.nil?
 
-        handle_incoming(envelope)
+        begin
+          handle_incoming(envelope)
+        rescue ex : Exception
+          Log.error(exception: ex) { "Protocol error from #{@socket.remote_address}" }
+          break
+        end
       end
-
+    ensure
       close
     end
 

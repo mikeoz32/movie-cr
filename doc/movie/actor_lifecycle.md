@@ -76,7 +76,7 @@ An actor progresses through several states during its lifetime. This state machi
         │                    │ StartFailure
         │ PreStart           │
         │ Success            ▼
-        │              [FAILED] ───► [TERMINATED]
+        │              [FAILED] ───► [RESTARTING] or [STOPPING]
         ▼                    ▲
     [RUNNING] ◄──────┐       │
         │            │       │
@@ -94,11 +94,9 @@ An actor progresses through several states during its lifetime. This state machi
         │ Cleanup            │
         │                    │
         ▼                    │
-    [STOPPED] ───────────────┘
-        │
-        │ restart()
-        │
-        └──────► [RESTARTING] ──► [STARTING]
+    [TERMINATED]
+
+    [RESTARTING] ──► [STARTING]
 ```
 
 ### State Descriptions
@@ -106,12 +104,12 @@ An actor progresses through several states during its lifetime. This state machi
 | State | Description | Valid Transitions | Message Processing |
 |-------|-------------|------------------|-------------------|
 | **CREATED** | Actor reference and context created, mailbox not yet initialized | STARTING | No |
-| **STARTING** | PreStart hook executing, resources initializing | RUNNING, FAILED | No |
-| **RUNNING** | Normal operation, processing messages | STOPPING, FAILED | Yes |
-| **STOPPING** | Graceful shutdown in progress, PostStop executing | STOPPED | System messages only |
-| **STOPPED** | Actor terminated, resources released | RESTARTING, TERMINATED | No |
-| **FAILED** | Unrecoverable error occurred | TERMINATED, RESTARTING | No |
-| **RESTARTING** | Supervisor-initiated restart | STARTING | No |
+| **STARTING** | PreStart hook executing, resources initializing | RUNNING, STOPPING, FAILED | No user delivery until PostStart |
+| **RUNNING** | Normal operation, processing messages | STOPPING, FAILED, RESTARTING | Yes |
+| **STOPPING** | Graceful shutdown in progress, PreStop/PostStop executing | TERMINATED | System messages only |
+| **STOPPED** | Legacy enum value; current runtime uses TERMINATED as the final state | None | No |
+| **FAILED** | Current behavior failed; supervisor may stop, restart, or resume it | RUNNING, STOPPING, RESTARTING | No until RESUME/restart |
+| **RESTARTING** | Supervisor-initiated restart | STARTING, STOPPING, FAILED | No |
 | **TERMINATED** | Final state, actor removed from registry | None | No |
 
 ### System Messages
@@ -429,13 +427,13 @@ User/System              ActorRef              Context              Mailbox     
 9. **Wait for Children**: Actor remains in STOPPING state processing system messages
    - Each `Terminated` message from child decrements counter
    - When child counter reaches zero, proceed to PostStop
-   - Timeout mechanism can force proceed if children don't respond
+   - The caller's shutdown timeout bounds the overall wait; there is no independent child-stop timeout.
 10. **PostStop Signal**: Send `PostStop` system message (only after all children terminated)
 11. **Release Resources**: Close connections, free memory
-12. **State Transition**: STOPPING → STOPPED
+12. **State Transition**: STOPPING → TERMINATED
 13. **Notify Watchers**: Send `Terminated` message to all watchers
 14. **Unregister**: Remove from `ActorRegistry`
-15. **Final State**: STOPPED → TERMINATED
+15. **Final State**: TERMINATED is terminal and the actor is removed from the registry.
 
 **Critical Guarantee**: A parent actor **never** completes its stop sequence (PostStop) before all of its children have fully terminated. This is achieved through asynchronous system message handling rather than blocking. The parent continues to be responsive to system events while waiting for children to stop.
 

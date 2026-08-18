@@ -11,6 +11,21 @@ record EchoResponse, message : String do
 end
 
 describe "Movie Remote Integration" do
+  it "does not report remoting enabled when the bind fails" do
+    owner = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "bind-owner")
+    owner_extension = owner.enable_remoting("127.0.0.1", 0)
+
+    contender = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "bind-contender")
+    expect_raises(Movie::ExtensionStartError) do
+      contender.enable_remoting("127.0.0.1", owner_extension.local_port)
+    end
+    contender.remoting_enabled?.should be_false
+    contender.remote.should be_nil
+
+    contender.shutdown
+    owner.shutdown
+  end
+
   describe "ActorSystem with remoting" do
     it "creates an actor system with a name" do
       system = Movie::ActorSystem(String).new(

@@ -6,6 +6,9 @@ module Movie
     abstract def path : ActorPath?
     abstract def rebind_path(path : ActorPath?) : Nil
     abstract def deliver_serializable(message : Object, sender : ActorRefBase?) : Nil
+    abstract def resume_after_failure : Nil
+    abstract def accepts_user_messages? : Bool
+    abstract def discard_user_messages? : Bool
   end
 
   class ActorContext(T) < AbstractActorContext
@@ -49,7 +52,7 @@ module Movie
       @system : AbstractActorSystem,
       restart_strategy : RestartStrategy,
       supervision_config : SupervisionConfig = SupervisionConfig.default,
-      @path : ActorPath? = nil
+      @path : ActorPath? = nil,
     )
       @ref = ref.as(ActorRefBase)
       @behavior = behavior
@@ -88,7 +91,7 @@ module Movie
       future : Future(U),
       reply_to : ActorRef(V),
       success : U -> V,
-      failure : Exception -> V
+      failure : Exception -> V,
     ) : Nil forall U, V
       future.on_success { |value| reply_to << success.call(value) }
       future.on_failure { |error| reply_to << failure.call(error) }
@@ -114,11 +117,10 @@ module Movie
     end
 
     def stop
-      return if [@state.stopped?, @state.failed?, @state.terminated?, @state == State::STOPPING].any?
+      return if [@state.stopped?, @state.terminated?, @state == State::STOPPING].any?
 
       send_system_message(STOP)
     end
-
 
     # Spawns a child actor under this actor's supervision.
     # If name is provided, the child gets a hierarchical path: {parent_path}/{name}
@@ -127,17 +129,19 @@ module Movie
       behavior : AbstractBehavior(U),
       restart_strategy : RestartStrategy = @restart_strategy,
       supervision_config : SupervisionConfig = @supervision_config,
-      name : String? = nil
+      name : String? = nil,
     ) : ActorRef(U) forall U
       raise "System not initialized" unless @system
+      raise ActorUnavailableError.new("Actor #{@ref.id} is not accepting children in state #{@state}") unless @state == State::STARTING || @state == State::RUNNING
+      raise ActorSystemShuttingDownError.new("Actor system is shutting down") if @system.shutting_down?
 
       # Build child path from parent path
       child_path = if parent_path = @path
-        child_name = name || "$#{@system.next_id}"
-        parent_path / child_name
-      else
-        nil
-      end
+                     child_name = name || "$#{@system.next_id}"
+                     parent_path / child_name
+                   else
+                     nil
+                   end
 
       # Create the child ref and context
       ref = ActorRef(U).new(@system, child_path)
@@ -146,9 +150,14 @@ module Movie
       # Register in system registry
       @system.register_context(ref.id, context)
 
-      # Register path
-      if p = child_path
-        @system.path_registry.register(ref, p)
+      begin
+        # Register path.
+        if p = child_path
+          @system.path_registry.register(ref, p)
+        end
+      rescue ex
+        @system.deregister(ref.id)
+        raise ex
       end
 
       attach_child(ref, notify_child: false)
@@ -182,6 +191,7 @@ module Movie
 
       listener = spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
       listener_ref = listener.as(ActorRef(Movie::Ask::Response(T)))
+      state.listener = listener_ref.as(ActorRefBase)
 
       target.tell_from(listener_ref.as(ActorRefBase), message)
 
@@ -210,7 +220,7 @@ module Movie
       deliver(message, @ref.as(ActorRefBase))
     end
 
-    def << (message : T)
+    def <<(message : T)
       tell message
     end
 
@@ -225,6 +235,21 @@ module Movie
     def deliver_serializable(message : Object, sender : ActorRefBase?) : Nil
       typed_message = message.as?(T) || raise TypeCastError.new("Remote message is not accepted by actor context")
       deliver(typed_message, sender)
+    end
+
+    def resume_after_failure : Nil
+      if @state == State::FAILED
+        transition_to(State::RUNNING)
+        @mailbox.try &.wake
+      end
+    end
+
+    def accepts_user_messages? : Bool
+      @state == State::CREATED || @state == State::STARTING || @state == State::RUNNING
+    end
+
+    def discard_user_messages? : Bool
+      @state == State::STOPPING || @state == State::STOPPED || @state == State::TERMINATED
     end
 
     def send_system_message(message : SystemMessage)
@@ -257,7 +282,6 @@ module Movie
     end
 
     def on_system_message(message : Envelope(SystemMessage))
-      # TODO: handle system messages
       case message.message
       when PRE_START
         handle_pre_start
@@ -289,6 +313,8 @@ module Movie
       else
         # Unknown system message - send to dead letters or log
       end
+    rescue ex : Exception
+      handle_system_failure(ex, message.message)
     end
 
     protected def handle_failed(message : Failed)
@@ -376,12 +402,14 @@ module Movie
     end
 
     protected def resume_actor(actor : ActorRefBase)
-      # Resume keeps the actor running without restart; placeholder for state reset if needed.
+      if context = @system.context(actor.id)
+        context.resume_after_failure
+      end
     end
 
     protected def escalate_failure(actor : ActorRefBase, cause : Exception?)
       @watchers.each do |watcher|
-        watcher.send_system(Failed.new(actor, cause).as(SystemMessage))
+        watcher.send_system(Failed.new(@ref, cause).as(SystemMessage))
       end
     end
 
@@ -449,6 +477,7 @@ module Movie
     end
 
     protected def handle_post_start
+      return unless @state == State::STARTING
       transition_to(State::RUNNING)
       @behavior.on_signal(POST_START)
     end
@@ -470,17 +499,21 @@ module Movie
     end
 
     protected def handle_post_stop
-      @active_behavior.on_signal(POST_STOP)
-      transition_to(State::STOPPED)
-      notify_for_termination
-      @system.deregister(@ref.id)
+      begin
+        @active_behavior.on_signal(POST_STOP)
+      ensure
+        transition_to(State::TERMINATED)
+        notify_for_termination
+        @system.deregister(@ref.id)
+      end
     end
 
     protected def handle_terminated(message : Terminated)
       actor = message.actor
-      @watching.reject! { |ref| ref.id == actor.id }
-      was_child = @children.any? { |ref| ref.id == actor.id }
-      @children.reject! { |ref| ref.id == actor.id }
+      @watching.reject! { |ref| ref == actor }
+      was_child = @children.any? { |ref| ref == actor }
+      @children.reject! { |ref| ref == actor }
+      @restart_counters.delete(actor.id)
 
       if @pending_terminations > 0 && @pending_children.includes?(actor)
         @pending_children.delete(actor)
@@ -499,6 +532,7 @@ module Movie
     end
 
     protected def handle_restart(message : Restart)
+      return unless @state == State::FAILED || @state == State::RUNNING
       transition_to(State::RESTARTING)
       cause = message.cause
       @active_behavior.on_signal(PreRestart.new(cause))
@@ -506,9 +540,8 @@ module Movie
       if mb = @mailbox
         mb.purge_inbox
       end
-      @state = State::STARTING
+      transition_to(State::STARTING)
       handle_pre_start
-      handle_post_start
     end
 
     protected def initiate_children_stop
@@ -532,8 +565,50 @@ module Movie
     end
 
     protected def transition_to(new_state : State)
+      return if @state == new_state
+      unless legal_transition?(@state, new_state)
+        log.warn { "Ignoring invalid actor transition #{@state} -> #{new_state} for #{@ref}" }
+        return
+      end
       log.debug { "Actor #{@ref} transitioning from #{@state} to #{new_state}" }
       @state = new_state
+    end
+
+    private def legal_transition?(from : State, to : State) : Bool
+      case from
+      when State::CREATED
+        to == State::STARTING
+      when State::STARTING
+        to == State::RUNNING || to == State::STOPPING || to == State::FAILED
+      when State::RUNNING
+        to == State::STOPPING || to == State::FAILED || to == State::RESTARTING
+      when State::FAILED
+        to == State::RUNNING || to == State::STOPPING || to == State::RESTARTING
+      when State::RESTARTING
+        to == State::STARTING || to == State::FAILED || to == State::STOPPING
+      when State::STOPPING
+        to == State::TERMINATED
+      when State::STOPPED, State::TERMINATED
+        false
+      else
+        false
+      end
+    end
+
+    private def handle_system_failure(ex : Exception, signal : SystemMessage)
+      log.error(exception: ex) { "Error handling system message #{signal.class}" }
+
+      if @state == State::STOPPING
+        @pre_stop_completed = true if signal.is_a?(PreStop)
+        finalize_stop_if_ready
+        return
+      end
+
+      return if @state == State::TERMINATED || @state == State::STOPPED
+
+      notify_for_failure(ex)
+      transition_to(State::FAILED)
+      apply_restart_strategy(ex)
     end
   end
 end
