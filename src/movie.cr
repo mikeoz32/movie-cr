@@ -1162,13 +1162,13 @@ module Movie
 
         unless @shutdown_started
           @shutdown_started = true
+          close_spawn_admission
           should_initiate_shutdown = true
           root_guardian = @registry.as(ActorRegistry).root_guardian if @registry
         end
       end
 
       if should_initiate_shutdown
-        close_spawn_admission
         root_guardian.try &.send_system(STOP)
         if actor_dispatching_on_current_fiber?
           spawn do
