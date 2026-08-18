@@ -100,6 +100,39 @@ private class RefAskProbe < Movie::AbstractBehavior(Symbol)
   end
 end
 
+private class BlockingStopProbe < Movie::AbstractBehavior(Symbol)
+  getter started : Channel(Nil)
+  getter release : Channel(Nil)
+
+  def initialize
+    @started = Channel(Nil).new(1)
+    @release = Channel(Nil).new(1)
+  end
+
+  def receive(message, context)
+    Movie::Behaviors(Symbol).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    if signal.is_a?(Movie::PreStop)
+      @started.send(nil)
+      @release.receive
+    end
+  end
+end
+
+private class CountingExtension < Movie::Extension
+  getter stop_count : Atomic(Int32)
+
+  def initialize
+    @stop_count = Atomic(Int32).new(0)
+  end
+
+  def stop
+    @stop_count.add(1)
+  end
+end
+
 private class SelfShutdownProbe < Movie::AbstractBehavior(Symbol)
   def initialize(@events : Channel(Nil))
     @system = nil.as(Movie::AbstractActorSystem?)
@@ -254,6 +287,17 @@ describe "Movie runtime hardening" do
     system.shutdown
   end
 
+  it "fails an ask cleanly when the local target is already terminated" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    target = system.spawn(SilentProbe.new)
+    target.send_system(Movie::STOP)
+    hardening_eventually(1.second) { system.context(target.id).nil? }.should be_true
+
+    future = target.ask(:request, String, 1.second)
+    expect_raises(Movie::Ask::TargetTerminated) { future.await(1.second) }
+    system.shutdown
+  end
+
   it "does not block when shutdown is called from an actor" do
     events = Channel(Nil).new(1)
     probe = SelfShutdownProbe.new(events)
@@ -276,6 +320,22 @@ describe "Movie runtime hardening" do
     expect_raises(Movie::ActorSystemShuttingDownError) do
       system.spawn(Movie::Behaviors(Symbol).same)
     end
+  end
+
+  it "keeps extensions alive when actor shutdown times out" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    probe = BlockingStopProbe.new
+    actor = system.spawn(probe)
+    extension = CountingExtension.new
+    system.register_extension(extension)
+
+    actor.send_system(Movie::STOP)
+    probe.started.receive
+    expect_raises(Exception) { system.shutdown(20.milliseconds) }
+    extension.stop_count.get.should eq(0)
+
+    probe.release.send(nil)
+    hardening_eventually(1.second) { system.context(actor.id).nil? }.should be_true
   end
 
   it "escalates a nested child failure to the direct supervisor" do

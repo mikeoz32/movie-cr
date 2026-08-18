@@ -134,7 +134,13 @@ module Movie
       listener = @system.spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
       listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
       state.listener = listener_ref.as(ActorRefBase)
-      tell_from(listener_ref.as(ActorRefBase), message)
+      begin
+        tell_from(listener_ref.as(ActorRefBase), message)
+      rescue ex : Exception
+        state.promise.try_failure(Movie::Ask::TargetTerminated.new(self.as(ActorRefBase)))
+        state.stop_listener
+        return state.promise.future
+      end
 
       if timeout
         timer_handle = @system.scheduler.schedule_once(timeout) do
@@ -694,6 +700,8 @@ module Movie
     @registry : ActorRegistry?
     @scheduler : Scheduler?
     @scheduler_mutex : Mutex = Mutex.new
+    @spawn_admission_mutex : Mutex = Mutex.new
+    @spawn_admission_closed : Bool = false
     @actor_dispatch_mutex : Mutex = Mutex.new
     @active_actor_fibers : Hash(UInt64, Int32) = {} of UInt64 => Int32
     @path_registry : PathRegistry = PathRegistry.new
@@ -724,6 +732,17 @@ module Movie
 
     def shutting_down? : Bool
       false
+    end
+
+    def with_spawn_admission(&block)
+      @spawn_admission_mutex.synchronize do
+        raise ActorSystemShuttingDownError.new("Actor system is shutting down") if @spawn_admission_closed
+        yield
+      end
+    end
+
+    def close_spawn_admission : Nil
+      @spawn_admission_mutex.synchronize { @spawn_admission_closed = true }
     end
 
     def actor_dispatch_enter : Nil
@@ -908,8 +927,9 @@ module Movie
       name : String? = nil,
     ) : ActorRef(U) forall U
       raise "System not initialized" unless @registry
-      raise ActorSystemShuttingDownError.new("Actor system is shutting down") if shutting_down?
-      @registry.as(ActorRegistry).spawn(behavior, restart_strategy, name: name)
+      with_spawn_admission do
+        @registry.as(ActorRegistry).spawn(behavior, restart_strategy, name: name)
+      end
     end
 
     # Spawns an actor under the user guardian with an explicit supervision config.
@@ -920,8 +940,9 @@ module Movie
       name : String? = nil,
     ) : ActorRef(U) forall U
       raise "System not initialized" unless @registry
-      raise ActorSystemShuttingDownError.new("Actor system is shutting down") if shutting_down?
-      @registry.as(ActorRegistry).spawn(behavior, restart_strategy, supervision_config, name)
+      with_spawn_admission do
+        @registry.as(ActorRegistry).spawn(behavior, restart_strategy, supervision_config, name)
+      end
     end
 
     # Spawns a system actor under /system/{name}
@@ -932,29 +953,30 @@ module Movie
       restart_strategy : RestartStrategy = RestartStrategy::RESTART,
       supervision_config : SupervisionConfig = SupervisionConfig.default,
     ) : ActorRef(T) forall T
-      raise ActorSystemShuttingDownError.new("Actor system is shutting down") if shutting_down?
       raise "System guardian not initialized" if @registry.system_guardian.nil?
 
-      system_guardian = @registry.system_guardian.as(ActorRef(SystemGuardianMessage))
-      system_context = context(system_guardian.id)
-      raise "System guardian context not found" unless system_context
+      with_spawn_admission do
+        system_guardian = @registry.system_guardian.as(ActorRef(SystemGuardianMessage))
+        system_context = context(system_guardian.id)
+        raise "System guardian context not found" unless system_context
 
-      # Build path: /system/{name}
-      system_path = system_guardian.path || ActorPath.new(@address, ["system"])
-      child_path = system_path / name
+        # Build path: /system/{name}
+        system_path = system_guardian.path || ActorPath.new(@address, ["system"])
+        child_path = system_path / name
 
-      ref = ActorRef(T).new(self, child_path)
-      child_context = ActorContext(T).new(behavior, ref, self, restart_strategy, supervision_config, child_path)
-      @registry.register_context(ref.id, child_context)
-      begin
-        @path_registry.register(ref, child_path)
-      rescue ex
-        deregister(ref.id)
-        raise ex
+        ref = ActorRef(T).new(self, child_path)
+        child_context = ActorContext(T).new(behavior, ref, self, restart_strategy, supervision_config, child_path)
+        @registry.register_context(ref.id, child_context)
+        begin
+          @path_registry.register(ref, child_path)
+        rescue ex
+          deregister(ref.id)
+          raise ex
+        end
+        system_context.as(ActorContext(SystemGuardianMessage)).attach_child(ref, notify_child: false)
+        child_context.start
+        ref
       end
-      system_context.as(ActorContext(SystemGuardianMessage)).attach_child(ref, notify_child: false)
-      child_context.start
-      ref
     end
   end
 
@@ -1076,13 +1098,19 @@ module Movie
       listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
       state.listener = listener_ref.as(ActorRefBase)
 
-      root.tell_from(listener_ref.as(ActorRefBase), message)
+      begin
+        root.tell_from(listener_ref.as(ActorRefBase), message)
+      rescue ex : Exception
+        state.promise.try_failure(Movie::Ask::TargetTerminated.new(root.as(ActorRefBase)))
+        state.stop_listener
+        return state.promise.future
+      end
 
       if timeout
         timer_handle = scheduler.schedule_once(timeout) do
           if state.promise.future.pending?
             state.promise.try_failure(FutureTimeout.new)
-            listener.send_system(STOP)
+            state.stop_listener
           end
         end
         state.timer_handle = timer_handle
@@ -1104,13 +1132,19 @@ module Movie
       listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
       state.listener = listener_ref.as(ActorRefBase)
 
-      target.tell_from(listener_ref.as(ActorRefBase), message)
+      begin
+        target.tell_from(listener_ref.as(ActorRefBase), message)
+      rescue ex : Exception
+        state.promise.try_failure(Movie::Ask::TargetTerminated.new(target.as(ActorRefBase)))
+        state.stop_listener
+        return state.promise.future
+      end
 
       if timeout
         timer_handle = scheduler.schedule_once(timeout) do
           if state.promise.future.pending?
             state.promise.try_failure(FutureTimeout.new)
-            listener.send_system(STOP)
+            state.stop_listener
           end
         end
         state.timer_handle = timer_handle
@@ -1134,6 +1168,7 @@ module Movie
       end
 
       if should_initiate_shutdown
+        close_spawn_admission
         root_guardian.try &.send_system(STOP)
         if actor_dispatching_on_current_fiber?
           spawn do
@@ -1158,11 +1193,11 @@ module Movie
     end
 
     private def complete_shutdown(timeout : Time::Span) : Nil
+      wait_for_shutdown(timeout)
       begin
-        wait_for_shutdown(timeout)
-      ensure
         # Let actors use extensions and scheduler during PreStop/PostStop.
         @extensions.stop_all
+      ensure
         @scheduler.try &.stop
       end
 
@@ -1180,9 +1215,10 @@ module Movie
       supervision_config : SupervisionConfig = @supervision_config,
       name : String? = nil,
     ) : ActorRef(U) forall U
-      raise ActorSystemShuttingDownError.new("Actor system is shutting down") if shutting_down?
       raise "System not initialized" unless @registry
-      @registry.as(ActorRegistry).spawn(behavior, restart_strategy, supervision_config, name)
+      with_spawn_admission do
+        @registry.as(ActorRegistry).spawn(behavior, restart_strategy, supervision_config, name)
+      end
     end
 
     # Internal: spawns a child actor under a parent's path
@@ -1193,9 +1229,10 @@ module Movie
       name : String?,
       parent_path : ActorPath?,
     ) : ActorRef(U) forall U
-      raise ActorSystemShuttingDownError.new("Actor system is shutting down") if shutting_down?
       raise "System not initialized" unless @registry
-      @registry.as(ActorRegistry).spawn_child(behavior, restart_strategy, supervision_config, name, parent_path)
+      with_spawn_admission do
+        @registry.as(ActorRegistry).spawn_child(behavior, restart_strategy, supervision_config, name, parent_path)
+      end
     end
 
     private def wait_for_shutdown(timeout : Time::Span) : Nil

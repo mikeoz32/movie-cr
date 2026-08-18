@@ -12,14 +12,23 @@ end
 
 private class StressDeliveryProbe < Movie::AbstractBehavior(StressMessage)
   getter received : Atomic(Int32)
+  @ids : Array(Int64)
+  @ids_mutex : Mutex
 
   def initialize
     @received = Atomic(Int32).new(0)
+    @ids = [] of Int64
+    @ids_mutex = Mutex.new
   end
 
   def receive(message, context)
+    @ids_mutex.synchronize { @ids << message.id }
     @received.add(1)
     Movie::Behaviors(StressMessage).same
+  end
+
+  def ids : Array(Int64)
+    @ids_mutex.synchronize { @ids.dup }
   end
 end
 
@@ -340,6 +349,7 @@ describe "Movie Remote Stress Tests" do
 
       sent.get.should be >= (num_messages * 0.95).to_i
       wait_until_stress { probe.received.get == sent.get }
+      probe.ids.sort.should eq((0...sent.get).map(&.to_i64))
 
       client_socket.close
       server_ext.stop

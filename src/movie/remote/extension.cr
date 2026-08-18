@@ -173,13 +173,15 @@ module Movie::Remote
     def pool_for(address : Address) : StripedConnectionPool
       key = address.to_s
 
+      stale_pool = nil.as(StripedConnectionPool?)
       @pools_mutex.synchronize do
         if existing = @pools[key]?
           return existing if existing.connected?
           # Pool exists but is disconnected - remove it
-          @pools.delete(key)
+          stale_pool = @pools.delete(key)
         end
       end
+      stale_pool.try &.close
 
       pool = StripedConnectionPool.new(
         address: address,

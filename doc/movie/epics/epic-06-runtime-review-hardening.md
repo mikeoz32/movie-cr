@@ -1,8 +1,8 @@
 # Epic 06: Runtime Review Hardening
 
-**Status:** In progress  
-**Priority:** P0  
-**Depends on:** Epics 01-03  
+**Status:** In progress
+**Priority:** P0
+**Depends on:** Epics 01-03
 **Feature:** Make actor lifecycle, mailbox scheduling, ask cleanup, registries, and remoting failure paths deterministic under concurrency.
 
 ## Definition Of Done

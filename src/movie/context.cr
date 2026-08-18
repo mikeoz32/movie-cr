@@ -133,36 +133,36 @@ module Movie
     ) : ActorRef(U) forall U
       raise "System not initialized" unless @system
       raise ActorUnavailableError.new("Actor #{@ref.id} is not accepting children in state #{@state}") unless @state == State::STARTING || @state == State::RUNNING
-      raise ActorSystemShuttingDownError.new("Actor system is shutting down") if @system.shutting_down?
+      @system.with_spawn_admission do
+        # Build child path from parent path.
+        child_path = if parent_path = @path
+                       child_name = name || "$#{@system.next_id}"
+                       parent_path / child_name
+                     else
+                       nil
+                     end
 
-      # Build child path from parent path
-      child_path = if parent_path = @path
-                     child_name = name || "$#{@system.next_id}"
-                     parent_path / child_name
-                   else
-                     nil
-                   end
+        # Create the child ref and context.
+        ref = ActorRef(U).new(@system, child_path)
+        context = ActorContext(U).new(behavior, ref, @system, restart_strategy, supervision_config, child_path)
 
-      # Create the child ref and context
-      ref = ActorRef(U).new(@system, child_path)
-      context = ActorContext(U).new(behavior, ref, @system, restart_strategy, supervision_config, child_path)
+        # Register in system registry.
+        @system.register_context(ref.id, context)
 
-      # Register in system registry
-      @system.register_context(ref.id, context)
-
-      begin
-        # Register path.
-        if p = child_path
-          @system.path_registry.register(ref, p)
+        begin
+          # Register path.
+          if p = child_path
+            @system.path_registry.register(ref, p)
+          end
+        rescue ex
+          @system.deregister(ref.id)
+          raise ex
         end
-      rescue ex
-        @system.deregister(ref.id)
-        raise ex
-      end
 
-      attach_child(ref, notify_child: false)
-      context.start
-      ref
+        attach_child(ref, notify_child: false)
+        context.start
+        ref
+      end
     end
 
     def attach_child(child : ActorRef(U), *, notify_child : Bool = true) forall U
@@ -199,7 +199,7 @@ module Movie
         timer_handle = @system.scheduler.schedule_once(timeout) do
           if state.promise.future.pending?
             state.promise.try_failure(FutureTimeout.new)
-            listener.send_system(STOP)
+            state.stop_listener
           end
         end
         state.timer_handle = timer_handle
