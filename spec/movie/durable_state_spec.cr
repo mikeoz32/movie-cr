@@ -56,7 +56,9 @@ describe Movie::DurableState do
   it "loads and persists state by persistence id" do
     db_path = "/tmp/movie_durable_state_#{UUID.random}.sqlite3"
     config = Movie::Config.builder
-      .set("movie.persistence.db_path", db_path)
+      .set("movie.persistence.db-path", db_path)
+      # Canonical config must win even when the deprecated alias is malformed.
+      .set("movie.persistence.db_path", true)
       .build
 
     system = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same, config)
@@ -75,6 +77,7 @@ describe Movie::DurableState do
     name_ref << Movie::GetName.new(receiver)
     value = promise.future.await(2.seconds)
     value.should eq("alice")
+    File.exists?(db_path).should be_true
 
     system2 = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same, config)
     ext2 = Movie::DurableState.get(system2)

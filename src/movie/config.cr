@@ -447,10 +447,14 @@ module Movie
     end
 
     # Returns a new Config with environment variable overrides applied.
-    # Environment variables are mapped from MOVIE_* pattern:
-    #   MOVIE_NAME          -> name
-    #   MOVIE_REMOTING_PORT -> remoting.port
-    #   MOVIE_CLUSTER_SEED_NODES -> cluster.seed_nodes
+    # Canonical environment variables use double underscores for path boundaries
+    # and single underscores for hyphens inside a key segment:
+    #   MOVIE__NAME                         -> name
+    #   MOVIE__REMOTING__PORT               -> remoting.port
+    #   MOVIE__REMOTING__STRIPE_COUNT       -> remoting.stripe-count
+    # The legacy single-underscore form remains supported for compatibility:
+    #   MOVIE_NAME                          -> name
+    #   MOVIE_REMOTING_PORT                 -> remoting.port
     #
     # Values are auto-converted:
     #   - "true"/"false" -> Bool
@@ -459,7 +463,7 @@ module Movie
     #   - Other -> String
     #
     # Example:
-    #   # With MOVIE_REMOTING_PORT=9000 MOVIE_DEBUG=true
+    #   # With MOVIE__REMOTING__PORT=9000 MOVIE__DEBUG=true
     #   config = base_config.with_env_overrides
     #   config.get_int("remoting.port")  # => 9000
     #   config.get_bool("debug")         # => true
@@ -467,18 +471,9 @@ module Movie
     def with_env_overrides(prefix : String = "MOVIE") : Config
       overrides = Config.builder
 
-      ENV.each do |key, value|
-        next unless key.starts_with?("#{prefix}_")
-
-        # Convert MOVIE_REMOTING_PORT to remoting.port
-        path = key[(prefix.size + 1)..]
-          .downcase
-          .gsub("_", ".")
-
-        # Auto-convert value
-        converted = convert_env_value(value)
-        set_builder_value(overrides, path, converted)
-      end
+      # Apply legacy values first so the canonical form wins on collisions.
+      apply_env_overrides(overrides, prefix, canonical: false)
+      apply_env_overrides(overrides, prefix, canonical: true)
 
       with_override(overrides.build)
     end
@@ -591,6 +586,24 @@ module Movie
 
       # String (default)
       value
+    end
+
+    private def apply_env_overrides(builder : ConfigBuilder, prefix : String, canonical : Bool)
+      ENV.each do |key, value|
+        next unless key.starts_with?("#{prefix}_")
+
+        suffix = key[prefix.size..]
+        path = if canonical
+                 next unless suffix.starts_with?("__")
+                 suffix[2..].split("__").map { |segment| segment.downcase.gsub("_", "-") }.join(".")
+               else
+                 next if suffix.starts_with?("__")
+                 suffix[1..].downcase.gsub("_", ".")
+               end
+
+        next if path.empty?
+        set_builder_value(builder, path, convert_env_value(value))
+      end
     end
 
     # Sets a value on a ConfigBuilder, handling different types.

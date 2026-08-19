@@ -511,6 +511,29 @@ describe Movie::Config do
         ENV.delete("MOVIE_TEST_HOSTS")
       end
     end
+
+    it "maps canonical env names to hyphenated config keys" do
+      ENV["MOVIE_TEST_REMOTING_PORT"] = "9001"
+      ENV["MOVIE_TEST__REMOTING__PORT"] = "9002"
+      ENV["MOVIE_TEST__REMOTING__STRIPE_COUNT"] = "12"
+      ENV["MOVIE_TEST__EXECUTOR__POOL_SIZE"] = "6"
+      ENV["MOVIE_TEST__MOVIE__PERSISTENCE__DB_PATH"] = "data/custom.sqlite3"
+
+      begin
+        config = Movie::Config.empty.with_env_overrides("MOVIE_TEST")
+
+        config.get_int("remoting.port").should eq(9002)
+        config.get_int("remoting.stripe-count").should eq(12)
+        config.get_int("executor.pool-size").should eq(6)
+        config.get_string("movie.persistence.db-path").should eq("data/custom.sqlite3")
+      ensure
+        ENV.delete("MOVIE_TEST_REMOTING_PORT")
+        ENV.delete("MOVIE_TEST__REMOTING__PORT")
+        ENV.delete("MOVIE_TEST__REMOTING__STRIPE_COUNT")
+        ENV.delete("MOVIE_TEST__EXECUTOR__POOL_SIZE")
+        ENV.delete("MOVIE_TEST__MOVIE__PERSISTENCE__DB_PATH")
+      end
+    end
   end
 
   describe "ActorSystemConfig strategies" do

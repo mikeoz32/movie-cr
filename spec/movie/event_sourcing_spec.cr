@@ -70,7 +70,7 @@ describe Movie::EventSourcing do
   it "replays events to recover state" do
     db_path = "/tmp/movie_event_sourcing_#{UUID.random}.sqlite3"
     config = Movie::Config.builder
-      .set("movie.persistence.db_path", db_path)
+      .set("movie.persistence.db-path", db_path)
       .build
 
     system = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same, config)

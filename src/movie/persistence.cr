@@ -430,8 +430,16 @@ module Movie
   class Database < ExtensionId(DatabaseExtension)
     def create(system : AbstractActorSystem) : DatabaseExtension
       cfg = system.config
-      path = cfg.get_string("movie.persistence.db_path", "data/movie_persistence.sqlite3")
-      pool_size = cfg.get_int("movie.persistence.pool_size", 1)
+      path = if cfg.has_path?("movie.persistence.db-path")
+               cfg.get_string("movie.persistence.db-path")
+             else
+               cfg.get_string("movie.persistence.db_path", "data/movie_persistence.sqlite3")
+             end
+      pool_size = if cfg.has_path?("movie.persistence.pool-size")
+                    cfg.get_int("movie.persistence.pool-size")
+                  else
+                    cfg.get_int("movie.persistence.pool_size", 1)
+                  end
       DatabaseExtension.new(system, "sqlite3:#{path}", pool_size)
     end
   end
