@@ -188,17 +188,17 @@ module Movie
         @waiters = [] of Channel(Nil)
         transitioned = true
       end
+      waiters.each do |waiter|
+        begin
+          waiter.send(nil)
+        rescue Channel::ClosedError
+        end
+      end
       callbacks.each do |cb|
         begin
           cb.call(snapshot.not_nil!)
         rescue ex : Exception
           FutureLog.error(exception: ex) { "Unhandled future callback error" }
-        end
-      end
-      waiters.each do |waiter|
-        begin
-          waiter.send(nil)
-        rescue Channel::ClosedError
         end
       end
       transitioned

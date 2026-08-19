@@ -121,6 +121,29 @@ private class BlockingStopProbe < Movie::AbstractBehavior(Symbol)
   end
 end
 
+private class QueueStopProbe < Movie::AbstractBehavior(Symbol)
+  getter started : Channel(Nil)
+  getter release : Channel(Nil)
+  getter received : Atomic(Int32)
+
+  def initialize
+    @started = Channel(Nil).new(1)
+    @release = Channel(Nil).new(1)
+    @received = Atomic(Int32).new(0)
+  end
+
+  def receive(message, context)
+    case message
+    when :block
+      @started.send(nil)
+      @release.receive
+    when :work
+      @received.add(1)
+    end
+    Movie::Behaviors(Symbol).same
+  end
+end
+
 private class CountingExtension < Movie::Extension
   getter stop_count : Atomic(Int32)
 
@@ -265,6 +288,22 @@ describe "Movie runtime hardening" do
 
     hardening_eventually(1.second) { system.context(actor.id).nil? }.should be_true
     probe.post_started.get.should be_false
+    system.shutdown
+  end
+
+  it "prioritizes STOP over user messages queued behind the current message" do
+    probe = QueueStopProbe.new
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    actor = system.spawn(probe)
+
+    actor << :block
+    probe.started.receive
+    1_000.times { actor << :work }
+    actor.send_system(Movie::STOP)
+    probe.release.send(nil)
+
+    hardening_eventually(1.second) { system.context(actor.id).nil? }.should be_true
+    probe.received.get.should be < 1_000
     system.shutdown
   end
 

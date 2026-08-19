@@ -82,6 +82,27 @@ private class StartsAfterFirstFailure < Movie::AbstractBehavior(Symbol)
   end
 end
 
+private class AlwaysFailingOnStart < Movie::AbstractBehavior(Symbol)
+  getter post_start_count : Atomic(Int32)
+
+  def initialize
+    @post_start_count = Atomic(Int32).new(0)
+  end
+
+  def receive(message, context)
+    Movie::Behaviors(Symbol).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    case signal
+    when Movie::PreStart
+      raise "boom during every pre-start"
+    when Movie::PostStart
+      @post_start_count.add(1)
+    end
+  end
+end
+
 private class StartupFailureObserver < Movie::AbstractBehavior(Symbol)
   def initialize(@events : Channel(String))
     @spawn_count = 0
@@ -204,6 +225,26 @@ describe "Movie actor lifecycle" do
     when timeout(500.milliseconds)
       fail "startup failure did not restart the child"
     end
+  end
+
+  it "does not run PostStart after a restart attempt fails in PreStart" do
+    probe = AlwaysFailingOnStart.new
+    supervision = Movie::SupervisionConfig.new(
+      strategy: Movie::SupervisionStrategy::RESTART,
+      scope: Movie::SupervisionScope::ONE_FOR_ONE,
+      max_restarts: 1,
+      within: 1.second,
+      backoff_min: Time::Span.zero,
+      backoff_max: Time::Span.zero,
+      backoff_factor: 1.0,
+      jitter: 0.0
+    )
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same, Movie::RestartStrategy::RESTART, supervision)
+    actor = system.spawn(probe)
+
+    eventually(1.second) { system.context(actor.id).nil? }.should be_true
+    probe.post_start_count.get.should eq(0)
+    system.shutdown
   end
 
   it "does not block unrelated messages during supervision backoff" do
