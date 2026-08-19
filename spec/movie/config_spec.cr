@@ -512,4 +512,23 @@ describe Movie::Config do
       end
     end
   end
+
+  describe "ActorSystemConfig strategies" do
+    it "keeps root restart strategy independent from supervision strategy" do
+      config = Movie::Config.builder
+        .set("supervision.strategy", "resume")
+        .build
+
+      Movie::ActorSystemConfig.restart_strategy(config).should eq(Movie::RestartStrategy::RESTART)
+      Movie::ActorSystemConfig.supervision_config(config).strategy.should eq(Movie::SupervisionStrategy::RESUME)
+    end
+
+    it "reads root restart strategy from actor.restart-strategy" do
+      config = Movie::Config.builder
+        .set("actor.restart-strategy", "stop")
+        .build
+
+      Movie::ActorSystemConfig.restart_strategy(config).should eq(Movie::RestartStrategy::STOP)
+    end
+  end
 end
