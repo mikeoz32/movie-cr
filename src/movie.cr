@@ -317,7 +317,12 @@ module Movie
       child_path = user_path / actor_name
 
       child = create_actor_context(behavior, restart_strategy, supervision_config, child_path, start_immediately: false)
-      user_context.as(ActorContext(UserGuardianMessage)).attach_child(child.ref, notify_child: false)
+      begin
+        user_context.as(ActorContext(UserGuardianMessage)).attach_child(child.ref, notify_child: false)
+      rescue ex
+        system.deregister(child.ref.id)
+        raise ex
+      end
       child.start
       child.ref
     end

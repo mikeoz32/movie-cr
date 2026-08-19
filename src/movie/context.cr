@@ -174,6 +174,9 @@ module Movie
 
     def attach_child(child : ActorRef(U), *, notify_child : Bool = true) forall U
       @state_mutex.synchronize do
+        unless @state == State::CREATED || @state == State::STARTING || @state == State::RUNNING
+          raise ActorUnavailableError.new("Actor #{@ref.id} is not accepting children in state #{@state}")
+        end
         attach_child_locked(child, notify_child: notify_child)
       end
     end
