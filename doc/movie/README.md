@@ -15,6 +15,7 @@
 - [Epic 03 - Remoting delivery and protocol completion](epics/epic-03-remoting-delivery-and-protocol.md)
 - [Epic 04 - Configuration API consistency](epics/epic-04-configuration-api-consistency.md)
 - [Epic 05 - Quality gates and documentation accuracy](epics/epic-05-quality-gates-and-documentation.md)
+- [Epic 06 - Runtime review hardening](epics/epic-06-runtime-review-hardening.md)
 
 ## How To Use This Folder
 

@@ -169,7 +169,39 @@ describe Movie::Future do
       when timeout(100.milliseconds)
         fail "future completion blocked behind a timed-out waiter"
       end
+
+      promise.future.await(1.second).should eq(1)
     end
+  end
+
+  it "wakes awaiters before running blocking completion callbacks" do
+    promise = Movie::Promise(Int32).new
+    future = promise.future
+    callback_entered = Channel(Nil).new(1)
+    release_callback = Channel(Nil).new(1)
+    waiter = Channel(Int32).new(1)
+
+    future.on_success do |_value|
+      callback_entered.send(nil)
+      release_callback.receive
+    end
+
+    spawn do
+      waiter.send(future.await(1.second))
+    end
+
+    sleep 10.milliseconds
+    spawn { promise.success(42) }
+    callback_entered.receive
+
+    select
+    when value = waiter.receive
+      value.should eq(42)
+    when timeout(100.milliseconds)
+      fail "future waiter remained blocked behind a completion callback"
+    end
+
+    release_callback.send(nil)
   end
 
   it "rejects a second completion attempt" do

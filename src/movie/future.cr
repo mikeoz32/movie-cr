@@ -165,8 +165,12 @@ module Movie
       end
 
       if timed_out
-        @mutex.synchronize { @waiters.delete(wait_ch.not_nil!) }
-        raise FutureTimeout.new unless terminal?
+        completed = @mutex.synchronize do
+          @waiters.delete(wait_ch.not_nil!)
+          terminal? ? FutureResult(T).new(@status, @value, @error) : nil
+        end
+        return completed.not_nil! if completed
+        raise FutureTimeout.new
       end
 
       @mutex.synchronize { FutureResult(T).new(@status, @value, @error) }
@@ -188,17 +192,17 @@ module Movie
         @waiters = [] of Channel(Nil)
         transitioned = true
       end
+      waiters.each do |waiter|
+        begin
+          waiter.send(nil)
+        rescue Channel::ClosedError
+        end
+      end
       callbacks.each do |cb|
         begin
           cb.call(snapshot.not_nil!)
         rescue ex : Exception
           FutureLog.error(exception: ex) { "Unhandled future callback error" }
-        end
-      end
-      waiters.each do |waiter|
-        begin
-          waiter.send(nil)
-        rescue Channel::ClosedError
         end
       end
       transitioned

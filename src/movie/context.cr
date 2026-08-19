@@ -6,6 +6,9 @@ module Movie
     abstract def path : ActorPath?
     abstract def rebind_path(path : ActorPath?) : Nil
     abstract def deliver_serializable(message : Object, sender : ActorRefBase?) : Nil
+    abstract def register_watcher(actor : ActorRefBase) : Bool
+    abstract def accepts_user_messages? : Bool
+    abstract def discard_user_messages? : Bool
   end
 
   class ActorContext(T) < AbstractActorContext
@@ -42,6 +45,7 @@ module Movie
     @post_stop_sent : Bool = false
     @restart_counters : Hash(Int32 | Symbol, NamedTuple(count: Int32, started_at: Time::Instant)) = {} of Int32 | Symbol => NamedTuple(count: Int32, started_at: Time::Instant)
     @current_sender : ActorRefBase? = nil
+    @state_mutex : Mutex = Mutex.new
 
     def initialize(
       behavior : AbstractBehavior(T),
@@ -49,7 +53,7 @@ module Movie
       @system : AbstractActorSystem,
       restart_strategy : RestartStrategy,
       supervision_config : SupervisionConfig = SupervisionConfig.default,
-      @path : ActorPath? = nil
+      @path : ActorPath? = nil,
     )
       @ref = ref.as(ActorRefBase)
       @behavior = behavior
@@ -60,7 +64,11 @@ module Movie
     end
 
     def state
-      @state
+      @state_mutex.synchronize { @state }
+    end
+
+    def watcher_count : Int32
+      @state_mutex.synchronize { @watchers.size }
     end
 
     def ref : ActorRef(T)
@@ -88,7 +96,7 @@ module Movie
       future : Future(U),
       reply_to : ActorRef(V),
       success : U -> V,
-      failure : Exception -> V
+      failure : Exception -> V,
     ) : Nil forall U, V
       future.on_success { |value| reply_to << success.call(value) }
       future.on_failure { |error| reply_to << failure.call(error) }
@@ -114,11 +122,10 @@ module Movie
     end
 
     def stop
-      return if [@state.stopped?, @state.failed?, @state.terminated?, @state == State::STOPPING].any?
+      return if [@state.stopped?, @state.terminated?, @state == State::STOPPING].any?
 
       send_system_message(STOP)
     end
-
 
     # Spawns a child actor under this actor's supervision.
     # If name is provided, the child gets a hierarchical path: {parent_path}/{name}
@@ -127,36 +134,54 @@ module Movie
       behavior : AbstractBehavior(U),
       restart_strategy : RestartStrategy = @restart_strategy,
       supervision_config : SupervisionConfig = @supervision_config,
-      name : String? = nil
+      name : String? = nil,
     ) : ActorRef(U) forall U
       raise "System not initialized" unless @system
+      @state_mutex.synchronize do
+        raise ActorUnavailableError.new("Actor #{@ref.id} is not accepting children in state #{@state}") unless @state == State::STARTING || @state == State::RUNNING
+        @system.with_spawn_admission do
+          # Build child path from parent path.
+          child_path = if parent_path = @path
+                         child_name = name || "$#{@system.next_id}"
+                         parent_path / child_name
+                       else
+                         nil
+                       end
 
-      # Build child path from parent path
-      child_path = if parent_path = @path
-        child_name = name || "$#{@system.next_id}"
-        parent_path / child_name
-      else
-        nil
+          # Create the child ref and context.
+          ref = ActorRef(U).new(@system, child_path)
+          context = ActorContext(U).new(behavior, ref, @system, restart_strategy, supervision_config, child_path)
+
+          # Register in system registry.
+          @system.register_context(ref.id, context)
+
+          begin
+            # Register path.
+            if p = child_path
+              @system.path_registry.register(ref, p)
+            end
+          rescue ex
+            @system.deregister(ref.id)
+            raise ex
+          end
+
+          attach_child_locked(ref, notify_child: false)
+          context.start
+          ref
+        end
       end
-
-      # Create the child ref and context
-      ref = ActorRef(U).new(@system, child_path)
-      context = ActorContext(U).new(behavior, ref, @system, restart_strategy, supervision_config, child_path)
-
-      # Register in system registry
-      @system.register_context(ref.id, context)
-
-      # Register path
-      if p = child_path
-        @system.path_registry.register(ref, p)
-      end
-
-      attach_child(ref, notify_child: false)
-      context.start
-      ref
     end
 
     def attach_child(child : ActorRef(U), *, notify_child : Bool = true) forall U
+      @state_mutex.synchronize do
+        unless @state == State::CREATED || @state == State::STARTING || @state == State::RUNNING
+          raise ActorUnavailableError.new("Actor #{@ref.id} is not accepting children in state #{@state}")
+        end
+        attach_child_locked(child, notify_child: notify_child)
+      end
+    end
+
+    private def attach_child_locked(child : ActorRef(U), *, notify_child : Bool) forall U
       @children << child unless @children.includes?(child)
       @watching << child unless @watching.includes?(child)
       if child_ctx = @system.context(child.id)
@@ -166,30 +191,51 @@ module Movie
     end
 
     def watch(actor : ActorRef(U)) forall U
-      return if @watching.includes?(actor)
+      already_watching = @state_mutex.synchronize do
+        if @watching.includes?(actor)
+          true
+        else
+          @watching << actor
+          false
+        end
+      end
+      return if already_watching
 
-      @watching << actor
-      actor.send_system(Watch.new(@ref).as(SystemMessage))
+      if target_context = @system.context(actor.id)
+        unless target_context.register_watcher(@ref)
+          send_system_message(Terminated.new(actor).as(SystemMessage))
+        end
+      else
+        send_system_message(Terminated.new(actor).as(SystemMessage))
+      end
     end
 
     def ask(target : ActorRef(M), message : M, response_type : T.class = Nil, timeout : Time::Span? = nil) : Future(T) forall M, T
-      state = Movie::Ask::AskState(T).new(Promise(T).new)
+      state = Movie::Ask::AskState(T).new(Promise(T).new, target.as(ActorRefBase))
 
-      listener_behavior = Behaviors(Movie::Ask::Response(T)).setup do |listener_context|
-        listener_context.watch(target)
+      listener_behavior = Behaviors(Movie::Ask::Response(T)).setup do |_listener_context|
         Movie::Ask::ListenerBehavior(T).new(state, target.as(ActorRefBase))
       end
 
       listener = spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
       listener_ref = listener.as(ActorRef(Movie::Ask::Response(T)))
+      state.listener = listener_ref.as(ActorRefBase)
+      listener_context = @system.context(listener.id).as(ActorContext(Movie::Ask::Response(T)))
+      listener_context.watch(target)
 
-      target.tell_from(listener_ref.as(ActorRefBase), message)
+      begin
+        target.tell_from(listener_ref.as(ActorRefBase), message)
+      rescue ex : Exception
+        state.promise.try_failure(Movie::Ask::TargetTerminated.new(target.as(ActorRefBase)))
+        state.stop_listener
+        return state.promise.future
+      end
 
       if timeout
         timer_handle = @system.scheduler.schedule_once(timeout) do
           if state.promise.future.pending?
             state.promise.try_failure(FutureTimeout.new)
-            listener.send_system(STOP)
+            state.stop_listener
           end
         end
         state.timer_handle = timer_handle
@@ -198,8 +244,12 @@ module Movie
       state.promise.future
     end
 
-    protected def register_watcher(actor : ActorRefBase)
-      @watchers << actor unless @watchers.includes?(actor)
+    def register_watcher(actor : ActorRefBase) : Bool
+      @state_mutex.synchronize do
+        return false if @state == State::STOPPING || @state == State::STOPPED || @state == State::TERMINATED
+        @watchers << actor unless @watchers.includes?(actor)
+        true
+      end
     end
 
     def mailbox=(mailbox : Mailbox(T))
@@ -210,7 +260,7 @@ module Movie
       deliver(message, @ref.as(ActorRefBase))
     end
 
-    def << (message : T)
+    def <<(message : T)
       tell message
     end
 
@@ -225,6 +275,14 @@ module Movie
     def deliver_serializable(message : Object, sender : ActorRefBase?) : Nil
       typed_message = message.as?(T) || raise TypeCastError.new("Remote message is not accepted by actor context")
       deliver(typed_message, sender)
+    end
+
+    def accepts_user_messages? : Bool
+      @state == State::CREATED || @state == State::STARTING || @state == State::RUNNING
+    end
+
+    def discard_user_messages? : Bool
+      @state == State::STOPPING || @state == State::STOPPED || @state == State::TERMINATED
     end
 
     def send_system_message(message : SystemMessage)
@@ -257,7 +315,6 @@ module Movie
     end
 
     def on_system_message(message : Envelope(SystemMessage))
-      # TODO: handle system messages
       case message.message
       when PRE_START
         handle_pre_start
@@ -271,24 +328,30 @@ module Movie
         handle_post_stop
       when Watch
         watcher = message.message.as(Watch).actor
-        unless @watchers.includes?(watcher)
-          @watchers << watcher
+        unless register_watcher(watcher)
+          watcher.send_system(Terminated.new(@ref).as(SystemMessage))
         end
       when Unwatch
         unwatcher = message.message.as(Unwatch).actor
-        unless @watchers.includes?(unwatcher)
-          return
+        @state_mutex.synchronize do
+          unless @watchers.includes?(unwatcher)
+            return
+          end
+          @watchers.delete(unwatcher)
         end
-        @watchers.delete(unwatcher)
       when Failed
         handle_failed(message.message.as(Failed))
       when Terminated
         handle_terminated(message.message.as(Terminated))
       when Restart
         handle_restart(message.message.as(Restart))
+      when Resume
+        handle_resume
       else
         # Unknown system message - send to dead letters or log
       end
+    rescue ex : Exception
+      handle_system_failure(ex, message.message)
     end
 
     protected def handle_failed(message : Failed)
@@ -296,15 +359,20 @@ module Movie
       cause = message.cause
       @active_behavior.on_signal(message)
 
-      return unless @children.any? { |child| child.id == failed_actor.id }
+      children = children_snapshot
+      return unless children.any? { |child| child.id == failed_actor.id }
       attempt, exceeded = track_restart(failed_actor, cause)
       return if exceeded
       case @supervision_config.scope
       when SupervisionScope::ONE_FOR_ONE
         apply_supervision_action(failed_actor, cause, @supervision_config.strategy, attempt)
       when SupervisionScope::ALL_FOR_ONE
-        @children.each do |child|
-          apply_supervision_action(child, cause, @supervision_config.strategy, attempt)
+        if @supervision_config.strategy == SupervisionStrategy::ESCALATE
+          escalate_failure(failed_actor, cause)
+        else
+          children.each do |child|
+            apply_supervision_action(child, cause, @supervision_config.strategy, attempt)
+          end
         end
       end
     end
@@ -349,7 +417,7 @@ module Movie
       when SupervisionScope::ONE_FOR_ONE
         failed_actor.send_system(STOP)
       when SupervisionScope::ALL_FOR_ONE
-        @children.each do |child|
+        children_snapshot.each do |child|
           child.send_system(STOP)
         end
       end
@@ -376,12 +444,13 @@ module Movie
     end
 
     protected def resume_actor(actor : ActorRefBase)
-      # Resume keeps the actor running without restart; placeholder for state reset if needed.
+      actor.send_system(RESUME)
     end
 
     protected def escalate_failure(actor : ActorRefBase, cause : Exception?)
-      @watchers.each do |watcher|
-        watcher.send_system(Failed.new(actor, cause).as(SystemMessage))
+      watchers = @state_mutex.synchronize { @watchers.dup }
+      watchers.each do |watcher|
+        watcher.send_system(Failed.new(@ref, cause).as(SystemMessage))
       end
     end
 
@@ -417,13 +486,15 @@ module Movie
     end
 
     protected def notify_for_termination
-      @watchers.each do |watcher|
+      watchers = @state_mutex.synchronize { @watchers.dup }
+      watchers.each do |watcher|
         watcher.send_system(Terminated.new(@ref).as(SystemMessage))
       end
     end
 
     protected def notify_for_failure(ex : Exception)
-      @watchers.each do |watcher|
+      watchers = @state_mutex.synchronize { @watchers.dup }
+      watchers.each do |watcher|
         watcher.send_system(Failed.new(@ref, ex).as(SystemMessage))
       end
     end
@@ -449,6 +520,7 @@ module Movie
     end
 
     protected def handle_post_start
+      return unless @state == State::STARTING
       transition_to(State::RUNNING)
       @behavior.on_signal(POST_START)
     end
@@ -470,17 +542,24 @@ module Movie
     end
 
     protected def handle_post_stop
-      @active_behavior.on_signal(POST_STOP)
-      transition_to(State::STOPPED)
-      notify_for_termination
-      @system.deregister(@ref.id)
+      begin
+        @active_behavior.on_signal(POST_STOP)
+      ensure
+        transition_to(State::TERMINATED)
+        notify_for_termination
+        @system.deregister(@ref.id)
+      end
     end
 
     protected def handle_terminated(message : Terminated)
       actor = message.actor
-      @watching.reject! { |ref| ref.id == actor.id }
-      was_child = @children.any? { |ref| ref.id == actor.id }
-      @children.reject! { |ref| ref.id == actor.id }
+      was_child = @state_mutex.synchronize do
+        @watching.reject! { |ref| ref == actor }
+        child_match = @children.any? { |ref| ref == actor }
+        @children.reject! { |ref| ref == actor }
+        child_match
+      end
+      @restart_counters.delete(actor.id)
 
       if @pending_terminations > 0 && @pending_children.includes?(actor)
         @pending_children.delete(actor)
@@ -499,6 +578,7 @@ module Movie
     end
 
     protected def handle_restart(message : Restart)
+      return unless @state == State::FAILED || @state == State::RUNNING
       transition_to(State::RESTARTING)
       cause = message.cause
       @active_behavior.on_signal(PreRestart.new(cause))
@@ -506,18 +586,27 @@ module Movie
       if mb = @mailbox
         mb.purge_inbox
       end
-      @state = State::STARTING
+      transition_to(State::STARTING)
       handle_pre_start
-      handle_post_start
+    end
+
+    protected def handle_resume
+      return unless @state == State::FAILED
+      transition_to(State::RUNNING)
     end
 
     protected def initiate_children_stop
-      @pending_children = @children.dup
+      children = @state_mutex.synchronize { @children.dup }
+      @pending_children = children
       @pending_terminations = @pending_children.size
       STDERR.puts "actor=#{@ref.id} children=#{@pending_terminations}" if ENV["DEBUG_STOP"]?
       @pending_children.each do |child|
         child.send_system(STOP)
       end
+    end
+
+    private def children_snapshot : Array(ActorRefBase)
+      @state_mutex.synchronize { @children.dup }
     end
 
     protected def finalize_stop_if_ready
@@ -532,8 +621,52 @@ module Movie
     end
 
     protected def transition_to(new_state : State)
-      log.debug { "Actor #{@ref} transitioning from #{@state} to #{new_state}" }
-      @state = new_state
+      @state_mutex.synchronize do
+        return if @state == new_state
+        unless legal_transition?(@state, new_state)
+          log.warn { "Ignoring invalid actor transition #{@state} -> #{new_state} for #{@ref}" }
+          return
+        end
+        log.debug { "Actor #{@ref} transitioning from #{@state} to #{new_state}" }
+        @state = new_state
+      end
+    end
+
+    private def legal_transition?(from : State, to : State) : Bool
+      case from
+      when State::CREATED
+        to == State::STARTING
+      when State::STARTING
+        to == State::RUNNING || to == State::STOPPING || to == State::FAILED
+      when State::RUNNING
+        to == State::STOPPING || to == State::FAILED || to == State::RESTARTING
+      when State::FAILED
+        to == State::RUNNING || to == State::STOPPING || to == State::RESTARTING
+      when State::RESTARTING
+        to == State::STARTING || to == State::FAILED || to == State::STOPPING
+      when State::STOPPING
+        to == State::TERMINATED
+      when State::STOPPED, State::TERMINATED
+        false
+      else
+        false
+      end
+    end
+
+    private def handle_system_failure(ex : Exception, signal : SystemMessage)
+      log.error(exception: ex) { "Error handling system message #{signal.class}" }
+
+      if @state == State::STOPPING
+        @pre_stop_completed = true if signal.is_a?(PreStop)
+        finalize_stop_if_ready
+        return
+      end
+
+      return if @state == State::TERMINATED || @state == State::STOPPED
+
+      notify_for_failure(ex)
+      transition_to(State::FAILED)
+      apply_restart_strategy(ex)
     end
   end
 end

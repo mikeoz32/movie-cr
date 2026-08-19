@@ -8,6 +8,8 @@ module Movie
   end
 
   class Mailbox(T)
+    MAX_MESSAGES_PER_DISPATCH = 100
+
     @scheduled = false
     @processing = false
 
@@ -18,22 +20,40 @@ module Movie
     end
 
     def dispatch
+      @context.system.actor_dispatch_enter
       @mutex.synchronize { @processing = true }
-      @system.dequeue do |message|
-        @context.on_system_message(message) unless message.nil?
-      end
-      @inbox.dequeue do |message|
-        @context.on_message(message) unless message.nil?
-      end
 
-      need_schedule = false
-      @mutex.synchronize do
-        @processing = false
-        @scheduled = false
-        need_schedule = @inbox.size > 0 || @system.size > 0
-        @scheduled = true if need_schedule
+      processed = 0
+      begin
+        loop do
+          # Control messages always get a chance before the next user message.
+          if message = @system.dequeue
+            @context.on_system_message(message)
+          else
+            unless @context.accepts_user_messages?
+              purge_inbox if @context.discard_user_messages?
+              break
+            end
+
+            message = @inbox.dequeue
+            break unless message
+            @context.on_message(message)
+          end
+
+          processed += 1
+          break if processed >= MAX_MESSAGES_PER_DISPATCH
+        end
+      ensure
+        need_schedule = false
+        @mutex.synchronize do
+          @processing = false
+          @scheduled = false
+          need_schedule = @system.size > 0 || (@context.accepts_user_messages? && @inbox.size > 0)
+          @scheduled = true if need_schedule
+        end
+        @context.system.actor_dispatch_leave
+        @dispatcher.dispatch(self) if need_schedule
       end
-      @dispatcher.dispatch(self) if need_schedule
     end
 
     def send(message : Envelope(T))
@@ -52,6 +72,10 @@ module Movie
 
     def purge_inbox
       @inbox = Queue(Envelope(T)).new
+    end
+
+    def wake
+      schedule_dispatch
     end
 
     private def schedule_dispatch

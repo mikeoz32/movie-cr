@@ -12,7 +12,7 @@ module Movie::Remote
   end
 
   class RemoteAskResponseSenderRef < Movie::ActorRefBase
-    ASK_FAILURE_TAG = "__movie_remote_ask_failure__"
+    ASK_FAILURE_TAG   = "__movie_remote_ask_failure__"
     ASK_CANCELLED_TAG = "__movie_remote_ask_cancelled__"
 
     def initialize(@connection : InboundConnection, @correlation_id : String, path : ActorPath?)
@@ -128,7 +128,7 @@ module Movie::Remote
       @system : Movie::AbstractActorSystem,
       bind_host : String,
       bind_port : Int32,
-      @stripe_count : Int32 = StripedConnectionPool::DEFAULT_STRIPE_COUNT
+      @stripe_count : Int32 = StripedConnectionPool::DEFAULT_STRIPE_COUNT,
     )
       system_name = @system.name
       @address = Address.remote(system_name, bind_host, bind_port)
@@ -173,13 +173,15 @@ module Movie::Remote
     def pool_for(address : Address) : StripedConnectionPool
       key = address.to_s
 
+      stale_pool = nil.as(StripedConnectionPool?)
       @pools_mutex.synchronize do
         if existing = @pools[key]?
           return existing if existing.connected?
           # Pool exists but is disconnected - remove it
-          @pools.delete(key)
+          stale_pool = @pools.delete(key)
         end
       end
+      stale_pool.try &.close
 
       pool = StripedConnectionPool.new(
         address: address,
@@ -197,8 +199,17 @@ module Movie::Remote
         pool.stripe(0).send(handshake)
 
         @pools_mutex.synchronize do
+          if existing = @pools[key]?
+            if existing.connected?
+              pool.close
+              return existing
+            end
+            existing.close
+          end
           @pools[key] = pool
         end
+      else
+        pool.close
       end
 
       pool
@@ -288,16 +299,17 @@ module Movie::Remote
       begin
         wrapper = MessageRegistry.deserialize(envelope.message_type, envelope.payload)
         deliver_typed_message(context, wrapper, remote_sender_for(envelope.sender_path, envelope.correlation_id, conn, envelope.kind.ask_request?))
-
       rescue ex
         Log.error { "Failed to deserialize message: #{ex.message}" }
       end
+    rescue ex
+      Log.error { "Failed to route remote message to #{target_path_str}: #{ex.message}" }
     end
 
     private def deliver_typed_message(
       context : Movie::AbstractActorContext,
       wrapper : MessageWrapper,
-      sender : Movie::ActorRefBase?
+      sender : Movie::ActorRefBase?,
     )
       wrapper.deliver_to(context, sender)
     end
@@ -306,7 +318,7 @@ module Movie::Remote
       sender_path : String?,
       correlation_id : String?,
       conn : InboundConnection?,
-      ask_request : Bool
+      ask_request : Bool,
     ) : Movie::ActorRefBase?
       path = parse_sender_path(sender_path)
 
