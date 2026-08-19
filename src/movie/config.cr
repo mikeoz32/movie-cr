@@ -4,7 +4,7 @@ require "json"
 module Movie
   # ConfigValue represents any value that can be stored in configuration.
   # It's a recursive type that supports nested structures.
-  alias ConfigValue = String | Int64 | Float64 | Bool | Array(ConfigValue) | Hash(String, ConfigValue) | Nil
+  alias ConfigValue = String | Int64 | Float64 | Bool | Array(ConfigValue) | Hash(String, ConfigValue)
 
   # ConfigError is raised when config access fails.
   class ConfigError < Exception
@@ -80,6 +80,8 @@ module Movie
       else
         raise ConfigError.new("YAML root must be a mapping/object")
       end
+    rescue ex : YAML::ParseException
+      raise ConfigError.new("Invalid YAML: #{ex.message}")
     end
 
     # Loads a Config from a YAML file.
@@ -118,6 +120,8 @@ module Movie
       else
         raise ConfigError.new("JSON root must be an object")
       end
+    rescue ex : JSON::ParseException
+      raise ConfigError.new("Invalid JSON: #{ex.message}")
     end
 
     # Loads a Config from a JSON file.
@@ -219,7 +223,11 @@ module Movie
       when Float64
         value.to_i64
       when String
-        value.to_i64
+        begin
+          value.to_i64
+        rescue ArgumentError
+          raise WrongTypeConfigError.new(path, "Int64", "String(#{value})")
+        end
       else
         raise WrongTypeConfigError.new(path, "Int64", value.class.name)
       end
@@ -245,7 +253,11 @@ module Movie
       when Int64
         value.to_f64
       when String
-        value.to_f64
+        begin
+          value.to_f64
+        rescue ArgumentError
+          raise WrongTypeConfigError.new(path, "Float64", "String(#{value})")
+        end
       else
         raise WrongTypeConfigError.new(path, "Float64", value.class.name)
       end
@@ -383,7 +395,7 @@ module Movie
     # --- Raw value accessor ---
 
     # Returns the raw value at the given path, or nil if not found.
-    def get_value(path : String) : ConfigValue
+    def get_value(path : String) : ConfigValue?
       parts = path.split('.')
       current : ConfigValue = @root
 
@@ -417,7 +429,7 @@ module Movie
     end
 
     # Subscript access with nil for missing paths
-    def []?(path : String) : ConfigValue
+    def []?(path : String) : ConfigValue?
       get_value(path)
     end
 
@@ -435,10 +447,14 @@ module Movie
     end
 
     # Returns a new Config with environment variable overrides applied.
-    # Environment variables are mapped from MOVIE_* pattern:
-    #   MOVIE_NAME          -> name
-    #   MOVIE_REMOTING_PORT -> remoting.port
-    #   MOVIE_CLUSTER_SEED_NODES -> cluster.seed_nodes
+    # Canonical environment variables use double underscores for path boundaries
+    # and single underscores for hyphens inside a key segment:
+    #   MOVIE__NAME                         -> name
+    #   MOVIE__REMOTING__PORT               -> remoting.port
+    #   MOVIE__REMOTING__STRIPE_COUNT       -> remoting.stripe-count
+    # The legacy single-underscore form remains supported for compatibility:
+    #   MOVIE_NAME                          -> name
+    #   MOVIE_REMOTING_PORT                 -> remoting.port
     #
     # Values are auto-converted:
     #   - "true"/"false" -> Bool
@@ -447,7 +463,7 @@ module Movie
     #   - Other -> String
     #
     # Example:
-    #   # With MOVIE_REMOTING_PORT=9000 MOVIE_DEBUG=true
+    #   # With MOVIE__REMOTING__PORT=9000 MOVIE__DEBUG=true
     #   config = base_config.with_env_overrides
     #   config.get_int("remoting.port")  # => 9000
     #   config.get_bool("debug")         # => true
@@ -455,18 +471,9 @@ module Movie
     def with_env_overrides(prefix : String = "MOVIE") : Config
       overrides = Config.builder
 
-      ENV.each do |key, value|
-        next unless key.starts_with?("#{prefix}_")
-
-        # Convert MOVIE_REMOTING_PORT to remoting.port
-        path = key[(prefix.size + 1)..]
-          .downcase
-          .gsub("_", ".")
-
-        # Auto-convert value
-        converted = convert_env_value(value)
-        set_builder_value(overrides, path, converted)
-      end
+      # Apply legacy values first so the canonical form wins on collisions.
+      apply_env_overrides(overrides, prefix, canonical: false)
+      apply_env_overrides(overrides, prefix, canonical: true)
 
       with_override(overrides.build)
     end
@@ -503,33 +510,37 @@ module Movie
     end
 
     private def parse_duration_string(path : String, str : String) : Time::Span
-      # Match patterns like "100ms", "5s", "2m", "1h", "1d"
-      if match = str.match(/^(\d+(?:\.\d+)?)\s*(ns|us|ms|s|m|h|d)$/i)
-        amount = match[1].to_f64
-        unit = match[2].downcase
+      begin
+        # Match patterns like "100ms", "5s", "2m", "1h", "1d"
+        if match = str.match(/^(\d+(?:\.\d+)?)\s*(ns|us|ms|s|m|h|d)$/i)
+          amount = match[1].to_f64
+          unit = match[2].downcase
 
-        case unit
-        when "ns"
-          amount.nanoseconds
-        when "us"
-          amount.microseconds
-        when "ms"
-          amount.milliseconds
-        when "s"
-          amount.seconds
-        when "m"
-          amount.minutes
-        when "h"
-          amount.hours
-        when "d"
-          amount.days
+          case unit
+          when "ns"
+            amount.nanoseconds
+          when "us"
+            amount.microseconds
+          when "ms"
+            amount.milliseconds
+          when "s"
+            amount.seconds
+          when "m"
+            amount.minutes
+          when "h"
+            amount.hours
+          when "d"
+            amount.days
+          else
+            raise WrongTypeConfigError.new(path, "Duration", "String(#{str})")
+          end
+        elsif match = str.match(/^(\d+)$/)
+          # Plain number - treat as milliseconds
+          match[1].to_i64.milliseconds
         else
           raise WrongTypeConfigError.new(path, "Duration", "String(#{str})")
         end
-      elsif match = str.match(/^(\d+)$/)
-        # Plain number - treat as milliseconds
-        match[1].to_i64.milliseconds
-      else
+      rescue ex : ArgumentError | OverflowError
         raise WrongTypeConfigError.new(path, "Duration", "String(#{str})")
       end
     end
@@ -556,9 +567,9 @@ module Movie
     private def convert_env_value(value : String) : ConfigValue
       # Boolean
       case value.downcase
-      when "true", "yes", "on", "1"
+      when "true", "yes", "on"
         return true
-      when "false", "no", "off", "0"
+      when "false", "no", "off"
         return false
       end
 
@@ -579,6 +590,24 @@ module Movie
 
       # String (default)
       value
+    end
+
+    private def apply_env_overrides(builder : ConfigBuilder, prefix : String, canonical : Bool)
+      ENV.each do |key, value|
+        next unless key.starts_with?("#{prefix}_")
+
+        suffix = key[prefix.size..]
+        path = if canonical
+                 next unless suffix.starts_with?("__")
+                 suffix[2..].split("__").map { |segment| segment.downcase.gsub("_", "-") }.join(".")
+               else
+                 next if suffix.starts_with?("__")
+                 suffix[1..].downcase.gsub("_", ".")
+               end
+
+        next if path.empty?
+        set_builder_value(builder, path, convert_env_value(value))
+      end
     end
 
     # Sets a value on a ConfigBuilder, handling different types.
@@ -604,7 +633,7 @@ module Movie
     protected def self.convert_yaml_value(yaml : YAML::Any) : ConfigValue
       case yaml.raw
       when Nil
-        nil
+        raise ConfigError.new("Null values are not supported in configuration")
       when Bool
         yaml.as_bool
       when Int64
@@ -630,7 +659,7 @@ module Movie
     protected def self.convert_json_value(json : JSON::Any) : ConfigValue
       case json.raw
       when Nil
-        nil
+        raise ConfigError.new("Null values are not supported in configuration")
       when Bool
         json.as_bool
       when Int64
@@ -795,6 +824,7 @@ module Movie
   #
   # Configuration paths:
   #   name                           - Actor system name (default: auto-generated)
+  #   actor.restart-strategy         - Root actor restart behavior: restart|stop
   #   supervision.strategy           - Default supervision strategy: restart|stop|resume|escalate
   #   supervision.scope              - Supervision scope: one-for-one|all-for-one
   #   supervision.max-restarts       - Max restarts before giving up
@@ -814,6 +844,9 @@ module Movie
       Config.builder
         # System
         .set("name", "")  # Empty means auto-generate
+
+        # Root actor lifecycle defaults
+        .set("actor.restart-strategy", "restart")
 
         # Supervision defaults
         .set("supervision.strategy", "restart")
@@ -882,7 +915,7 @@ module Movie
 
     # Creates a RestartStrategy from a Config.
     def self.restart_strategy(config : Config) : RestartStrategy
-      parse_restart_strategy(config.get_string("supervision.strategy", "restart"))
+      parse_restart_strategy(config.get_string("actor.restart-strategy", "restart"))
     end
   end
 end

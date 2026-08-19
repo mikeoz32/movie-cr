@@ -93,6 +93,15 @@ describe Movie::ActorSystem do
     result.should eq("echo: hi")
   end
 
+  it "allows resume supervision without changing root restart configuration" do
+    config = Movie::Config.builder
+      .set("supervision.strategy", "resume")
+      .build
+
+    system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, config)
+    system.shutdown
+  end
+
   it "uses dead letters as sender for external tell" do
     channel = Channel(Int32?).new(1)
 

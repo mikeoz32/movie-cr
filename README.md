@@ -53,6 +53,18 @@ The high-level `ActorRef#ask`, `ActorContext#watch`, and `ActorContext#ask` APIs
 
 See [doc/movie/remoting.md](doc/movie/remoting.md) and [examples/remoting_example.cr](examples/remoting_example.cr) for the complete supported workflow.
 
+## Configuration
+
+Configuration can be loaded from YAML or JSON and combined with typed defaults. Canonical keys use lower-case kebab-case, and environment overrides use double underscores for nested paths:
+
+```crystal
+config = Movie::Config.load("movie.yml", Movie::ActorSystemConfig.default)
+config = config.with_env_overrides
+system = Movie::ActorSystem.new(main_behavior, config)
+```
+
+See [doc/movie/configuration.md](doc/movie/configuration.md) for supported keys, defaults, aliases, and environment variable rules.
+
 ## API stability
 
 Stable application-facing APIs:

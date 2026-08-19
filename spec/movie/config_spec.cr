@@ -113,6 +113,24 @@ describe Movie::Config do
       config = Movie::Config.builder.set("value", 42.7).build
       config.get_int("value").should eq(42)
     end
+
+    it "wraps invalid numeric strings in WrongTypeConfigError" do
+      config = Movie::Config.builder.set("port", "not-a-port").build
+
+      expect_raises(Movie::WrongTypeConfigError, /port.*Int64.*not-a-port/i) do
+        config.get_int("port")
+      end
+    end
+  end
+
+  describe "#get_float" do
+    it "wraps invalid numeric strings in WrongTypeConfigError" do
+      config = Movie::Config.builder.set("ratio", "not-a-float").build
+
+      expect_raises(Movie::WrongTypeConfigError, /ratio.*Float64.*not-a-float/i) do
+        config.get_float("ratio")
+      end
+    end
   end
 
   describe "#get_bool" do
@@ -148,6 +166,14 @@ describe Movie::Config do
       config = Movie::Config.empty
       config.get_bool("missing", true).should be_true
     end
+
+    it "wraps invalid string values in WrongTypeConfigError" do
+      config = Movie::Config.builder.set("enabled", "maybe").build
+
+      expect_raises(Movie::WrongTypeConfigError, /enabled.*Bool.*maybe/i) do
+        config.get_bool("enabled")
+      end
+    end
   end
 
   describe "#get_duration" do
@@ -179,6 +205,24 @@ describe Movie::Config do
     it "returns default for missing path" do
       config = Movie::Config.empty
       config.get_duration("missing", 1.second).should eq(1.second)
+    end
+
+    it "wraps invalid duration strings in WrongTypeConfigError" do
+      config = Movie::Config.builder.set("timeout", "soon").build
+
+      expect_raises(Movie::WrongTypeConfigError, /timeout.*Duration.*soon/i) do
+        config.get_duration("timeout")
+      end
+    end
+
+    it "wraps overflowing duration strings in WrongTypeConfigError" do
+      config = Movie::Config.builder
+        .set("timeout", "999999999999999999999999999999999999999999999999ms")
+        .build
+
+      expect_raises(Movie::WrongTypeConfigError, /timeout.*Duration/i) do
+        config.get_duration("timeout")
+      end
     end
   end
 
@@ -304,6 +348,18 @@ describe Movie::Config do
       config.get_int("remoting.pool.size").should eq(8)
     end
 
+    it "rejects explicit null values" do
+      expect_raises(Movie::ConfigError, /null values are not supported/i) do
+        Movie::Config.from_yaml("name: null")
+      end
+    end
+
+    it "wraps malformed input in ConfigError" do
+      expect_raises(Movie::ConfigError, /invalid yaml/i) do
+        Movie::Config.from_yaml("name: [")
+      end
+    end
+
     it "parses arrays in YAML" do
       yaml = <<-YAML
         hosts:
@@ -377,11 +433,35 @@ describe Movie::Config do
       config.get_int("remoting.port").should eq(9000)
     end
 
+    it "rejects explicit null values" do
+      expect_raises(Movie::ConfigError, /null values are not supported/i) do
+        Movie::Config.from_json(%({"name": null}))
+      end
+    end
+
+    it "wraps malformed input in ConfigError" do
+      expect_raises(Movie::ConfigError, /invalid json/i) do
+        Movie::Config.from_json(%({"name":}))
+      end
+    end
+
     it "parses arrays in JSON" do
       json = %({"hosts": ["host1", "host2", "host3"]})
 
       config = Movie::Config.from_json(json)
       config.get_string_array("hosts").should eq(["host1", "host2", "host3"])
+    end
+  end
+
+  describe "null and missing paths" do
+    it "keeps missing paths available through optional access" do
+      config = Movie::Config.empty
+
+      config.has_path?("missing").should be_false
+      config["missing"]?.should be_nil
+      expect_raises(Movie::MissingConfigError) do
+        config["missing"]
+      end
     end
   end
 
@@ -440,6 +520,48 @@ describe Movie::Config do
       ensure
         ENV.delete("MOVIE_TEST_HOSTS")
       end
+    end
+
+    it "maps canonical env names to hyphenated config keys" do
+      ENV["MOVIE_TEST_REMOTING_PORT"] = "9001"
+      ENV["MOVIE_TEST__REMOTING__PORT"] = "0"
+      ENV["MOVIE_TEST__REMOTING__STRIPE_COUNT"] = "12"
+      ENV["MOVIE_TEST__EXECUTOR__POOL_SIZE"] = "6"
+      ENV["MOVIE_TEST__MOVIE__PERSISTENCE__DB_PATH"] = "data/custom.sqlite3"
+
+      begin
+        config = Movie::Config.empty.with_env_overrides("MOVIE_TEST")
+
+        config.get_int("remoting.port").should eq(0)
+        config.get_int("remoting.stripe-count").should eq(12)
+        config.get_int("executor.pool-size").should eq(6)
+        config.get_string("movie.persistence.db-path").should eq("data/custom.sqlite3")
+      ensure
+        ENV.delete("MOVIE_TEST_REMOTING_PORT")
+        ENV.delete("MOVIE_TEST__REMOTING__PORT")
+        ENV.delete("MOVIE_TEST__REMOTING__STRIPE_COUNT")
+        ENV.delete("MOVIE_TEST__EXECUTOR__POOL_SIZE")
+        ENV.delete("MOVIE_TEST__MOVIE__PERSISTENCE__DB_PATH")
+      end
+    end
+  end
+
+  describe "ActorSystemConfig strategies" do
+    it "keeps root restart strategy independent from supervision strategy" do
+      config = Movie::Config.builder
+        .set("supervision.strategy", "resume")
+        .build
+
+      Movie::ActorSystemConfig.restart_strategy(config).should eq(Movie::RestartStrategy::RESTART)
+      Movie::ActorSystemConfig.supervision_config(config).strategy.should eq(Movie::SupervisionStrategy::RESUME)
+    end
+
+    it "reads root restart strategy from actor.restart-strategy" do
+      config = Movie::Config.builder
+        .set("actor.restart-strategy", "stop")
+        .build
+
+      Movie::ActorSystemConfig.restart_strategy(config).should eq(Movie::RestartStrategy::STOP)
     end
   end
 end
