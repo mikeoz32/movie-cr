@@ -563,9 +563,9 @@ module Movie
     private def convert_env_value(value : String) : ConfigValue
       # Boolean
       case value.downcase
-      when "true", "yes", "on", "1"
+      when "true", "yes", "on"
         return true
-      when "false", "no", "off", "0"
+      when "false", "no", "off"
         return false
       end
 
