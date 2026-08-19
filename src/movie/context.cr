@@ -6,7 +6,6 @@ module Movie
     abstract def path : ActorPath?
     abstract def rebind_path(path : ActorPath?) : Nil
     abstract def deliver_serializable(message : Object, sender : ActorRefBase?) : Nil
-    abstract def resume_after_failure : Nil
     abstract def accepts_user_messages? : Bool
     abstract def discard_user_messages? : Bool
   end
@@ -237,13 +236,6 @@ module Movie
       deliver(typed_message, sender)
     end
 
-    def resume_after_failure : Nil
-      if @state == State::FAILED
-        transition_to(State::RUNNING)
-        @mailbox.try &.wake
-      end
-    end
-
     def accepts_user_messages? : Bool
       @state == State::CREATED || @state == State::STARTING || @state == State::RUNNING
     end
@@ -310,6 +302,8 @@ module Movie
         handle_terminated(message.message.as(Terminated))
       when Restart
         handle_restart(message.message.as(Restart))
+      when Resume
+        handle_resume
       else
         # Unknown system message - send to dead letters or log
       end
@@ -402,9 +396,7 @@ module Movie
     end
 
     protected def resume_actor(actor : ActorRefBase)
-      if context = @system.context(actor.id)
-        context.resume_after_failure
-      end
+      actor.send_system(RESUME)
     end
 
     protected def escalate_failure(actor : ActorRefBase, cause : Exception?)
@@ -542,6 +534,11 @@ module Movie
       end
       transition_to(State::STARTING)
       handle_pre_start
+    end
+
+    protected def handle_resume
+      return unless @state == State::FAILED
+      transition_to(State::RUNNING)
     end
 
     protected def initiate_children_stop

@@ -437,6 +437,68 @@ describe "Movie runtime hardening" do
     system.shutdown
   end
 
+  it "resumes concurrently failed actors without losing queued messages" do
+    actor_count = 64
+    probed = Channel(Nil).new(actor_count)
+    supervision = Movie::SupervisionConfig.new(
+      strategy: Movie::SupervisionStrategy::RESUME,
+      scope: Movie::SupervisionScope::ONE_FOR_ONE,
+      max_restarts: 3,
+      within: 1.second
+    )
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same, Movie::RestartStrategy::RESTART, supervision)
+    actors = Array(Movie::ActorRef(Symbol)).new(actor_count)
+
+    actor_count.times do
+      actors << system.spawn(ResumeProbe.new(probed))
+    end
+    actors.each do |actor|
+      actor << :crash
+      actor << :probe
+    end
+
+    actor_count.times do
+      select
+      when probed.receive
+      when timeout(2.seconds)
+        fail "RESUME lost a queued message under concurrent failures"
+      end
+    end
+
+    system.shutdown
+  end
+
+  it "processes RESUME inside the failed actor mailbox" do
+    probed = Channel(Nil).new(1)
+    supervision = Movie::SupervisionConfig.new(
+      strategy: Movie::SupervisionStrategy::ESCALATE,
+      scope: Movie::SupervisionScope::ONE_FOR_ONE,
+      max_restarts: 3,
+      within: 1.second
+    )
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same, Movie::RestartStrategy::RESTART, supervision)
+    actor = system.spawn(ResumeProbe.new(probed))
+
+    actor << :crash
+    hardening_eventually(1.second) do
+      if context = system.context(actor.id)
+        context.state.to_s == "FAILED"
+      else
+        false
+      end
+    end.should be_true
+    actor.send_system(Movie::RESUME)
+    actor << :probe
+
+    select
+    when probed.receive
+    when timeout(1.second)
+      fail "RESUME system message did not recover the actor"
+    end
+
+    system.shutdown
+  end
+
   it "does not run PostStart after stop wins during PreStart" do
     probe = BlockingStartProbe.new
     system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
