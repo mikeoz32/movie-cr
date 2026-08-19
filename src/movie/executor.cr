@@ -5,14 +5,19 @@ require "./future"
 module Movie
   # Generic executor extension — runs arbitrary tasks on a bounded pool of workers.
   class ExecutorExtension < Movie::Extension
+    class ExecutorStopped < Exception
+    end
+
     @pool_size : Int32
     @queue_capacity : Int32
     @task_queue : Channel(Proc(Nil))
-    @started : Bool
+    @started : Atomic(Bool)
+    @stopped : Atomic(Bool)
 
     def initialize(@system : AbstractActorSystem, @pool_size : Int32 = 4, @queue_capacity : Int32 = 128)
       @task_queue = Channel(Proc(Nil)).new(@queue_capacity)
-      @started = false
+      @started = Atomic(Bool).new(false)
+      @stopped = Atomic(Bool).new(false)
     end
 
     def start
@@ -20,6 +25,7 @@ module Movie
     end
 
     def stop
+      @stopped.set(true)
       # Close the task queue to terminate workers (if running)
       begin
         @task_queue.close
@@ -28,8 +34,10 @@ module Movie
     end
 
     private def ensure_started
-      return if @started
-      @started = true
+      return if @stopped.get
+      _, started = @started.compare_and_set(false, true)
+      return unless started
+      return if @stopped.get
 
       @pool_size.times do
         @system.dispatchers.internal.execute do
@@ -52,13 +60,43 @@ module Movie
       end
     end
 
-    # Simple result wrapper sent back to the caller actor.
-    record TaskResult(T), value : T
+    abstract struct TaskReply(T)
+    end
+
+    struct TaskSuccess(T) < TaskReply(T)
+      getter value : T
+
+      def initialize(@value : T)
+      end
+    end
+
+    struct TaskFailure(T) < TaskReply(T)
+      getter error : Exception
+
+      def initialize(@error : Exception)
+      end
+    end
+
+    private class ReplyState
+      def initialize
+        @delivered = Atomic(Bool).new(false)
+      end
+
+      def try_mark_delivered : Bool
+        _, success = @delivered.compare_and_set(false, true)
+        success
+      end
+    end
 
     # Execute a block and return a Future (existing API).
     def execute(timeout : Time::Span? = nil, &block : -> T) : Future(T) forall T
-      ensure_started
       promise = Promise(T).new
+      if @stopped.get
+        promise.try_failure(ExecutorStopped.new)
+        return promise.future
+      end
+
+      ensure_started
 
       task = -> {
         begin
@@ -77,29 +115,48 @@ module Movie
         end
       end
 
-      @task_queue.send(task)
+      begin
+        @task_queue.send(task)
+      rescue Channel::ClosedError
+        promise.try_failure(ExecutorStopped.new)
+      end
       promise.future
     end
 
     # Execute a block and send the result back to a specific actor via a message.
-    def execute_with_reply(reply_to : ActorRef(TaskResult(T)), timeout : Time::Span? = nil, &block : -> T) : Nil forall T
+    def execute_with_reply(reply_to : ActorRef(TaskReply(T)), timeout : Time::Span? = nil, &block : -> T) : Nil forall T
+      state = ReplyState.new
+      if @stopped.get
+        deliver_reply(reply_to, state, TaskFailure(T).new(ExecutorStopped.new))
+        return
+      end
+
       ensure_started
+
       task = -> {
         begin
           result = block.call
-          reply_to << TaskResult(T).new(result)
+          deliver_reply(reply_to, state, TaskSuccess(T).new(result))
         rescue ex : Exception
-          # In case of error we simply ignore sending a message; the caller can handle timeout if needed.
+          deliver_reply(reply_to, state, TaskFailure(T).new(ex))
         end
       }
 
       if timeout
         @system.scheduler.schedule_once(timeout) do
-          reply_to << FutureTimeout.new
+          deliver_reply(reply_to, state, TaskFailure(T).new(FutureTimeout.new))
         end
       end
 
-      @task_queue.send(task)
+      begin
+        @task_queue.send(task)
+      rescue Channel::ClosedError
+        deliver_reply(reply_to, state, TaskFailure(T).new(ExecutorStopped.new))
+      end
+    end
+
+    private def deliver_reply(reply_to : ActorRef(TaskReply(T)), state : ReplyState, reply : TaskReply(T)) : Nil forall T
+      reply_to << reply if state.try_mark_delivered
     end
   end
 

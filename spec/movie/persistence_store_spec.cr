@@ -16,12 +16,12 @@ module Movie
     )
     end
 
-    def receive(message : StoreProbeMessage, ctx : ActorContext(StoreProbeMessage))
+    def receive(message : StoreProbeMessage, context : ActorContext(StoreProbeMessage))
       case message
       when StoreProbeStart
-        ctx.ask(@store, Movie::Persistence::AppendEvent.new("stream-1", "a"), Int64).await(STORE_TIMEOUT)
-        ctx.ask(@store, Movie::Persistence::AppendEvent.new("stream-1", "b"), Int64).await(STORE_TIMEOUT)
-        events = ctx.ask(@store, Movie::Persistence::LoadEvents.new("stream-1"), Array(String)).await(STORE_TIMEOUT)
+        context.ask(@store, Movie::Persistence::AppendEvent.new("stream-1", "a"), Int64).await(STORE_TIMEOUT)
+        context.ask(@store, Movie::Persistence::AppendEvent.new("stream-1", "b"), Int64).await(STORE_TIMEOUT)
+        events = context.ask(@store, Movie::Persistence::LoadEvents.new("stream-1"), Array(String)).await(STORE_TIMEOUT)
         @promise.try_success(events)
       end
       Behaviors(StoreProbeMessage).same
@@ -35,11 +35,11 @@ module Movie
     )
     end
 
-    def receive(message : StoreProbeMessage, ctx : ActorContext(StoreProbeMessage))
+    def receive(message : StoreProbeMessage, context : ActorContext(StoreProbeMessage))
       case message
       when StoreProbeStart
-        ctx.ask(@store, Movie::Persistence::SaveState.new("entity-1", "payload"), Bool).await(STORE_TIMEOUT)
-        value = ctx.ask(@store, Movie::Persistence::LoadState.new("entity-1"), String?).await(STORE_TIMEOUT)
+        context.ask(@store, Movie::Persistence::SaveState.new("entity-1", "payload"), Bool).await(STORE_TIMEOUT)
+        value = context.ask(@store, Movie::Persistence::LoadState.new("entity-1"), String?).await(STORE_TIMEOUT)
         @promise.try_success(value)
       end
       Behaviors(StoreProbeMessage).same

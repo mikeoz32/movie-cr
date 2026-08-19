@@ -11,6 +11,21 @@ record EchoResponse, message : String do
 end
 
 describe "Movie Remote Integration" do
+  it "does not report remoting enabled when the bind fails" do
+    owner = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "bind-owner")
+    owner_extension = owner.enable_remoting("127.0.0.1", 0)
+
+    contender = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "bind-contender")
+    expect_raises(Movie::ExtensionStartError) do
+      contender.enable_remoting("127.0.0.1", owner_extension.local_port)
+    end
+    contender.remoting_enabled?.should be_false
+    contender.remote.should be_nil
+
+    contender.shutdown
+    owner.shutdown
+  end
+
   describe "ActorSystem with remoting" do
     it "creates an actor system with a name" do
       system = Movie::ActorSystem(String).new(
@@ -54,6 +69,22 @@ describe "Movie Remote Integration" do
 
       port.should be > 0
       port.should be < 65536
+
+      extension.stop
+    end
+
+    it "publishes the actual bound port on the system address when using port 0" do
+      system = Movie::ActorSystem(String).new(
+        Movie::Behaviors(String).same,
+        name: "published-port-test"
+      )
+
+      extension = system.enable_remoting("127.0.0.1", 0)
+      bound_port = extension.local_port
+
+      system.address.remote?.should be_true
+      system.address.port.should eq(bound_port)
+      extension.address.port.should eq(bound_port)
 
       extension.stop
     end
@@ -103,6 +134,32 @@ describe "Movie Remote Integration" do
       system.address.remote?.should be_true
       system.address.protocol.should eq("movie.tcp")
       system.address.host.should eq("127.0.0.1")
+
+      extension.stop
+    end
+
+    it "rebinds existing actor paths to the actual remote address when enabling remoting with port 0" do
+      system = Movie::ActorSystem(String).new(
+        Movie::Behaviors(String).same,
+        name: "rebind-sys"
+      )
+
+      actor = system.spawn(Movie::Behaviors(String).same, name: "probe")
+      actor.path.not_nil!.address.local?.should be_true
+
+      extension = system.enable_remoting("127.0.0.1", 0)
+      bound_port = extension.local_port
+
+      rebound_path = actor.path.not_nil!
+      rebound_path.address.remote?.should be_true
+      rebound_path.address.port.should eq(bound_port)
+      system.path_registry.path_for(actor).should eq(rebound_path)
+
+      spawned_after_remoting = system.spawn(Movie::Behaviors(String).same, name: "late-probe")
+      spawned_after_remoting.path.not_nil!.address.port.should eq(bound_port)
+      spawned_after_remoting.path.not_nil!.address.should eq(system.address)
+
+      extension.path_for_actor("manual-probe").address.port.should eq(bound_port)
 
       extension.stop
     end

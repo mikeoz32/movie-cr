@@ -7,6 +7,7 @@ module Movie
   STOP = Stop.new().as(SystemMessage)
   PRE_STOP = PreStop.new().as(SystemMessage)
   POST_STOP = PostStop.new().as(SystemMessage)
+  RESUME = Resume.new().as(SystemMessage)
 
   # Lifecycle Events
   class PreStart < SystemMessage
@@ -55,6 +56,10 @@ module Movie
     getter cause : Exception?
     def initialize(@cause : Exception?)
     end
+  end
+
+  class Resume < SystemMessage
+    # Request recovery of a failed actor without restarting its behavior.
   end
 
   enum RestartStrategy

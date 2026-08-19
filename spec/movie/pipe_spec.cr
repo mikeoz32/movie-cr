@@ -5,9 +5,9 @@ private class PipeReceiver(T) < Movie::AbstractBehavior(Movie::Pipe::Message(T))
   def initialize(@promise : Movie::Promise(Movie::Pipe::Message(T)))
   end
 
-  def receive(message, ctx)
+  def receive(message, context)
     @promise.try_success(message)
-    ctx.stop
+    context.stop
     Movie::Behaviors(Movie::Pipe::Message(T)).same
   end
 end
@@ -21,8 +21,8 @@ private struct PipeRequest(T)
 end
 
 private class PipeActor(T) < Movie::AbstractBehavior(PipeRequest(T))
-  def receive(message, ctx)
-    ctx.pipe(message.future, message.reply_to)
+  def receive(message, context)
+    context.pipe(message.future, message.reply_to)
     Movie::Behaviors(PipeRequest(T)).same
   end
 end
@@ -31,9 +31,9 @@ private class StringReceiver < Movie::AbstractBehavior(String)
   def initialize(@promise : Movie::Promise(String))
   end
 
-  def receive(message, ctx)
+  def receive(message, context)
     @promise.try_success(message)
-    ctx.stop
+    context.stop
     Movie::Behaviors(String).same
   end
 end
@@ -42,8 +42,8 @@ private class MappingPipeActor < Movie::AbstractBehavior(Movie::Future(Int32))
   def initialize(@target : Movie::ActorRef(String))
   end
 
-  def receive(message, ctx)
-    ctx.pipe(message, @target, ->(value : Int32) { "value=#{value}" }, ->(ex : Exception) { "error=#{ex.message}" })
+  def receive(message, context)
+    context.pipe(message, @target, ->(value : Int32) { "value=#{value}" }, ->(ex : Exception) { "error=#{ex.message}" })
     Movie::Behaviors(Movie::Future(Int32)).same
   end
 end

@@ -7,6 +7,63 @@ require "./message_registry"
 require "../path"
 
 module Movie::Remote
+  record RemoteAskFailurePayload, error_class : String, message : String do
+    include JSON::Serializable
+  end
+
+  class RemoteAskResponseSenderRef < Movie::ActorRefBase
+    ASK_FAILURE_TAG   = "__movie_remote_ask_failure__"
+    ASK_CANCELLED_TAG = "__movie_remote_ask_cancelled__"
+
+    def initialize(@connection : InboundConnection, @correlation_id : String, path : ActorPath?)
+      super(0, path)
+    end
+
+    def reply_success(value : JSON::Serializable) : Nil
+      tag, payload = MessageRegistry.serialize(value)
+      send_response(WireEnvelope.ask_response(
+        target_path: path.try(&.to_s) || "",
+        message_type: tag,
+        payload: payload,
+        correlation_id: @correlation_id
+      ))
+    end
+
+    def reply_failure(error : Exception) : Nil
+      payload = JSON.parse(
+        RemoteAskFailurePayload.new(
+          error_class: error.class.name,
+          message: error.message || ""
+        ).to_json
+      )
+      send_response(WireEnvelope.ask_response(
+        target_path: path.try(&.to_s) || "",
+        message_type: ASK_FAILURE_TAG,
+        payload: payload,
+        correlation_id: @correlation_id
+      ))
+    end
+
+    def reply_cancelled : Nil
+      send_response(WireEnvelope.ask_response(
+        target_path: path.try(&.to_s) || "",
+        message_type: ASK_CANCELLED_TAG,
+        payload: JSON::Any.new({} of String => JSON::Any),
+        correlation_id: @correlation_id
+      ))
+    end
+
+    def send_system(message : Movie::SystemMessage)
+      raise "Remote ask response system messages are not supported yet"
+    end
+
+    private def send_response(envelope : WireEnvelope) : Nil
+      unless @connection.send(envelope)
+        ::Log.for(self.class).warn { "Failed to send remote ask response for correlation #{@correlation_id}" }
+      end
+    end
+  end
+
   # RemoteExtension is the main coordinator for the remoting system.
   # It manages the server, connections, and provides methods for remote communication.
   #
@@ -17,6 +74,42 @@ module Movie::Remote
   #
   class RemoteExtension < Movie::Extension
     Log = ::Log.for(self)
+
+    private class RemoteSystemRef < Movie::ActorRefBase
+      def initialize(@path_registry : Movie::PathRegistry, @connection : InboundConnection?, path : ActorPath)
+        super(0, path)
+      end
+
+      def send_system(message : Movie::SystemMessage)
+        path = self.path || raise RemoteDeliveryError.new("Remote system ref is missing a path")
+        connection = @connection || raise RemoteDeliveryError.new("No remote connection is available for #{path}")
+        tag, payload = SystemMessageCodec.serialize(message, @path_registry)
+
+        unless connection.send(WireEnvelope.system_message(
+                 target_path: path.to_s,
+                 message_type: tag,
+                 payload: payload
+               ))
+          Log.warn { "Failed to send system message to #{path}" }
+        end
+      end
+
+      def ==(other : Movie::ActorRefBase) : Bool
+        path = self.path
+        other_path = other.path
+        return false unless path && other_path
+
+        path == other_path
+      end
+
+      def hash(hasher)
+        if path = self.path
+          path.hash(hasher)
+        else
+          id.hash(hasher)
+        end
+      end
+    end
 
     getter address : Address
     getter stripe_count : Int32
@@ -35,7 +128,7 @@ module Movie::Remote
       @system : Movie::AbstractActorSystem,
       bind_host : String,
       bind_port : Int32,
-      @stripe_count : Int32 = StripedConnectionPool::DEFAULT_STRIPE_COUNT
+      @stripe_count : Int32 = StripedConnectionPool::DEFAULT_STRIPE_COUNT,
     )
       system_name = @system.name
       @address = Address.remote(system_name, bind_host, bind_port)
@@ -55,7 +148,11 @@ module Movie::Remote
 
     # Starts the remote extension (server).
     def start : Bool
-      @server.start
+      started = @server.start
+      if started
+        @address = Address.remote(@address.system, @address.host.not_nil!, @server.local_port)
+      end
+      started
     end
 
     # Stops the remote extension.
@@ -76,13 +173,15 @@ module Movie::Remote
     def pool_for(address : Address) : StripedConnectionPool
       key = address.to_s
 
+      stale_pool = nil.as(StripedConnectionPool?)
       @pools_mutex.synchronize do
         if existing = @pools[key]?
           return existing if existing.connected?
           # Pool exists but is disconnected - remove it
-          @pools.delete(key)
+          stale_pool = @pools.delete(key)
         end
       end
+      stale_pool.try &.close
 
       pool = StripedConnectionPool.new(
         address: address,
@@ -100,8 +199,17 @@ module Movie::Remote
         pool.stripe(0).send(handshake)
 
         @pools_mutex.synchronize do
+          if existing = @pools[key]?
+            if existing.connected?
+              pool.close
+              return existing
+            end
+            existing.close
+          end
           @pools[key] = pool
         end
+      else
+        pool.close
       end
 
       pool
@@ -164,7 +272,7 @@ module Movie::Remote
       when .user_message?, .ask_request?
         deliver_to_local(envelope, conn)
       when .system_message?
-        deliver_system_to_local(envelope)
+        deliver_system_to_local(envelope, conn)
       when .heartbeat?
         # Ignore heartbeats (could log or track connection health)
       else
@@ -190,45 +298,49 @@ module Movie::Remote
       # Deserialize the message
       begin
         wrapper = MessageRegistry.deserialize(envelope.message_type, envelope.payload)
-        message = wrapper.value
-
-        # For ask requests, we need to handle the response
-        if envelope.kind.ask_request? && envelope.correlation_id
-          # TODO: Set up response handling
-          # For now, just deliver the message
-        end
-
-        # Deliver to the actor's mailbox
-        # Note: We can't directly call context.deliver because we don't know the type T
-        # This is a limitation - we need to use a type-erased delivery mechanism
-        deliver_typed_message(context, message, envelope.sender_path, conn, envelope.correlation_id)
-
+        deliver_typed_message(context, wrapper, remote_sender_for(envelope.sender_path, envelope.correlation_id, conn, envelope.kind.ask_request?))
       rescue ex
         Log.error { "Failed to deserialize message: #{ex.message}" }
       end
+    rescue ex
+      Log.error { "Failed to route remote message to #{target_path_str}: #{ex.message}" }
     end
 
     private def deliver_typed_message(
       context : Movie::AbstractActorContext,
-      message : JSON::Serializable,
-      sender_path : String?,
-      conn : InboundConnection?,
-      correlation_id : String?
+      wrapper : MessageWrapper,
+      sender : Movie::ActorRefBase?,
     )
-      # This is a workaround for Crystal's type system
-      # We store a callback on the context that can handle generic delivery
-      # For now, we'll log a warning since full type-erased delivery requires
-      # additional infrastructure
-      Log.debug { "Received message for actor, type: #{message.class}" }
-
-      # TODO: Implement type-erased message delivery
-      # This would require either:
-      # 1. A message handler registry on each actor
-      # 2. Using Crystal's Proc with union types
-      # 3. A dedicated remote message mailbox
+      wrapper.deliver_to(context, sender)
     end
 
-    private def deliver_system_to_local(envelope : WireEnvelope)
+    private def remote_sender_for(
+      sender_path : String?,
+      correlation_id : String?,
+      conn : InboundConnection?,
+      ask_request : Bool,
+    ) : Movie::ActorRefBase?
+      path = parse_sender_path(sender_path)
+
+      if ask_request && correlation_id && conn
+        RemoteAskResponseSenderRef.new(conn, correlation_id, path)
+      else
+        path ? RemoteSystemRef.new(path_registry, nil, path) : nil
+      end
+    end
+
+    private def parse_sender_path(sender_path : String?) : ActorPath?
+      return nil unless sender_path
+
+      begin
+        ActorPath.parse(sender_path)
+      rescue ex
+        Log.warn { "Failed to parse remote sender path #{sender_path}: #{ex.message}" }
+        nil
+      end
+    end
+
+    private def deliver_system_to_local(envelope : WireEnvelope, conn : InboundConnection?)
       target_path_str = envelope.target_path
       actor_id = path_registry.resolve(target_path_str)
 
@@ -243,32 +355,54 @@ module Movie::Remote
         return
       end
 
-      # Deserialize and deliver system message
-      system_message = deserialize_system_message(envelope.message_type, envelope.payload)
-      if system_message
-        # System messages can be delivered via send_system on the ref
-        # But we need to get the ref from the context
-        # For now, log that we received it
-        Log.debug { "Received system message for actor: #{envelope.message_type}" }
-      end
+      system_message = deserialize_system_message(envelope.message_type, envelope.payload, conn)
+      context.ref.send_system(system_message)
+    rescue ex : RemoteUnsupportedSystemMessageError
+      Log.error { "Unsupported remote system message #{envelope.message_type}: #{ex.message}" }
+    rescue ex
+      Log.error(exception: ex) { "Failed to deliver remote system message #{envelope.message_type}" }
     end
 
-    private def deserialize_system_message(type : String, payload : JSON::Any) : Movie::SystemMessage?
+    private def deserialize_system_message(type : String, payload : JSON::Any, conn : InboundConnection?) : Movie::SystemMessage
       case type
       when "Movie::Stop"
         Movie::STOP
-      when "Movie::PreStart"
-        Movie::PRE_START
-      when "Movie::PostStart"
-        Movie::POST_START
-      when "Movie::PreStop"
-        Movie::PRE_STOP
-      when "Movie::PostStop"
-        Movie::POST_STOP
+      when "Movie::Watch"
+        Movie::Watch.new(remote_system_ref_from_payload(payload, conn))
+      when "Movie::Unwatch"
+        Movie::Unwatch.new(remote_system_ref_from_payload(payload, conn))
+      when "Movie::Terminated"
+        Movie::Terminated.new(remote_system_ref_from_payload(payload, nil))
+      when "Movie::Failed"
+        failed = RemoteFailedSystemPayload.from_json(payload.to_json)
+        cause = if failed.error_class.empty? && failed.message.empty?
+                  nil
+                else
+                  RemoteSystemFailureError.new(failed.error_class, failed.message)
+                end
+        Movie::Failed.new(remote_system_ref_from_payload(payload, nil), cause)
       else
-        Log.warn { "Unknown system message type: #{type}" }
-        nil
+        raise RemoteUnsupportedSystemMessageError.new(
+          "Incoming remote system message #{type} is not supported"
+        )
       end
+    end
+
+    private def remote_system_ref_from_payload(payload : JSON::Any, conn : InboundConnection?) : Movie::ActorRefBase
+      actor_path = payload["actor_path"]?.try(&.as_s)
+      raise RemoteUnsupportedSystemMessageError.new("Remote system message is missing actor_path") unless actor_path
+
+      RemoteSystemRef.new(path_registry, conn, ActorPath.parse(actor_path))
+    rescue ex : ArgumentError
+      raise RemoteUnsupportedSystemMessageError.new("Invalid remote actor path #{actor_path}: #{ex.message}")
+    end
+  end
+
+  class RemoteSystemFailureError < Exception
+    getter remote_class : String
+
+    def initialize(@remote_class : String, message : String)
+      super("#{remote_class}: #{message}")
     end
   end
 end

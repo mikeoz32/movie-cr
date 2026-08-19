@@ -27,9 +27,14 @@ module Movie
   class Scheduler
     @log : Log
     @dispatcher : Dispatcher
+    @stopped = Atomic(Bool).new(false)
 
     def initialize(@dispatcher : Dispatcher)
       @log = Log.for("Movie::Scheduler")
+    end
+
+    def stop : Nil
+      @stopped.set(true)
     end
 
     # Schedules a one-shot timer that executes the block after the given delay.
@@ -39,10 +44,14 @@ module Movie
     # If the timer has already fired, cancellation has no effect.
     def schedule_once(delay : Time::Span, &block : -> Nil) : TimerHandle
       handle = TimerHandle.new
+      if @stopped.get
+        handle.cancel
+        return handle
+      end
 
       @dispatcher.execute do
         sleep delay
-        unless handle.cancelled?
+        unless handle.cancelled? || @stopped.get
           begin
             block.call
           rescue ex : Exception

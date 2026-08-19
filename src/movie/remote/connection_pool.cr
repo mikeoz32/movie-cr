@@ -13,17 +13,18 @@ module Movie::Remote
 
     getter address : Address
     getter stripe_count : Int32
-    getter? connected : Bool = false
+    @connected : Bool = false
 
     @stripes : Array(Connection)
     @round_robin : Atomic(Int32) = Atomic(Int32).new(0)
+    @connect_mutex = Mutex.new
 
     def initialize(
       @address : Address,
       @path_registry : Movie::PathRegistry,
       @system : Movie::AbstractActorSystem,
       @stripe_count : Int32 = DEFAULT_STRIPE_COUNT,
-      @on_message : Proc(WireEnvelope, Nil)? = nil
+      @on_message : Proc(WireEnvelope, Nil)? = nil,
     )
       @stripes = Array(Connection).new(@stripe_count) do
         Connection.new(
@@ -38,31 +39,38 @@ module Movie::Remote
     # Connects all stripes in parallel.
     # Returns true if all connections succeeded.
     def connect : Bool
-      return true if @connected
+      @connect_mutex.synchronize do
+        return true if connected?
 
-      results = Array(Bool).new(@stripe_count, false)
-      channels = @stripes.map_with_index do |conn, i|
-        ch = Channel(Bool).new(1)
-        spawn do
-          ch.send(conn.connect)
+        results = Array(Bool).new(@stripe_count, false)
+        channels = @stripes.map_with_index do |conn, i|
+          ch = Channel(Bool).new(1)
+          spawn do
+            ch.send(conn.connect)
+          end
+          {i, ch}
         end
-        {i, ch}
+
+        channels.each do |(i, ch)|
+          results[i] = ch.receive
+        end
+
+        success_count = results.count(true)
+        @connected = success_count == @stripe_count
+
+        if @connected
+          Log.info { "Connected #{@stripe_count} stripes to #{@address}" }
+        else
+          Log.warn { "Only #{success_count}/#{@stripe_count} stripes connected to #{@address}" }
+          @stripes.each(&.close)
+        end
+
+        @connected
       end
+    end
 
-      channels.each do |(i, ch)|
-        results[i] = ch.receive
-      end
-
-      success_count = results.count(true)
-      @connected = success_count == @stripe_count
-
-      if @connected
-        Log.info { "Connected #{@stripe_count} stripes to #{@address}" }
-      else
-        Log.warn { "Only #{success_count}/#{@stripe_count} stripes connected to #{@address}" }
-      end
-
-      @connected
+    def connected? : Bool
+      @connected && @stripes.all?(&.connected?)
     end
 
     # Returns the connection for a specific actor path.

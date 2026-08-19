@@ -45,7 +45,7 @@ module Movie
     def initialize(@promise : Promise(String))
     end
 
-    def receive(message : String, ctx : ActorContext(String))
+    def receive(message : String, context : ActorContext(String))
       @promise.try_success(message)
       Behaviors(String).same
     end

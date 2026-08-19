@@ -4,7 +4,7 @@ require "../../src/movie/persistence"
 
 module Movie
   class DummyBehavior < AbstractBehavior(Int32)
-    def receive(message, ctx)
+    def receive(message, context)
       Behaviors(Int32).same
     end
   end

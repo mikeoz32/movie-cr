@@ -10,6 +10,10 @@ record AnotherMessage, count : Int32 do
   include JSON::Serializable
 end
 
+record CollisionMessage, value : Int32 do
+  include JSON::Serializable
+end
+
 describe Movie::Remote::MessageRegistry do
   before_each do
     Movie::Remote::MessageRegistry.clear
@@ -24,6 +28,14 @@ describe Movie::Remote::MessageRegistry do
     it "registers with custom tag" do
       Movie::Remote::MessageRegistry.register(TestMessage, "custom-tag")
       Movie::Remote::MessageRegistry.registered?("custom-tag").should be_true
+    end
+
+    it "rejects custom tag collisions" do
+      Movie::Remote::MessageRegistry.register(TestMessage, "shared-tag")
+
+      expect_raises(ArgumentError, /already registered/) do
+        Movie::Remote::MessageRegistry.register(CollisionMessage, "shared-tag")
+      end
     end
   end
 

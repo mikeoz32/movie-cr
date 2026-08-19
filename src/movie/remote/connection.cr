@@ -22,7 +22,7 @@ module Movie::Remote
       @address : Address,
       @path_registry : Movie::PathRegistry,
       @system : Movie::AbstractActorSystem,
-      @on_message : Proc(WireEnvelope, Nil)? = nil
+      @on_message : Proc(WireEnvelope, Nil)? = nil,
     )
       @write_mutex = Mutex.new
       @pending_asks = {} of String => Channel(WireEnvelope)
@@ -123,16 +123,21 @@ module Movie::Remote
 
         envelope = begin
           FrameCodec.decode(socket)
-        rescue ex : IO::Error
+        rescue ex : Exception
           Log.debug { "Read error from #{@address}: #{ex.message}" }
           break
         end
 
         break if envelope.nil?
 
-        handle_incoming(envelope)
+        begin
+          handle_incoming(envelope)
+        rescue ex : Exception
+          Log.error(exception: ex) { "Protocol error from #{@address}" }
+          break
+        end
       end
-
+    ensure
       handle_disconnect unless @closed
     end
 
@@ -160,14 +165,8 @@ module Movie::Remote
 
     private def handle_disconnect
       return if @closed
-      @connected = false
       Log.info { "Disconnected from #{@address}" }
-
-      # Close all pending asks with nil/error
-      @pending_asks_mutex.synchronize do
-        @pending_asks.each_value(&.close)
-        @pending_asks.clear
-      end
+      close
     end
   end
 end

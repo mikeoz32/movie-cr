@@ -17,6 +17,15 @@ require "./movie/pipe"
 require "./movie/streams_typed"
 
 module Movie
+  class ActorUnavailableError < Exception
+  end
+
+  class ActorSystemShuttingDownError < Exception
+  end
+
+  class ExtensionStartError < Exception
+  end
+
   # Movie is an actor framework for Crystal
   # It is possible to build actors due to experimental execution contexts in language
   # Will hope that Crystal will not be deprecated in future
@@ -55,25 +64,24 @@ module Movie
   class PinnedDispatcher < Dispatcher
     # Uses isolated execution context, so only one actor can be executed in by this dispatcher
     # in single thread
-    def initialize()
+    def initialize
       super(Fiber::ExecutionContext::Isolated.new)
     end
   end
 
   class ParallelDispatcher < Dispatcher
     # uses parallel execution context, so multiple actors can be executed in parallel in different threads
-    def initialize()
+    def initialize
       super(Fiber::ExecutionContext::Parallel.new "pd-1", 24)
     end
   end
 
   class ConcurrentDispatcher < Dispatcher
     # uses concurrent execution context, so multiple actors can be executed concurrently in single thread
-    def initialize()
+    def initialize
       super(Fiber::ExecutionContext::Concurrent.new("cd-1"))
     end
   end
-
 
   abstract class ActorRefBase
     @id : Int32
@@ -97,7 +105,7 @@ module Movie
     @system : AbstractActorSystem
 
     def initialize(@system : AbstractActorSystem, path : ActorPath? = nil)
-      super(@system.next_id(), path)
+      super(@system.next_id, path)
     end
 
     def <<(message : T)
@@ -112,8 +120,40 @@ module Movie
 
     def send_system(message : SystemMessage)
       context = @system.context @id
-      return if context.nil?  # Actor already stopped and deregistered
+      return if context.nil? # Actor already stopped and deregistered
       context.as(ActorContext(T)).send_system_message(message)
+    end
+
+    def ask(message : T, response_type : R.class = Nil, timeout : Time::Span? = nil) : Future(R) forall R
+      state = Movie::Ask::AskState(R).new(Promise(R).new, self.as(ActorRefBase))
+      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
+        Movie::Ask::ListenerBehavior(R).new(state, self.as(ActorRefBase))
+      end
+
+      listener = @system.spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
+      listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
+      state.listener = listener_ref.as(ActorRefBase)
+      listener_context = @system.context(listener.id).as(ActorContext(Movie::Ask::Response(R)))
+      listener_context.watch(self)
+      begin
+        tell_from(listener_ref.as(ActorRefBase), message)
+      rescue ex : Exception
+        state.promise.try_failure(Movie::Ask::TargetTerminated.new(self.as(ActorRefBase)))
+        state.stop_listener
+        return state.promise.future
+      end
+
+      if timeout
+        timer_handle = @system.scheduler.schedule_once(timeout) do
+          if state.promise.future.pending?
+            state.promise.try_failure(FutureTimeout.new)
+            state.stop_listener
+          end
+        end
+        state.timer_handle = timer_handle
+      end
+
+      state.promise.future
     end
   end
 
@@ -121,12 +161,11 @@ module Movie
   end
 
   class RootGuardian < AbstractBehavior(RootGuardianMessage)
-    def receive(message : RootGuardianMessage)
-      puts "RootGuardian received: #{message}"
+    def receive(message : RootGuardianMessage, context : ActorContext(RootGuardianMessage)) : AbstractBehavior(RootGuardianMessage)
+      Behaviors(RootGuardianMessage).same
     end
 
     def on_signal(signal : SystemMessage)
-      puts "RootGuardian received signal: #{signal}"
     end
   end
 
@@ -134,12 +173,11 @@ module Movie
   end
 
   class UserGuardian < AbstractBehavior(UserGuardianMessage)
-    def receive(message : UserGuardianMessage)
-      puts "UserGuardian received: #{message}"
+    def receive(message : UserGuardianMessage, context : ActorContext(UserGuardianMessage)) : AbstractBehavior(UserGuardianMessage)
+      Behaviors(UserGuardianMessage).same
     end
 
-    def on_signal(signal : Signal)
-      puts "UserGuardian received signal: #{signal}"
+    def on_signal(signal : SystemMessage)
     end
   end
 
@@ -147,12 +185,11 @@ module Movie
   end
 
   class SystemGuardian < AbstractBehavior(SystemGuardianMessage)
-    def receive(message : SystemGuardianMessage)
-      puts "SystemGuardian received: #{message}"
+    def receive(message : SystemGuardianMessage, context : ActorContext(SystemGuardianMessage)) : AbstractBehavior(SystemGuardianMessage)
+      Behaviors(SystemGuardianMessage).same
     end
 
-    def on_signal(signal : Signal)
-      puts "SystemGuardian received signal: #{signal}"
+    def on_signal(signal : SystemMessage)
     end
   end
 
@@ -160,7 +197,7 @@ module Movie
   end
 
   class DeadLetters < AbstractBehavior(DeadLetter)
-    def receive(message, ctx)
+    def receive(message, context)
       Movie::Behaviors(DeadLetter).same
     end
   end
@@ -177,7 +214,7 @@ module Movie
     getter system_guardian : ActorRef(SystemGuardianMessage)?
     getter dead_letters : ActorRef(DeadLetter)?
 
-    def initialize()
+    def initialize
       @actors = {} of Int32 => AbstractActorContext
       @mutex = Mutex.new
     end
@@ -188,35 +225,46 @@ module Movie
 
       # Create root with path "/"
       root_path = ActorPath.new(system.address, [] of String)
-      root_context = create_actor_context(RootGuardian.new, RestartStrategy::RESTART, @default_supervision_config, root_path)
+      root_context = create_actor_context(RootGuardian.new, RestartStrategy::RESTART, @default_supervision_config, root_path, start_immediately: false)
       root_ref = root_context.ref
       @root = root_ref
 
       # Create system guardian with path "/system"
       system_path = ActorPath.new(system.address, ["system"])
-      system_context = create_actor_context(SystemGuardian.new, RestartStrategy::RESTART, @default_supervision_config, system_path)
+      system_context = create_actor_context(SystemGuardian.new, RestartStrategy::RESTART, @default_supervision_config, system_path, start_immediately: false)
 
       # Create dead letters with path "/system/dead_letters"
       dead_letters_path = system_path / "dead_letters"
-      dead_letters_context = create_actor_context(DeadLetters.new, RestartStrategy::RESTART, @default_supervision_config, dead_letters_path)
+      dead_letters_context = create_actor_context(DeadLetters.new, RestartStrategy::RESTART, @default_supervision_config, dead_letters_path, start_immediately: false)
 
       # Create user guardian with path "/user"
       user_path = ActorPath.new(system.address, ["user"])
-      user_context = create_actor_context(UserGuardian.new, RestartStrategy::RESTART, @default_supervision_config, user_path)
+      user_context = create_actor_context(UserGuardian.new, RestartStrategy::RESTART, @default_supervision_config, user_path, start_immediately: false)
 
-      root_context.attach_child system_context.ref
-      system_context.attach_child dead_letters_context.ref
-      root_context.attach_child user_context.ref
+      root_context.attach_child(system_context.ref, notify_child: false)
+      system_context.attach_child(dead_letters_context.ref, notify_child: false)
+      root_context.attach_child(user_context.ref, notify_child: false)
       @user_guardian = user_context.ref
       @system_guardian = system_context.ref
       @dead_letters = dead_letters_context.ref
+
+      root_context.start
+      system_context.start
+      dead_letters_context.start
+      user_context.start
+    end
+
+    def root_guardian : ActorRef(RootGuardianMessage)?
+      @root
     end
 
     protected def create_actor_context(
       behavior : AbstractBehavior(T),
       restart_strategy : RestartStrategy = RestartStrategy::RESTART,
       supervision_config : SupervisionConfig = @default_supervision_config,
-      path : ActorPath? = nil
+      path : ActorPath? = nil,
+      *,
+      start_immediately : Bool = true,
     ) : ActorContext(T) forall T
       raise "System not initialized" unless @system
       system = @system.as(AbstractActorSystem)
@@ -225,11 +273,16 @@ module Movie
       @mutex.synchronize do
         @actors[ref.id] = context
       end
-      # Register in path registry if path is provided
-      if p = path
-        system.path_registry.register(ref, p)
+      begin
+        # Register in path registry if path is provided.
+        if p = path
+          system.path_registry.register(ref, p)
+        end
+      rescue ex
+        @mutex.synchronize { @actors.delete(ref.id) }
+        raise ex
       end
-      context.start
+      context.start if start_immediately
       context
     end
 
@@ -248,7 +301,7 @@ module Movie
       behavior : AbstractBehavior(T),
       restart_strategy : RestartStrategy = RestartStrategy::RESTART,
       supervision_config : SupervisionConfig = @default_supervision_config,
-      name : String? = nil
+      name : String? = nil,
     ) : ActorRef(T) forall T
       raise "System not initialized" unless @system
       raise "Root guardian not initialized" if @user_guardian.nil?
@@ -263,8 +316,14 @@ module Movie
       actor_name = name || "$#{system.next_id}"
       child_path = user_path / actor_name
 
-      child = create_actor_context(behavior, restart_strategy, supervision_config, child_path)
-      user_context.as(ActorContext(UserGuardianMessage)).attach_child(child.ref)
+      child = create_actor_context(behavior, restart_strategy, supervision_config, child_path, start_immediately: false)
+      begin
+        user_context.as(ActorContext(UserGuardianMessage)).attach_child(child.ref, notify_child: false)
+      rescue ex
+        system.deregister(child.ref.id)
+        raise ex
+      end
+      child.start
       child.ref
     end
 
@@ -274,18 +333,18 @@ module Movie
       restart_strategy : RestartStrategy = RestartStrategy::RESTART,
       supervision_config : SupervisionConfig = @default_supervision_config,
       name : String? = nil,
-      parent_path : ActorPath? = nil
+      parent_path : ActorPath? = nil,
     ) : ActorRef(T) forall T
       raise "System not initialized" unless @system
       system = @system.as(AbstractActorSystem)
 
       # Build child path from parent path
       child_path = if parent_path
-        actor_name = name || "$#{system.next_id}"
-        parent_path / actor_name
-      else
-        nil
-      end
+                     actor_name = name || "$#{system.next_id}"
+                     parent_path / actor_name
+                   else
+                     nil
+                   end
 
       create_actor_context(behavior, restart_strategy, supervision_config, child_path)
     end
@@ -306,9 +365,37 @@ module Movie
       end
     end
 
+    def rebind_paths(address : Address)
+      raise "System not initialized" unless @system
+      system = @system.as(AbstractActorSystem)
+
+      snapshots = [] of NamedTuple(context: AbstractActorContext, elements: Array(String))
+      @mutex.synchronize do
+        @actors.each_value do |context|
+          path = context.path
+          next unless path
+          next unless path.address.system == address.system
+
+          snapshots << {context: context, elements: path.elements.dup}
+        end
+      end
+
+      snapshots.each do |snapshot|
+        rebound_path = ActorPath.new(address, snapshot[:elements])
+        snapshot[:context].rebind_path(rebound_path)
+        system.path_registry.register(snapshot[:context].ref, rebound_path)
+      end
+    end
+
     def deregister(id : Int32)
       @mutex.synchronize do
         @actors.delete(id)
+      end
+    end
+
+    def empty? : Bool
+      @mutex.synchronize do
+        @actors.empty?
       end
     end
   end
@@ -319,38 +406,47 @@ module Movie
       @default_dispatcher = nil.as(Dispatcher?)
       @internal_dispatcher = nil.as(Dispatcher?)
       @scheduler_dispatcher = nil.as(Dispatcher?)
+      @mutex = Mutex.new
     end
 
     def register(name : String, dispatcher : Dispatcher)
-      @dispatchers[name] = dispatcher
+      @mutex.synchronize { @dispatchers[name] = dispatcher }
     end
 
     def get(name : String)
-      dispatcher = @dispatchers[name]
-      dispatcher || raise "Dispatcher not found: #{name}"
-      dispatcher
+      @mutex.synchronize do
+        dispatcher = @dispatchers[name]
+        dispatcher || raise "Dispatcher not found: #{name}"
+        dispatcher
+      end
     end
 
     def default
       # ||= is a safe way to initialize a variable only once
       # if there is no default dispatcher, create one and register it
       # return default or return default = new
-      @dispatchers["default"] ||= begin
-        @default_dispatcher ||= ParallelDispatcher.new
+      @mutex.synchronize do
+        @dispatchers["default"] ||= begin
+          @default_dispatcher ||= ParallelDispatcher.new
+        end
       end
     end
 
     def internal
-      @dispatchers["internal"] ||= begin
-        @internal_dispatcher ||= ParallelDispatcher.new
+      @mutex.synchronize do
+        @dispatchers["internal"] ||= begin
+          @internal_dispatcher ||= ParallelDispatcher.new
+        end
       end
     end
 
     # Dedicated dispatcher for scheduler/timers.
     # Can be overridden by registering a "scheduler" dispatcher before first use.
     def scheduler
-      @dispatchers["scheduler"] ||= begin
-        @scheduler_dispatcher ||= ConcurrentDispatcher.new
+      @mutex.synchronize do
+        @dispatchers["scheduler"] ||= begin
+          @scheduler_dispatcher ||= ConcurrentDispatcher.new
+        end
       end
     end
   end
@@ -386,6 +482,13 @@ module Movie
     def register(ref : ActorRefBase, path : ActorPath)
       @mutex.synchronize do
         key = normalize_key(path)
+        if existing_id = @path_to_id[key]?
+          raise ArgumentError.new("Actor path #{path} is already registered by actor #{existing_id}") unless existing_id == ref.id
+        end
+        if old_path = @id_to_path[ref.id]?
+          old_key = normalize_key(old_path)
+          @path_to_id.delete(old_key) if old_key != key && @path_to_id[old_key]? == ref.id
+        end
         @path_to_id[key] = ref.id
         @id_to_path[ref.id] = path
       end
@@ -394,7 +497,8 @@ module Movie
     def unregister(ref : ActorRefBase)
       @mutex.synchronize do
         if path = @id_to_path.delete(ref.id)
-          @path_to_id.delete(normalize_key(path))
+          key = normalize_key(path)
+          @path_to_id.delete(key) if @path_to_id[key]? == ref.id
         end
       end
     end
@@ -402,7 +506,8 @@ module Movie
     def unregister(id : Int32)
       @mutex.synchronize do
         if path = @id_to_path.delete(id)
-          @path_to_id.delete(normalize_key(path))
+          key = normalize_key(path)
+          @path_to_id.delete(key) if @path_to_id[key]? == id
         end
       end
     end
@@ -513,13 +618,19 @@ module Movie
     # The extension's class name is used as the key.
     def register(extension : Extension)
       key = extension.class.name
+      started = extension.start
+      if started == false
+        extension.stop
+        raise ExtensionStartError.new("Extension #{key} failed to start")
+      end
+
       @mutex.synchronize do
         if @extensions.has_key?(key)
+          extension.stop
           raise "Extension #{key} is already registered"
         end
         @extensions[key] = extension
       end
-      extension.start
     end
 
     # Registers an extension if missing and returns the registered instance.
@@ -537,7 +648,14 @@ module Movie
       if existing
         return existing.as(T)
       end
-      extension.start
+      started = extension.start
+      if started == false
+        extension.stop
+        @mutex.synchronize do
+          @extensions.delete(key) if @extensions[key]?.same?(extension)
+        end
+        raise ExtensionStartError.new("Extension #{key} failed to start")
+      end
       extension.as(T)
     end
 
@@ -566,10 +684,13 @@ module Movie
 
     # Stops all registered extensions.
     def stop_all
-      @mutex.synchronize do
-        @extensions.each_value(&.stop)
+      registered_extensions = @mutex.synchronize do
+        current_extensions = @extensions.values
         @extensions.clear
+        current_extensions
       end
+
+      registered_extensions.each(&.stop)
     end
 
     # Returns all registered extensions.
@@ -584,6 +705,11 @@ module Movie
     @id_generator : Atomic(Int32) = Atomic(Int32).new(1)
     @registry : ActorRegistry?
     @scheduler : Scheduler?
+    @scheduler_mutex : Mutex = Mutex.new
+    @spawn_admission_mutex : Mutex = Mutex.new
+    @spawn_admission_closed : Bool = false
+    @actor_dispatch_mutex : Mutex = Mutex.new
+    @active_actor_fibers : Hash(UInt64, Int32) = {} of UInt64 => Int32
     @path_registry : PathRegistry = PathRegistry.new
     @extensions : ExtensionRegistry = ExtensionRegistry.new
 
@@ -599,15 +725,54 @@ module Movie
     # Registry for system extensions
     getter extensions : ExtensionRegistry
 
-    getter dispatchers : DispatcherRegistry = DispatcherRegistry.new()
-    getter mailboxes : MailboxManager = MailboxManager.new()
+    getter dispatchers : DispatcherRegistry = DispatcherRegistry.new
+    getter mailboxes : MailboxManager = MailboxManager.new
 
-    def next_id()
+    def next_id
       @id_generator.add(1)
     end
 
     def context(id : Int32)
       @registry.as(ActorRegistry)[id] if @registry
+    end
+
+    def shutting_down? : Bool
+      false
+    end
+
+    def with_spawn_admission(&block)
+      @spawn_admission_mutex.synchronize do
+        raise ActorSystemShuttingDownError.new("Actor system is shutting down") if @spawn_admission_closed
+        yield
+      end
+    end
+
+    def close_spawn_admission : Nil
+      @spawn_admission_mutex.synchronize { @spawn_admission_closed = true }
+    end
+
+    def actor_dispatch_enter : Nil
+      fiber_id = Fiber.current.object_id
+      @actor_dispatch_mutex.synchronize do
+        @active_actor_fibers[fiber_id] = (@active_actor_fibers[fiber_id]? || 0) + 1
+      end
+    end
+
+    def actor_dispatch_leave : Nil
+      fiber_id = Fiber.current.object_id
+      @actor_dispatch_mutex.synchronize do
+        if count = @active_actor_fibers[fiber_id]?
+          if count > 1
+            @active_actor_fibers[fiber_id] = count - 1
+          else
+            @active_actor_fibers.delete(fiber_id)
+          end
+        end
+      end
+    end
+
+    def actor_dispatching_on_current_fiber? : Bool
+      @actor_dispatch_mutex.synchronize { @active_actor_fibers.has_key?(Fiber.current.object_id) }
     end
 
     def deregister(id : Int32)
@@ -627,7 +792,9 @@ module Movie
     # Returns the system scheduler for scheduling timers and delayed tasks.
     # Uses a dedicated scheduler dispatcher for execution.
     def scheduler : Scheduler
-      @scheduler ||= Scheduler.new(dispatchers.scheduler)
+      @scheduler_mutex.synchronize do
+        @scheduler ||= Scheduler.new(dispatchers.scheduler)
+      end
     end
 
     # Returns a config instance (empty for systems without config).
@@ -669,6 +836,7 @@ module Movie
       extension = Remote::RemoteExtension.new(self, host, port, stripe_count)
       @extensions.register(extension)
       @address = extension.address
+      @registry.try &.rebind_paths(@address)
       extension
     end
 
@@ -741,8 +909,8 @@ module Movie
       # Local if: address is explicitly local, or matches our system's address
       path_addr.local? || path_addr == @address || (
         path_addr.system == @name &&
-        path_addr.host == @address.host &&
-        path_addr.port == @address.port
+          path_addr.host == @address.host &&
+          path_addr.port == @address.port
       )
     end
 
@@ -762,10 +930,12 @@ module Movie
     def spawn(
       behavior : AbstractBehavior(U),
       restart_strategy : RestartStrategy = RestartStrategy::RESTART,
-      name : String? = nil
+      name : String? = nil,
     ) : ActorRef(U) forall U
       raise "System not initialized" unless @registry
-      @registry.as(ActorRegistry).spawn(behavior, restart_strategy, name: name)
+      with_spawn_admission do
+        @registry.as(ActorRegistry).spawn(behavior, restart_strategy, name: name)
+      end
     end
 
     # Spawns an actor under the user guardian with an explicit supervision config.
@@ -773,10 +943,12 @@ module Movie
       behavior : AbstractBehavior(U),
       restart_strategy : RestartStrategy,
       supervision_config : SupervisionConfig,
-      name : String? = nil
+      name : String? = nil,
     ) : ActorRef(U) forall U
       raise "System not initialized" unless @registry
-      @registry.as(ActorRegistry).spawn(behavior, restart_strategy, supervision_config, name)
+      with_spawn_admission do
+        @registry.as(ActorRegistry).spawn(behavior, restart_strategy, supervision_config, name)
+      end
     end
 
     # Spawns a system actor under /system/{name}
@@ -785,25 +957,32 @@ module Movie
       behavior : AbstractBehavior(T),
       name : String,
       restart_strategy : RestartStrategy = RestartStrategy::RESTART,
-      supervision_config : SupervisionConfig = SupervisionConfig.default
+      supervision_config : SupervisionConfig = SupervisionConfig.default,
     ) : ActorRef(T) forall T
       raise "System guardian not initialized" if @registry.system_guardian.nil?
 
-      system_guardian = @registry.system_guardian.as(ActorRef(SystemGuardianMessage))
-      system_context = context(system_guardian.id)
-      raise "System guardian context not found" unless system_context
+      with_spawn_admission do
+        system_guardian = @registry.system_guardian.as(ActorRef(SystemGuardianMessage))
+        system_context = context(system_guardian.id)
+        raise "System guardian context not found" unless system_context
 
-      # Build path: /system/{name}
-      system_path = system_guardian.path || ActorPath.new(@address, ["system"])
-      child_path = system_path / name
+        # Build path: /system/{name}
+        system_path = system_guardian.path || ActorPath.new(@address, ["system"])
+        child_path = system_path / name
 
-      ref = ActorRef(T).new(self, child_path)
-      child_context = ActorContext(T).new(behavior, ref, self, restart_strategy, supervision_config, child_path)
-      @registry.register_context(ref.id, child_context)
-      @path_registry.register(ref, child_path)
-      child_context.start
-      system_context.as(ActorContext(SystemGuardianMessage)).attach_child(ref)
-      ref
+        ref = ActorRef(T).new(self, child_path)
+        child_context = ActorContext(T).new(behavior, ref, self, restart_strategy, supervision_config, child_path)
+        @registry.register_context(ref.id, child_context)
+        begin
+          @path_registry.register(ref, child_path)
+        rescue ex
+          deregister(ref.id)
+          raise ex
+        end
+        system_context.as(ActorContext(SystemGuardianMessage)).attach_child(ref, notify_child: false)
+        child_context.start
+        ref
+      end
     end
   end
 
@@ -811,15 +990,23 @@ module Movie
     @restart_strategy : RestartStrategy = RestartStrategy::RESTART
     @supervision_config : SupervisionConfig = SupervisionConfig.default
     @config : Config = Config.empty
+    @shutdown_mutex : Mutex = Mutex.new
+    @shutdown_finalize_mutex : Mutex = Mutex.new
+    @shutdown_started : Bool = false
+    @shutdown_completed : Bool = false
+
+    def shutting_down? : Bool
+      @shutdown_mutex.synchronize { @shutdown_started }
+    end
 
     # Creates an ActorSystem with explicit parameters.
     def self.new(
       main_behavior : AbstractBehavior(T),
       restart_strategy : RestartStrategy = RestartStrategy::RESTART,
       supervision_config : SupervisionConfig = SupervisionConfig.default,
-      name : String = "actor-system-#{UUID.random.to_s[0..7]}"
+      name : String = "actor-system-#{UUID.random.to_s[0..7]}",
     ) forall T
-      registry = ActorRegistry.new()
+      registry = ActorRegistry.new
       system = ActorSystem(T).allocate
       system.initialize(main_behavior, registry, restart_strategy, supervision_config, name, Config.empty)
       registry.start
@@ -837,7 +1024,7 @@ module Movie
     #
     def self.new(
       main_behavior : AbstractBehavior(T),
-      config : Config
+      config : Config,
     ) forall T
       # Merge with defaults
       full_config = config.with_fallback(ActorSystemConfig.default)
@@ -849,7 +1036,7 @@ module Movie
       restart_strategy = ActorSystemConfig.restart_strategy(full_config)
       supervision_config = ActorSystemConfig.supervision_config(full_config)
 
-      registry = ActorRegistry.new()
+      registry = ActorRegistry.new
       system = ActorSystem(T).allocate
       system.initialize(main_behavior, registry, restart_strategy, supervision_config, name, full_config)
       registry.start
@@ -870,7 +1057,7 @@ module Movie
       restart_strategy : RestartStrategy,
       supervision_config : SupervisionConfig,
       name : String,
-      config : Config
+      config : Config,
     ) forall T
       @name = name
       @address = Address.local(name)
@@ -899,7 +1086,6 @@ module Movie
       @root ||= spawn(behavior, @restart_strategy, @supervision_config)
     end
 
-
     def <<(message)
       if root = @root
         root << message
@@ -908,23 +1094,31 @@ module Movie
 
     def ask(message : T, response_type : R.class = Nil, timeout : Time::Span? = nil) : Future(R) forall R
       root = @root || raise "System not initialized"
-      state = Movie::Ask::AskState(R).new(Promise(R).new)
+      state = Movie::Ask::AskState(R).new(Promise(R).new, root.as(ActorRefBase))
 
-      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |listener_context|
-        listener_context.watch(root)
+      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
         Movie::Ask::ListenerBehavior(R).new(state, root.as(ActorRefBase))
       end
 
       listener = spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
       listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
+      state.listener = listener_ref.as(ActorRefBase)
+      listener_context = context(listener.id).as(ActorContext(Movie::Ask::Response(R)))
+      listener_context.watch(root)
 
-      root.tell_from(listener_ref.as(ActorRefBase), message)
+      begin
+        root.tell_from(listener_ref.as(ActorRefBase), message)
+      rescue ex : Exception
+        state.promise.try_failure(Movie::Ask::TargetTerminated.new(root.as(ActorRefBase)))
+        state.stop_listener
+        return state.promise.future
+      end
 
       if timeout
         timer_handle = scheduler.schedule_once(timeout) do
           if state.promise.future.pending?
             state.promise.try_failure(FutureTimeout.new)
-            listener.send_system(STOP)
+            state.stop_listener
           end
         end
         state.timer_handle = timer_handle
@@ -935,23 +1129,31 @@ module Movie
 
     # Ask a specific actor and receive a response, similar to ActorContext#ask.
     def ask(target : ActorRef(M), message : M, response_type : R.class = Nil, timeout : Time::Span? = nil) : Future(R) forall M, R
-      state = Movie::Ask::AskState(R).new(Promise(R).new)
+      state = Movie::Ask::AskState(R).new(Promise(R).new, target.as(ActorRefBase))
 
-      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |listener_context|
-        listener_context.watch(target)
+      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
         Movie::Ask::ListenerBehavior(R).new(state, target.as(ActorRefBase))
       end
 
       listener = spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
       listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
+      state.listener = listener_ref.as(ActorRefBase)
+      listener_context = context(listener.id).as(ActorContext(Movie::Ask::Response(R)))
+      listener_context.watch(target)
 
-      target.tell_from(listener_ref.as(ActorRefBase), message)
+      begin
+        target.tell_from(listener_ref.as(ActorRefBase), message)
+      rescue ex : Exception
+        state.promise.try_failure(Movie::Ask::TargetTerminated.new(target.as(ActorRefBase)))
+        state.stop_listener
+        return state.promise.future
+      end
 
       if timeout
         timer_handle = scheduler.schedule_once(timeout) do
           if state.promise.future.pending?
             state.promise.try_failure(FutureTimeout.new)
-            listener.send_system(STOP)
+            state.stop_listener
           end
         end
         state.timer_handle = timer_handle
@@ -960,16 +1162,70 @@ module Movie
       state.promise.future
     end
 
+    def shutdown(timeout : Time::Span = 5.seconds) : Nil
+      root_guardian = nil.as(ActorRef(RootGuardianMessage)?)
+      should_initiate_shutdown = false
+
+      @shutdown_mutex.synchronize do
+        return if @shutdown_completed
+
+        unless @shutdown_started
+          @shutdown_started = true
+          close_spawn_admission
+          should_initiate_shutdown = true
+          root_guardian = @registry.as(ActorRegistry).root_guardian if @registry
+        end
+      end
+
+      if should_initiate_shutdown
+        root_guardian.try &.send_system(STOP)
+      end
+
+      if actor_dispatching_on_current_fiber?
+        spawn do
+          begin
+            complete_shutdown(timeout)
+          rescue ex : Exception
+            Log.error(exception: ex) { "Actor-side shutdown failed" }
+          end
+        end
+        return
+      end
+
+      complete_shutdown(timeout)
+    end
+
+    private def complete_shutdown(timeout : Time::Span) : Nil
+      @shutdown_finalize_mutex.synchronize do
+        return if @shutdown_mutex.synchronize { @shutdown_completed }
+
+        wait_for_shutdown(timeout)
+        begin
+          # Let actors use extensions and scheduler during PreStop/PostStop.
+          @extensions.stop_all
+        ensure
+          @scheduler.try &.stop
+        end
+
+        @shutdown_mutex.synchronize do
+          @shutdown_completed = true
+        end
+        @root = nil
+      end
+    end
+
     # Spawns an actor under the user guardian.
     # If name is provided, the actor gets path /user/{name}
     def spawn(
       behavior : AbstractBehavior(U),
       restart_strategy : RestartStrategy = RestartStrategy::RESTART,
       supervision_config : SupervisionConfig = @supervision_config,
-      name : String? = nil
+      name : String? = nil,
     ) : ActorRef(U) forall U
       raise "System not initialized" unless @registry
-      @registry.as(ActorRegistry).spawn(behavior, restart_strategy, supervision_config, name)
+      with_spawn_admission do
+        @registry.as(ActorRegistry).spawn(behavior, restart_strategy, supervision_config, name)
+      end
     end
 
     # Internal: spawns a child actor under a parent's path
@@ -978,14 +1234,27 @@ module Movie
       restart_strategy : RestartStrategy,
       supervision_config : SupervisionConfig,
       name : String?,
-      parent_path : ActorPath?
+      parent_path : ActorPath?,
     ) : ActorRef(U) forall U
       raise "System not initialized" unless @registry
-      @registry.as(ActorRegistry).spawn_child(behavior, restart_strategy, supervision_config, name, parent_path)
+      with_spawn_admission do
+        @registry.as(ActorRegistry).spawn_child(behavior, restart_strategy, supervision_config, name, parent_path)
+      end
+    end
+
+    private def wait_for_shutdown(timeout : Time::Span) : Nil
+      registry = @registry
+      return unless registry
+
+      deadline = Time.instant + timeout
+      actor_registry = registry.as(ActorRegistry)
+
+      until actor_registry.empty?
+        raise "ActorSystem shutdown timed out after #{timeout}" if Time.instant >= deadline
+        sleep 10.milliseconds
+      end
     end
   end
-
-
 end
 
 # Require executor after base extension types are defined

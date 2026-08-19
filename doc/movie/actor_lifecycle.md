@@ -76,7 +76,7 @@ An actor progresses through several states during its lifetime. This state machi
         │                    │ StartFailure
         │ PreStart           │
         │ Success            ▼
-        │              [FAILED] ───► [TERMINATED]
+        │              [FAILED] ───► [RESTARTING] or [STOPPING]
         ▼                    ▲
     [RUNNING] ◄──────┐       │
         │            │       │
@@ -94,11 +94,9 @@ An actor progresses through several states during its lifetime. This state machi
         │ Cleanup            │
         │                    │
         ▼                    │
-    [STOPPED] ───────────────┘
-        │
-        │ restart()
-        │
-        └──────► [RESTARTING] ──► [STARTING]
+    [TERMINATED]
+
+    [RESTARTING] ──► [STARTING]
 ```
 
 ### State Descriptions
@@ -106,12 +104,12 @@ An actor progresses through several states during its lifetime. This state machi
 | State | Description | Valid Transitions | Message Processing |
 |-------|-------------|------------------|-------------------|
 | **CREATED** | Actor reference and context created, mailbox not yet initialized | STARTING | No |
-| **STARTING** | PreStart hook executing, resources initializing | RUNNING, FAILED | No |
-| **RUNNING** | Normal operation, processing messages | STOPPING, FAILED | Yes |
-| **STOPPING** | Graceful shutdown in progress, PostStop executing | STOPPED | System messages only |
-| **STOPPED** | Actor terminated, resources released | RESTARTING, TERMINATED | No |
-| **FAILED** | Unrecoverable error occurred | TERMINATED, RESTARTING | No |
-| **RESTARTING** | Supervisor-initiated restart | STARTING | No |
+| **STARTING** | PreStart hook executing, resources initializing | RUNNING, STOPPING, FAILED | No user delivery until PostStart |
+| **RUNNING** | Normal operation, processing messages | STOPPING, FAILED, RESTARTING | Yes |
+| **STOPPING** | Graceful shutdown in progress, PreStop/PostStop executing | TERMINATED | System messages only |
+| **STOPPED** | Legacy enum value; current runtime uses TERMINATED as the final state | None | No |
+| **FAILED** | Current behavior failed; supervisor may stop, restart, or resume it | RUNNING, STOPPING, RESTARTING | No until RESUME/restart |
+| **RESTARTING** | Supervisor-initiated restart | STARTING, STOPPING, FAILED | No |
 | **TERMINATED** | Final state, actor removed from registry | None | No |
 
 ### System Messages
@@ -272,6 +270,8 @@ Sender                   ActorRef              Context              Mailbox     
   │                         │                     │                    │                 │
   │                         │                     │                    │──check queue───>│
   │                         │                     │                    │                 │
+```
+
 ### Envelope senders & ask/ack pattern
 
 - Every user message travels inside an `Envelope` that now carries an optional `sender : ActorRefBase?`. While a behavior handles a message it can retrieve the sender via `context.sender`.
@@ -306,7 +306,47 @@ end
 ```
 
 - If the target terminates before replying, the future fails with `Movie::Ask::TargetTerminated`. Optional timeouts passed to `ask` force `FutureTimeout` and stop the temporary listener.
-```
+
+### Async primitives: futures, scheduler, and executor
+
+The actor runtime now relies on three explicit async building blocks. They are related, but they serve different layers of the system and should not be treated as interchangeable.
+
+#### `Future(T)` and `Promise(T)`
+
+- `Future(T)` is the read-side contract used by `ask`, stream materialization, and executor work. A future transitions exactly once from `Pending` to one terminal state: `Success`, `Failure`, or `Cancelled`.
+- `Future#await(timeout)` is a waiting convenience only. If the timeout expires before completion it raises `FutureTimeout`; it does not mutate the future itself and it does not cancel upstream work.
+- `on_complete`, `on_success`, `on_failure`, and `on_cancel` are safe to register both before and after completion. Late subscribers run immediately against the completed result.
+- Exceptions raised by future callbacks are logged and swallowed so they do not corrupt the future's terminal state or break other subscribers.
+- `Promise(T)` is the write-side primitive. Application code can use it when adapting callback-based APIs, but normal actor-to-actor flows should prefer `ask` and typed messages over manual promise completion.
+
+#### `Scheduler`
+
+- `Scheduler#schedule_once` is the public timer primitive. `schedule_message` and `schedule_system_message` are convenience wrappers on top of the same one-shot mechanism.
+- `TimerHandle#cancel` is best-effort before fire. It prevents future delivery if the timer has not fired yet, but it does not preempt a callback that is already executing.
+- Stopping the scheduler prevents new timers from being accepted and suppresses callbacks that have not fired yet.
+- Exceptions raised inside scheduled callbacks are isolated, logged, and do not stop the scheduler dispatcher.
+
+#### `ExecutorExtension`
+
+- `Movie::Execution.get(system)` exposes a bounded worker pool intended for blocking I/O, CPU-heavy mapping, and other work that should not run inline on an actor mailbox.
+- `execute` returns `Future(T)`. `execute_with_reply` bridges the same work into an actor reply channel using `TaskSuccess(T)` and `TaskFailure(T)`.
+- Executor timeouts are response-level guarantees, not cooperative cancellation. A timed out task completes its future or reply path with `FutureTimeout`, but the underlying block may continue running until it returns or raises. Any later result is ignored.
+- After `ExecutorExtension#stop`, new submissions fail fast with `ExecutorStopped` instead of silently dropping work.
+- Queue saturation is backpressure, not rejection. When the bounded queue is full, submission blocks until capacity is available.
+
+#### Stability boundary
+
+Stable for application code:
+
+- `Future(T)` consumption and callback APIs
+- `ActorRef#ask` / `ActorContext#ask`
+- `Scheduler` one-shot timer APIs
+
+Internal or advanced integration surface:
+
+- `Promise(T)` as a manual completion primitive
+- `Execution` / `ExecutorExtension` as a runtime helper
+- `TaskReply(T)`, `TaskSuccess(T)`, and `TaskFailure(T)` as executor-specific protocol messages
 
 #### 3. Graceful Stop
 
@@ -387,13 +427,13 @@ User/System              ActorRef              Context              Mailbox     
 9. **Wait for Children**: Actor remains in STOPPING state processing system messages
    - Each `Terminated` message from child decrements counter
    - When child counter reaches zero, proceed to PostStop
-   - Timeout mechanism can force proceed if children don't respond
+   - The caller's shutdown timeout bounds the overall wait; there is no independent child-stop timeout.
 10. **PostStop Signal**: Send `PostStop` system message (only after all children terminated)
 11. **Release Resources**: Close connections, free memory
-12. **State Transition**: STOPPING → STOPPED
+12. **State Transition**: STOPPING → TERMINATED
 13. **Notify Watchers**: Send `Terminated` message to all watchers
 14. **Unregister**: Remove from `ActorRegistry`
-15. **Final State**: STOPPED → TERMINATED
+15. **Final State**: TERMINATED is terminal and the actor is removed from the registry.
 
 **Critical Guarantee**: A parent actor **never** completes its stop sequence (PostStop) before all of its children have fully terminated. This is achieved through asynchronous system message handling rather than blocking. The parent continues to be responsive to system events while waiting for children to stop.
 
@@ -3008,7 +3048,7 @@ The lifecycle from spawning to message processing is well-defined, with clear se
 
 ---
 
-**Document Version**: 1.0  
-**Framework Version**: Movie (Ametist 0.1.0)  
-**Last Updated**: 2024  
-**Author**: System Architecture Documentation
+- **Document Version**: 1.0
+- **Framework Version**: Movie (Ametist 0.1.0)
+- **Last Updated**: 2026
+- **Author**: System Architecture Documentation
