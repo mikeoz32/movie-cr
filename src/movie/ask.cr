@@ -34,12 +34,15 @@ module Movie
       @timer_cancelled : Atomic(Bool)
       @listener : Atomic(ActorRefBase?)
       @listener_stop_requested : Atomic(Bool)
+      @unwatch_requested : Atomic(Bool)
+      @target : ActorRefBase
 
-      def initialize(@promise : Promise(T))
+      def initialize(@promise : Promise(T), @target : ActorRefBase)
         @timer_handle = Atomic(TimerHandle?).new(nil)
         @timer_cancelled = Atomic(Bool).new(false)
         @listener = Atomic(ActorRefBase?).new(nil)
         @listener_stop_requested = Atomic(Bool).new(false)
+        @unwatch_requested = Atomic(Bool).new(false)
       end
 
       def timer_handle=(handle : TimerHandle)
@@ -54,12 +57,24 @@ module Movie
 
       def listener=(listener : ActorRefBase)
         @listener.set(listener)
-        listener.send_system(STOP) if @listener_stop_requested.get
+        if @listener_stop_requested.get
+          unwatch_target
+          listener.send_system(STOP)
+        end
       end
 
       def stop_listener
         @listener_stop_requested.set(true)
+        unwatch_target
         @listener.get.try &.send_system(STOP)
+      end
+
+      def unwatch_target : Nil
+        listener = @listener.get
+        return unless listener
+        _, should_unwatch = @unwatch_requested.compare_and_set(false, true)
+        return unless should_unwatch
+        @target.send_system(Unwatch.new(listener).as(SystemMessage))
       end
     end
 
@@ -77,7 +92,7 @@ module Movie
         when Cancelled(T)
           @state.promise.try_cancel
         end
-        context.stop
+        @state.stop_listener
         Behaviors(Response(T)).same
       end
 
@@ -90,6 +105,8 @@ module Movie
             @state.promise.try_failure(TargetTerminated.new(@target))
             @state.stop_listener
           end
+        when PostStop
+          @state.unwatch_target
         end
       end
     end

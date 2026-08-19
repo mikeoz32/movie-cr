@@ -125,7 +125,7 @@ module Movie
     end
 
     def ask(message : T, response_type : R.class = Nil, timeout : Time::Span? = nil) : Future(R) forall R
-      state = Movie::Ask::AskState(R).new(Promise(R).new)
+      state = Movie::Ask::AskState(R).new(Promise(R).new, self.as(ActorRefBase))
       listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
         Movie::Ask::ListenerBehavior(R).new(state, self.as(ActorRefBase))
       end
@@ -1088,7 +1088,7 @@ module Movie
 
     def ask(message : T, response_type : R.class = Nil, timeout : Time::Span? = nil) : Future(R) forall R
       root = @root || raise "System not initialized"
-      state = Movie::Ask::AskState(R).new(Promise(R).new)
+      state = Movie::Ask::AskState(R).new(Promise(R).new, root.as(ActorRefBase))
 
       listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
         Movie::Ask::ListenerBehavior(R).new(state, root.as(ActorRefBase))
@@ -1123,7 +1123,7 @@ module Movie
 
     # Ask a specific actor and receive a response, similar to ActorContext#ask.
     def ask(target : ActorRef(M), message : M, response_type : R.class = Nil, timeout : Time::Span? = nil) : Future(R) forall M, R
-      state = Movie::Ask::AskState(R).new(Promise(R).new)
+      state = Movie::Ask::AskState(R).new(Promise(R).new, target.as(ActorRefBase))
 
       listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
         Movie::Ask::ListenerBehavior(R).new(state, target.as(ActorRefBase))

@@ -67,6 +67,10 @@ module Movie
       @state_mutex.synchronize { @state }
     end
 
+    def watcher_count : Int32
+      @state_mutex.synchronize { @watchers.size }
+    end
+
     def ref : ActorRef(T)
       @ref.as(ActorRef(T))
     end
@@ -133,40 +137,48 @@ module Movie
       name : String? = nil,
     ) : ActorRef(U) forall U
       raise "System not initialized" unless @system
-      raise ActorUnavailableError.new("Actor #{@ref.id} is not accepting children in state #{@state}") unless @state == State::STARTING || @state == State::RUNNING
-      @system.with_spawn_admission do
-        # Build child path from parent path.
-        child_path = if parent_path = @path
-                       child_name = name || "$#{@system.next_id}"
-                       parent_path / child_name
-                     else
-                       nil
-                     end
+      @state_mutex.synchronize do
+        raise ActorUnavailableError.new("Actor #{@ref.id} is not accepting children in state #{@state}") unless @state == State::STARTING || @state == State::RUNNING
+        @system.with_spawn_admission do
+          # Build child path from parent path.
+          child_path = if parent_path = @path
+                         child_name = name || "$#{@system.next_id}"
+                         parent_path / child_name
+                       else
+                         nil
+                       end
 
-        # Create the child ref and context.
-        ref = ActorRef(U).new(@system, child_path)
-        context = ActorContext(U).new(behavior, ref, @system, restart_strategy, supervision_config, child_path)
+          # Create the child ref and context.
+          ref = ActorRef(U).new(@system, child_path)
+          context = ActorContext(U).new(behavior, ref, @system, restart_strategy, supervision_config, child_path)
 
-        # Register in system registry.
-        @system.register_context(ref.id, context)
+          # Register in system registry.
+          @system.register_context(ref.id, context)
 
-        begin
-          # Register path.
-          if p = child_path
-            @system.path_registry.register(ref, p)
+          begin
+            # Register path.
+            if p = child_path
+              @system.path_registry.register(ref, p)
+            end
+          rescue ex
+            @system.deregister(ref.id)
+            raise ex
           end
-        rescue ex
-          @system.deregister(ref.id)
-          raise ex
-        end
 
-        attach_child(ref, notify_child: false)
-        context.start
-        ref
+          attach_child_locked(ref, notify_child: false)
+          context.start
+          ref
+        end
       end
     end
 
     def attach_child(child : ActorRef(U), *, notify_child : Bool = true) forall U
+      @state_mutex.synchronize do
+        attach_child_locked(child, notify_child: notify_child)
+      end
+    end
+
+    private def attach_child_locked(child : ActorRef(U), *, notify_child : Bool) forall U
       @children << child unless @children.includes?(child)
       @watching << child unless @watching.includes?(child)
       if child_ctx = @system.context(child.id)
@@ -196,7 +208,7 @@ module Movie
     end
 
     def ask(target : ActorRef(M), message : M, response_type : T.class = Nil, timeout : Time::Span? = nil) : Future(T) forall M, T
-      state = Movie::Ask::AskState(T).new(Promise(T).new)
+      state = Movie::Ask::AskState(T).new(Promise(T).new, target.as(ActorRefBase))
 
       listener_behavior = Behaviors(Movie::Ask::Response(T)).setup do |_listener_context|
         Movie::Ask::ListenerBehavior(T).new(state, target.as(ActorRefBase))
@@ -344,14 +356,15 @@ module Movie
       cause = message.cause
       @active_behavior.on_signal(message)
 
-      return unless @children.any? { |child| child.id == failed_actor.id }
+      children = children_snapshot
+      return unless children.any? { |child| child.id == failed_actor.id }
       attempt, exceeded = track_restart(failed_actor, cause)
       return if exceeded
       case @supervision_config.scope
       when SupervisionScope::ONE_FOR_ONE
         apply_supervision_action(failed_actor, cause, @supervision_config.strategy, attempt)
       when SupervisionScope::ALL_FOR_ONE
-        @children.each do |child|
+        children.each do |child|
           apply_supervision_action(child, cause, @supervision_config.strategy, attempt)
         end
       end
@@ -397,7 +410,7 @@ module Movie
       when SupervisionScope::ONE_FOR_ONE
         failed_actor.send_system(STOP)
       when SupervisionScope::ALL_FOR_ONE
-        @children.each do |child|
+        children_snapshot.each do |child|
           child.send_system(STOP)
         end
       end
@@ -428,7 +441,8 @@ module Movie
     end
 
     protected def escalate_failure(actor : ActorRefBase, cause : Exception?)
-      @watchers.each do |watcher|
+      watchers = @state_mutex.synchronize { @watchers.dup }
+      watchers.each do |watcher|
         watcher.send_system(Failed.new(@ref, cause).as(SystemMessage))
       end
     end
@@ -532,9 +546,12 @@ module Movie
 
     protected def handle_terminated(message : Terminated)
       actor = message.actor
-      @watching.reject! { |ref| ref == actor }
-      was_child = @children.any? { |ref| ref == actor }
-      @children.reject! { |ref| ref == actor }
+      was_child = @state_mutex.synchronize do
+        @watching.reject! { |ref| ref == actor }
+        child_match = @children.any? { |ref| ref == actor }
+        @children.reject! { |ref| ref == actor }
+        child_match
+      end
       @restart_counters.delete(actor.id)
 
       if @pending_terminations > 0 && @pending_children.includes?(actor)
@@ -572,12 +589,17 @@ module Movie
     end
 
     protected def initiate_children_stop
-      @pending_children = @children.dup
+      children = @state_mutex.synchronize { @children.dup }
+      @pending_children = children
       @pending_terminations = @pending_children.size
       STDERR.puts "actor=#{@ref.id} children=#{@pending_terminations}" if ENV["DEBUG_STOP"]?
       @pending_children.each do |child|
         child.send_system(STOP)
       end
+    end
+
+    private def children_snapshot : Array(ActorRefBase)
+      @state_mutex.synchronize { @children.dup }
     end
 
     protected def finalize_stop_if_ready

@@ -564,8 +564,25 @@ describe "Movie runtime hardening" do
   it "supports ask directly on a local ActorRef" do
     system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
     target = system.spawn(RefAskProbe.new)
+    baseline_watchers = system.context(target.id).as(Movie::ActorContext(Symbol)).watcher_count
 
     target.ask(:request, String, 1.second).await(1.second).should eq("reply")
+    hardening_eventually(1.second) do
+      system.context(target.id).as(Movie::ActorContext(Symbol)).watcher_count == baseline_watchers
+    end.should be_true
+    system.shutdown
+  end
+
+  it "unwatches local ask listeners after timeout" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    target = system.spawn(SilentProbe.new)
+    baseline_watchers = system.context(target.id).as(Movie::ActorContext(Symbol)).watcher_count
+
+    future = target.ask(:request, String, 10.milliseconds)
+    expect_raises(Movie::FutureTimeout) { future.await(1.second) }
+    hardening_eventually(1.second) do
+      system.context(target.id).as(Movie::ActorContext(Symbol)).watcher_count == baseline_watchers
+    end.should be_true
     system.shutdown
   end
 
