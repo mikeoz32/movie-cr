@@ -27,6 +27,16 @@ private class RaiseOnPreStopOnce < Movie::AbstractBehavior(Symbol)
   end
 end
 
+private class RaiseOnPostStop < Movie::AbstractBehavior(Symbol)
+  def receive(message, context)
+    Movie::Behaviors(Symbol).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    raise "post-stop failure" if signal.is_a?(Movie::PostStop)
+  end
+end
+
 private class RestartSignalProbe < Movie::AbstractBehavior(Symbol)
   def initialize(@starts : Channel(Nil))
     @crashed = Atomic(Bool).new(false)
@@ -42,6 +52,40 @@ private class RestartSignalProbe < Movie::AbstractBehavior(Symbol)
   def on_signal(signal : Movie::SystemMessage)
     if signal.is_a?(Movie::PostStart)
       @starts.send(nil)
+    end
+  end
+end
+
+private class RestartPreStartRecoveryProbe < Movie::AbstractBehavior(Symbol)
+  getter post_start_count : Atomic(Int32)
+  getter recovered : Channel(Nil)
+
+  def initialize
+    @fail_next_pre_start = Atomic(Bool).new(false)
+    @post_start_count = Atomic(Int32).new(0)
+    @recovered = Channel(Nil).new(1)
+  end
+
+  def receive(message, context)
+    case message
+    when :crash
+      @fail_next_pre_start.set(true)
+      raise "receive failure"
+    when :probe
+      @recovered.send(nil)
+    end
+    Movie::Behaviors(Symbol).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    case signal
+    when Movie::PreStart
+      if @fail_next_pre_start.get
+        @fail_next_pre_start.set(false)
+        raise "restart pre-start failure"
+      end
+    when Movie::PostStart
+      @post_start_count.add(1)
     end
   end
 end
@@ -226,6 +270,16 @@ describe "Movie runtime hardening" do
     system.shutdown(1.second)
   end
 
+  it "deregisters an actor when PostStop raises" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    actor = system.spawn(RaiseOnPostStop.new)
+
+    actor.send_system(Movie::STOP)
+
+    hardening_eventually(1.second) { system.context(actor.id).nil? }.should be_true
+    system.shutdown(1.second)
+  end
+
   it "delivers PostStart once across a restart" do
     starts = Channel(Nil).new(4)
     supervision = Movie::SupervisionConfig.new(
@@ -251,6 +305,36 @@ describe "Movie runtime hardening" do
     when timeout(100.milliseconds)
     end
 
+    system.shutdown
+  end
+
+  it "recovers on a later restart after a restart PreStart failure" do
+    probe = RestartPreStartRecoveryProbe.new
+    supervision = Movie::SupervisionConfig.new(
+      strategy: Movie::SupervisionStrategy::RESTART,
+      scope: Movie::SupervisionScope::ONE_FOR_ONE,
+      max_restarts: 3,
+      within: 1.second,
+      backoff_min: 20.milliseconds,
+      backoff_max: 20.milliseconds,
+      backoff_factor: 1.0,
+      jitter: 0.0
+    )
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same, Movie::RestartStrategy::RESTART, supervision)
+    actor = system.spawn(probe)
+
+    hardening_eventually(1.second) { probe.post_start_count.get == 1 }.should be_true
+    actor << :crash
+    hardening_eventually(1.second) { probe.post_start_count.get == 2 }.should be_true
+    actor << :probe
+
+    select
+    when probe.recovered.receive
+    when timeout(1.second)
+      fail "actor did not recover after the second restart attempt"
+    end
+
+    probe.post_start_count.get.should eq(2)
     system.shutdown
   end
 

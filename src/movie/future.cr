@@ -165,8 +165,12 @@ module Movie
       end
 
       if timed_out
-        @mutex.synchronize { @waiters.delete(wait_ch.not_nil!) }
-        raise FutureTimeout.new unless terminal?
+        completed = @mutex.synchronize do
+          @waiters.delete(wait_ch.not_nil!)
+          terminal? ? FutureResult(T).new(@status, @value, @error) : nil
+        end
+        return completed.not_nil! if completed
+        raise FutureTimeout.new
       end
 
       @mutex.synchronize { FutureResult(T).new(@status, @value, @error) }

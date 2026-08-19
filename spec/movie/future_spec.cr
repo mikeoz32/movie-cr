@@ -169,6 +169,8 @@ describe Movie::Future do
       when timeout(100.milliseconds)
         fail "future completion blocked behind a timed-out waiter"
       end
+
+      promise.future.await(1.second).should eq(1)
     end
   end
 
