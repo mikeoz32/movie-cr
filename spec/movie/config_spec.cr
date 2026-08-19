@@ -304,6 +304,12 @@ describe Movie::Config do
       config.get_int("remoting.pool.size").should eq(8)
     end
 
+    it "rejects explicit null values" do
+      expect_raises(Movie::ConfigError, /null values are not supported/i) do
+        Movie::Config.from_yaml("name: null")
+      end
+    end
+
     it "parses arrays in YAML" do
       yaml = <<-YAML
         hosts:
@@ -377,11 +383,29 @@ describe Movie::Config do
       config.get_int("remoting.port").should eq(9000)
     end
 
+    it "rejects explicit null values" do
+      expect_raises(Movie::ConfigError, /null values are not supported/i) do
+        Movie::Config.from_json(%({"name": null}))
+      end
+    end
+
     it "parses arrays in JSON" do
       json = %({"hosts": ["host1", "host2", "host3"]})
 
       config = Movie::Config.from_json(json)
       config.get_string_array("hosts").should eq(["host1", "host2", "host3"])
+    end
+  end
+
+  describe "null and missing paths" do
+    it "keeps missing paths available through optional access" do
+      config = Movie::Config.empty
+
+      config.has_path?("missing").should be_false
+      config["missing"]?.should be_nil
+      expect_raises(Movie::MissingConfigError) do
+        config["missing"]
+      end
     end
   end
 

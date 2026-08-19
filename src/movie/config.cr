@@ -4,7 +4,7 @@ require "json"
 module Movie
   # ConfigValue represents any value that can be stored in configuration.
   # It's a recursive type that supports nested structures.
-  alias ConfigValue = String | Int64 | Float64 | Bool | Array(ConfigValue) | Hash(String, ConfigValue) | Nil
+  alias ConfigValue = String | Int64 | Float64 | Bool | Array(ConfigValue) | Hash(String, ConfigValue)
 
   # ConfigError is raised when config access fails.
   class ConfigError < Exception
@@ -383,7 +383,7 @@ module Movie
     # --- Raw value accessor ---
 
     # Returns the raw value at the given path, or nil if not found.
-    def get_value(path : String) : ConfigValue
+    def get_value(path : String) : ConfigValue?
       parts = path.split('.')
       current : ConfigValue = @root
 
@@ -417,7 +417,7 @@ module Movie
     end
 
     # Subscript access with nil for missing paths
-    def []?(path : String) : ConfigValue
+    def []?(path : String) : ConfigValue?
       get_value(path)
     end
 
@@ -604,7 +604,7 @@ module Movie
     protected def self.convert_yaml_value(yaml : YAML::Any) : ConfigValue
       case yaml.raw
       when Nil
-        nil
+        raise ConfigError.new("Null values are not supported in configuration")
       when Bool
         yaml.as_bool
       when Int64
@@ -630,7 +630,7 @@ module Movie
     protected def self.convert_json_value(json : JSON::Any) : ConfigValue
       case json.raw
       when Nil
-        nil
+        raise ConfigError.new("Null values are not supported in configuration")
       when Bool
         json.as_bool
       when Int64
