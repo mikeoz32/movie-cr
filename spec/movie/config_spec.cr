@@ -113,6 +113,24 @@ describe Movie::Config do
       config = Movie::Config.builder.set("value", 42.7).build
       config.get_int("value").should eq(42)
     end
+
+    it "wraps invalid numeric strings in WrongTypeConfigError" do
+      config = Movie::Config.builder.set("port", "not-a-port").build
+
+      expect_raises(Movie::WrongTypeConfigError, /port.*Int64.*not-a-port/i) do
+        config.get_int("port")
+      end
+    end
+  end
+
+  describe "#get_float" do
+    it "wraps invalid numeric strings in WrongTypeConfigError" do
+      config = Movie::Config.builder.set("ratio", "not-a-float").build
+
+      expect_raises(Movie::WrongTypeConfigError, /ratio.*Float64.*not-a-float/i) do
+        config.get_float("ratio")
+      end
+    end
   end
 
   describe "#get_bool" do
@@ -148,6 +166,14 @@ describe Movie::Config do
       config = Movie::Config.empty
       config.get_bool("missing", true).should be_true
     end
+
+    it "wraps invalid string values in WrongTypeConfigError" do
+      config = Movie::Config.builder.set("enabled", "maybe").build
+
+      expect_raises(Movie::WrongTypeConfigError, /enabled.*Bool.*maybe/i) do
+        config.get_bool("enabled")
+      end
+    end
   end
 
   describe "#get_duration" do
@@ -179,6 +205,14 @@ describe Movie::Config do
     it "returns default for missing path" do
       config = Movie::Config.empty
       config.get_duration("missing", 1.second).should eq(1.second)
+    end
+
+    it "wraps invalid duration strings in WrongTypeConfigError" do
+      config = Movie::Config.builder.set("timeout", "soon").build
+
+      expect_raises(Movie::WrongTypeConfigError, /timeout.*Duration.*soon/i) do
+        config.get_duration("timeout")
+      end
     end
   end
 
@@ -310,6 +344,12 @@ describe Movie::Config do
       end
     end
 
+    it "wraps malformed input in ConfigError" do
+      expect_raises(Movie::ConfigError, /invalid yaml/i) do
+        Movie::Config.from_yaml("name: [")
+      end
+    end
+
     it "parses arrays in YAML" do
       yaml = <<-YAML
         hosts:
@@ -386,6 +426,12 @@ describe Movie::Config do
     it "rejects explicit null values" do
       expect_raises(Movie::ConfigError, /null values are not supported/i) do
         Movie::Config.from_json(%({"name": null}))
+      end
+    end
+
+    it "wraps malformed input in ConfigError" do
+      expect_raises(Movie::ConfigError, /invalid json/i) do
+        Movie::Config.from_json(%({"name":}))
       end
     end
 
