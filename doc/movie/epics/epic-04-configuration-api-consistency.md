@@ -1,5 +1,6 @@
 # Epic 04: Configuration API Consistency
 
+**Status:** Completed
 **Goal:** Make configuration behavior predictable, documented, and internally consistent across all feature areas.
 
 **Why this epic exists:** The config API currently conflates `nil` with missing paths, leaks raw parsing exceptions, mixes naming conventions, and overloads supervision settings in a way that breaks valid configurations.
@@ -22,8 +23,8 @@
 
 **Outcome**
 
-- Either support explicit `null` as a first-class stored value or remove `Nil` from the supported public model.
-- Align `has_path?`, `[]`, `[]?`, and `get_value!` with that decision.
+- [x] Either support explicit `null` as a first-class stored value or remove `Nil` from the supported public model.
+- [x] Align `has_path?`, `[]`, `[]?`, and `get_value!` with that decision.
 
 **Verification**
 
@@ -39,8 +40,8 @@
 
 **Outcome**
 
-- Wrap raw parsing failures so callers see `ConfigError` or `WrongTypeConfigError` consistently.
-- Cover integer, float, bool, and duration parsing failures.
+- [x] Wrap raw parsing failures so callers see `ConfigError` or `WrongTypeConfigError` consistently.
+- [x] Cover integer, float, bool, and duration parsing failures.
 
 **Verification**
 
@@ -58,8 +59,8 @@
 
 **Outcome**
 
-- Introduce a separate config key for root actor restart behavior.
-- Keep supervision strategy values independent from actor restart values.
+- [x] Introduce a separate config key for root actor restart behavior.
+- [x] Keep supervision strategy values independent from actor restart values.
 
 **Verification**
 
@@ -77,9 +78,9 @@
 
 **Outcome**
 
-- Choose one canonical naming scheme for nested keys and hyphenated segments.
-- Make env overrides map cleanly to canonical keys.
-- Decide whether legacy keys remain as compatibility aliases or are removed.
+- [x] Choose one canonical naming scheme for nested keys and hyphenated segments.
+- [x] Make env overrides map cleanly to canonical keys.
+- [x] Keep legacy persistence keys and single-underscore environment variables as compatibility aliases.
 
 **Verification**
 
@@ -95,10 +96,9 @@
 
 **Outcome**
 
-- Document supported keys, defaults, aliases, and feature-specific config sections.
-- Include persistence, executor, and remoting settings.
+- [x] Document supported keys, defaults, aliases, and feature-specific config sections.
+- [x] Include persistence, executor, and remoting settings.
 
 **Verification**
 
 - Build any touched examples if their config usage changes.
-
