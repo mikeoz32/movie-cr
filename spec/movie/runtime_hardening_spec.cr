@@ -27,6 +27,46 @@ private class RaiseOnPreStopOnce < Movie::AbstractBehavior(Symbol)
   end
 end
 
+private class RaiseOnPreStart < Movie::AbstractBehavior(Symbol)
+  def receive(message, context)
+    Movie::Behaviors(Symbol).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    raise "pre-start failure" if signal.is_a?(Movie::PreStart)
+  end
+end
+
+private class RaiseOnPostStart < Movie::AbstractBehavior(Symbol)
+  def receive(message, context)
+    Movie::Behaviors(Symbol).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    raise "post-start failure" if signal.is_a?(Movie::PostStart)
+  end
+end
+
+private class RaiseOnFailed < Movie::AbstractBehavior(Symbol)
+  def receive(message, context)
+    Movie::Behaviors(Symbol).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    raise "failed-signal failure" if signal.is_a?(Movie::Failed)
+  end
+end
+
+private class RaiseOnTerminated < Movie::AbstractBehavior(Symbol)
+  def receive(message, context)
+    Movie::Behaviors(Symbol).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    raise "terminated-signal failure" if signal.is_a?(Movie::Terminated)
+  end
+end
+
 private class RaiseOnPostStop < Movie::AbstractBehavior(Symbol)
   def receive(message, context)
     Movie::Behaviors(Symbol).same
@@ -260,6 +300,42 @@ private class EscalationRoot < Movie::AbstractBehavior(Symbol)
 end
 
 describe "Movie runtime hardening" do
+  it "recovers the mailbox when PreStart raises" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    actor = system.spawn(RaiseOnPreStart.new, Movie::RestartStrategy::STOP)
+
+    hardening_eventually(1.second) { system.context(actor.id).nil? }.should be_true
+    system.shutdown(1.second)
+  end
+
+  it "recovers the mailbox when PostStart raises" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    actor = system.spawn(RaiseOnPostStart.new, Movie::RestartStrategy::STOP)
+
+    hardening_eventually(1.second) { system.context(actor.id).nil? }.should be_true
+    system.shutdown(1.second)
+  end
+
+  it "recovers the mailbox when a Failed signal handler raises" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    actor = system.spawn(RaiseOnFailed.new, Movie::RestartStrategy::STOP)
+
+    actor.send_system(Movie::Failed.new(actor.as(Movie::ActorRefBase), Exception.new("synthetic failure")))
+
+    hardening_eventually(1.second) { system.context(actor.id).nil? }.should be_true
+    system.shutdown(1.second)
+  end
+
+  it "recovers the mailbox when a Terminated signal handler raises" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    actor = system.spawn(RaiseOnTerminated.new, Movie::RestartStrategy::STOP)
+
+    actor.send_system(Movie::Terminated.new(actor.as(Movie::ActorRefBase)))
+
+    hardening_eventually(1.second) { system.context(actor.id).nil? }.should be_true
+    system.shutdown(1.second)
+  end
+
   it "keeps the mailbox recoverable when a lifecycle hook raises" do
     system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
     actor = system.spawn(RaiseOnPreStopOnce.new)
