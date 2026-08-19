@@ -102,3 +102,8 @@
 **Verification**
 
 - Build any touched examples if their config usage changes.
+
+## Review Notes
+
+- The final full MT suite and all example builds pass on the completed Epic 04 branch.
+- Remote Watch followed immediately by Stop has a pre-existing asynchronous ordering flake in the remoting E2E suite; it is outside this configuration scope and remains a runtime follow-up.
