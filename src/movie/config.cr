@@ -510,33 +510,37 @@ module Movie
     end
 
     private def parse_duration_string(path : String, str : String) : Time::Span
-      # Match patterns like "100ms", "5s", "2m", "1h", "1d"
-      if match = str.match(/^(\d+(?:\.\d+)?)\s*(ns|us|ms|s|m|h|d)$/i)
-        amount = match[1].to_f64
-        unit = match[2].downcase
+      begin
+        # Match patterns like "100ms", "5s", "2m", "1h", "1d"
+        if match = str.match(/^(\d+(?:\.\d+)?)\s*(ns|us|ms|s|m|h|d)$/i)
+          amount = match[1].to_f64
+          unit = match[2].downcase
 
-        case unit
-        when "ns"
-          amount.nanoseconds
-        when "us"
-          amount.microseconds
-        when "ms"
-          amount.milliseconds
-        when "s"
-          amount.seconds
-        when "m"
-          amount.minutes
-        when "h"
-          amount.hours
-        when "d"
-          amount.days
+          case unit
+          when "ns"
+            amount.nanoseconds
+          when "us"
+            amount.microseconds
+          when "ms"
+            amount.milliseconds
+          when "s"
+            amount.seconds
+          when "m"
+            amount.minutes
+          when "h"
+            amount.hours
+          when "d"
+            amount.days
+          else
+            raise WrongTypeConfigError.new(path, "Duration", "String(#{str})")
+          end
+        elsif match = str.match(/^(\d+)$/)
+          # Plain number - treat as milliseconds
+          match[1].to_i64.milliseconds
         else
           raise WrongTypeConfigError.new(path, "Duration", "String(#{str})")
         end
-      elsif match = str.match(/^(\d+)$/)
-        # Plain number - treat as milliseconds
-        match[1].to_i64.milliseconds
-      else
+      rescue ex : ArgumentError | OverflowError
         raise WrongTypeConfigError.new(path, "Duration", "String(#{str})")
       end
     end

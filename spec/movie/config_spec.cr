@@ -214,6 +214,16 @@ describe Movie::Config do
         config.get_duration("timeout")
       end
     end
+
+    it "wraps overflowing duration strings in WrongTypeConfigError" do
+      config = Movie::Config.builder
+        .set("timeout", "999999999999999999999999999999999999999999999999ms")
+        .build
+
+      expect_raises(Movie::WrongTypeConfigError, /timeout.*Duration/i) do
+        config.get_duration("timeout")
+      end
+    end
   end
 
   describe "#get_config" do
