@@ -367,8 +367,12 @@ module Movie
       when SupervisionScope::ONE_FOR_ONE
         apply_supervision_action(failed_actor, cause, @supervision_config.strategy, attempt)
       when SupervisionScope::ALL_FOR_ONE
-        children.each do |child|
-          apply_supervision_action(child, cause, @supervision_config.strategy, attempt)
+        if @supervision_config.strategy == SupervisionStrategy::ESCALATE
+          escalate_failure(failed_actor, cause)
+        else
+          children.each do |child|
+            apply_supervision_action(child, cause, @supervision_config.strategy, attempt)
+          end
         end
       end
     end

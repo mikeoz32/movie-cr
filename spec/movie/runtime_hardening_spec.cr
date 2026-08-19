@@ -320,6 +320,45 @@ private class EscalationRoot < Movie::AbstractBehavior(Symbol)
   end
 end
 
+private class AllForOneMiddle < Movie::AbstractBehavior(Symbol)
+  def initialize(@ready : Channel(Nil))
+    @children = [] of Movie::ActorRef(Symbol)
+  end
+
+  def receive(message, context)
+    case message
+    when :spawn
+      5.times { @children << context.spawn(EscalatingChild.new) }
+      @ready.send(nil)
+    when :crash
+      @children.first << :crash
+    end
+    Movie::Behaviors(Symbol).same
+  end
+end
+
+private class AllForOneRoot < Movie::AbstractBehavior(Symbol)
+  def initialize(@middle : Channel(Movie::ActorRef(Symbol)), @ready : Channel(Nil), @failures : Channel(Int32))
+  end
+
+  def receive(message, context)
+    if message == :spawn
+      supervision = Movie::SupervisionConfig.new(
+        strategy: Movie::SupervisionStrategy::ESCALATE,
+        scope: Movie::SupervisionScope::ALL_FOR_ONE,
+        max_restarts: 3,
+        within: 1.second
+      )
+      @middle.send(context.spawn(AllForOneMiddle.new(@ready), Movie::RestartStrategy::RESTART, supervision, "all-for-one-middle"))
+    end
+    Movie::Behaviors(Symbol).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    @failures.send(signal.actor.id) if signal.is_a?(Movie::Failed)
+  end
+end
+
 describe "Movie runtime hardening" do
   it "recovers the mailbox when PreStart raises" do
     system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
@@ -651,7 +690,7 @@ describe "Movie runtime hardening" do
     end
   end
 
-  it "keeps extensions alive when actor shutdown times out" do
+  it "retries extension shutdown after actor shutdown times out" do
     system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
     probe = BlockingStopProbe.new
     actor = system.spawn(probe)
@@ -665,6 +704,8 @@ describe "Movie runtime hardening" do
 
     probe.release.send(nil)
     hardening_eventually(1.second) { system.context(actor.id).nil? }.should be_true
+    system.shutdown(1.second)
+    extension.stop_count.get.should eq(1)
   end
 
   it "escalates a nested child failure to the direct supervisor" do
@@ -686,6 +727,28 @@ describe "Movie runtime hardening" do
 
     failure.receive.should eq(supervisor.id)
     hardening_eventually(1.second) { system.context(supervisor.id).nil? }.should be_true
+    system.shutdown
+  end
+
+  it "escalates one failure once for ALL_FOR_ONE supervision" do
+    middle = Channel(Movie::ActorRef(Symbol)).new(1)
+    ready = Channel(Nil).new(1)
+    failures = Channel(Int32).new(8)
+    system = Movie::ActorSystem(Symbol).new(AllForOneRoot.new(middle, ready, failures))
+
+    system << :spawn
+    supervisor = middle.receive
+    supervisor << :spawn
+    ready.receive
+    supervisor << :crash
+
+    failures.receive.should eq(supervisor.id)
+    select
+    when failures.receive
+      fail "ALL_FOR_ONE escalation duplicated the same supervisor failure"
+    when timeout(200.milliseconds)
+    end
+
     system.shutdown
   end
 end

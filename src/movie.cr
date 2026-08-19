@@ -991,6 +991,7 @@ module Movie
     @supervision_config : SupervisionConfig = SupervisionConfig.default
     @config : Config = Config.empty
     @shutdown_mutex : Mutex = Mutex.new
+    @shutdown_finalize_mutex : Mutex = Mutex.new
     @shutdown_started : Bool = false
     @shutdown_completed : Bool = false
 
@@ -1178,41 +1179,39 @@ module Movie
 
       if should_initiate_shutdown
         root_guardian.try &.send_system(STOP)
-        if actor_dispatching_on_current_fiber?
-          spawn do
-            begin
-              complete_shutdown(timeout)
-            rescue ex : Exception
-              Log.error(exception: ex) { "Actor-side shutdown failed" }
-            end
+      end
+
+      if actor_dispatching_on_current_fiber?
+        spawn do
+          begin
+            complete_shutdown(timeout)
+          rescue ex : Exception
+            Log.error(exception: ex) { "Actor-side shutdown failed" }
           end
-          return
         end
-
-        complete_shutdown(timeout)
+        return
       end
 
-      wait_for_shutdown(timeout)
-
-      @shutdown_mutex.synchronize do
-        @shutdown_completed = true
-      end
-      @root = nil
+      complete_shutdown(timeout)
     end
 
     private def complete_shutdown(timeout : Time::Span) : Nil
-      wait_for_shutdown(timeout)
-      begin
-        # Let actors use extensions and scheduler during PreStop/PostStop.
-        @extensions.stop_all
-      ensure
-        @scheduler.try &.stop
-      end
+      @shutdown_finalize_mutex.synchronize do
+        return if @shutdown_mutex.synchronize { @shutdown_completed }
 
-      @shutdown_mutex.synchronize do
-        @shutdown_completed = true
+        wait_for_shutdown(timeout)
+        begin
+          # Let actors use extensions and scheduler during PreStop/PostStop.
+          @extensions.stop_all
+        ensure
+          @scheduler.try &.stop
+        end
+
+        @shutdown_mutex.synchronize do
+          @shutdown_completed = true
+        end
+        @root = nil
       end
-      @root = nil
     end
 
     # Spawns an actor under the user guardian.
