@@ -126,14 +126,15 @@ module Movie
 
     def ask(message : T, response_type : R.class = Nil, timeout : Time::Span? = nil) : Future(R) forall R
       state = Movie::Ask::AskState(R).new(Promise(R).new)
-      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |listener_context|
-        listener_context.watch(self)
+      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
         Movie::Ask::ListenerBehavior(R).new(state, self.as(ActorRefBase))
       end
 
       listener = @system.spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
       listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
       state.listener = listener_ref.as(ActorRefBase)
+      listener_context = @system.context(listener.id).as(ActorContext(Movie::Ask::Response(R)))
+      listener_context.watch(self)
       begin
         tell_from(listener_ref.as(ActorRefBase), message)
       rescue ex : Exception
@@ -1089,14 +1090,15 @@ module Movie
       root = @root || raise "System not initialized"
       state = Movie::Ask::AskState(R).new(Promise(R).new)
 
-      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |listener_context|
-        listener_context.watch(root)
+      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
         Movie::Ask::ListenerBehavior(R).new(state, root.as(ActorRefBase))
       end
 
       listener = spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
       listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
       state.listener = listener_ref.as(ActorRefBase)
+      listener_context = context(listener.id).as(ActorContext(Movie::Ask::Response(R)))
+      listener_context.watch(root)
 
       begin
         root.tell_from(listener_ref.as(ActorRefBase), message)
@@ -1123,14 +1125,15 @@ module Movie
     def ask(target : ActorRef(M), message : M, response_type : R.class = Nil, timeout : Time::Span? = nil) : Future(R) forall M, R
       state = Movie::Ask::AskState(R).new(Promise(R).new)
 
-      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |listener_context|
-        listener_context.watch(target)
+      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
         Movie::Ask::ListenerBehavior(R).new(state, target.as(ActorRefBase))
       end
 
       listener = spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
       listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
       state.listener = listener_ref.as(ActorRefBase)
+      listener_context = context(listener.id).as(ActorContext(Movie::Ask::Response(R)))
+      listener_context.watch(target)
 
       begin
         target.tell_from(listener_ref.as(ActorRefBase), message)

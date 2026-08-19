@@ -205,6 +205,27 @@ private class BlockingStopProbe < Movie::AbstractBehavior(Symbol)
   end
 end
 
+private class BlockingPostStopProbe < Movie::AbstractBehavior(Symbol)
+  getter started : Channel(Nil)
+  getter release : Channel(Nil)
+
+  def initialize
+    @started = Channel(Nil).new(1)
+    @release = Channel(Nil).new(1)
+  end
+
+  def receive(message, context)
+    Movie::Behaviors(Symbol).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    if signal.is_a?(Movie::PostStop)
+      @started.send(nil)
+      @release.receive
+    end
+  end
+end
+
 private class QueueStopProbe < Movie::AbstractBehavior(Symbol)
   getter started : Channel(Nil)
   getter release : Channel(Nil)
@@ -555,6 +576,36 @@ describe "Movie runtime hardening" do
     hardening_eventually(1.second) { system.context(target.id).nil? }.should be_true
 
     future = target.ask(:request, String, 1.second)
+    expect_raises(Movie::Ask::TargetTerminated) { future.await(1.second) }
+    system.shutdown
+  end
+
+  it "fails a context ask cleanly when the local target is already terminated" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    asker = system.spawn(SilentProbe.new)
+    target = system.spawn(SilentProbe.new)
+    target.send_system(Movie::STOP)
+    hardening_eventually(1.second) { system.context(target.id).nil? }.should be_true
+
+    context = system.context(asker.id).as(Movie::ActorContext(Symbol))
+    future = context.ask(target, :request, String)
+    expect_raises(Movie::Ask::TargetTerminated) { future.await(1.second) }
+    system.shutdown
+  end
+
+  it "does not lose context ask termination while the target is posting stop" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    asker = system.spawn(SilentProbe.new)
+    probe = BlockingPostStopProbe.new
+    target = system.spawn(probe)
+
+    target.send_system(Movie::STOP)
+    probe.started.receive
+
+    context = system.context(asker.id).as(Movie::ActorContext(Symbol))
+    future = context.ask(target, :request, String)
+    probe.release.send(nil)
+
     expect_raises(Movie::Ask::TargetTerminated) { future.await(1.second) }
     system.shutdown
   end

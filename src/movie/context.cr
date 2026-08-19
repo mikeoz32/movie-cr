@@ -6,6 +6,7 @@ module Movie
     abstract def path : ActorPath?
     abstract def rebind_path(path : ActorPath?) : Nil
     abstract def deliver_serializable(message : Object, sender : ActorRefBase?) : Nil
+    abstract def register_watcher(actor : ActorRefBase) : Bool
     abstract def accepts_user_messages? : Bool
     abstract def discard_user_messages? : Bool
   end
@@ -44,6 +45,7 @@ module Movie
     @post_stop_sent : Bool = false
     @restart_counters : Hash(Int32 | Symbol, NamedTuple(count: Int32, started_at: Time::Instant)) = {} of Int32 | Symbol => NamedTuple(count: Int32, started_at: Time::Instant)
     @current_sender : ActorRefBase? = nil
+    @state_mutex : Mutex = Mutex.new
 
     def initialize(
       behavior : AbstractBehavior(T),
@@ -62,7 +64,7 @@ module Movie
     end
 
     def state
-      @state
+      @state_mutex.synchronize { @state }
     end
 
     def ref : ActorRef(T)
@@ -174,25 +176,45 @@ module Movie
     end
 
     def watch(actor : ActorRef(U)) forall U
-      return if @watching.includes?(actor)
+      already_watching = @state_mutex.synchronize do
+        if @watching.includes?(actor)
+          true
+        else
+          @watching << actor
+          false
+        end
+      end
+      return if already_watching
 
-      @watching << actor
-      actor.send_system(Watch.new(@ref).as(SystemMessage))
+      if target_context = @system.context(actor.id)
+        unless target_context.register_watcher(@ref)
+          send_system_message(Terminated.new(actor).as(SystemMessage))
+        end
+      else
+        send_system_message(Terminated.new(actor).as(SystemMessage))
+      end
     end
 
     def ask(target : ActorRef(M), message : M, response_type : T.class = Nil, timeout : Time::Span? = nil) : Future(T) forall M, T
       state = Movie::Ask::AskState(T).new(Promise(T).new)
 
-      listener_behavior = Behaviors(Movie::Ask::Response(T)).setup do |listener_context|
-        listener_context.watch(target)
+      listener_behavior = Behaviors(Movie::Ask::Response(T)).setup do |_listener_context|
         Movie::Ask::ListenerBehavior(T).new(state, target.as(ActorRefBase))
       end
 
       listener = spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
       listener_ref = listener.as(ActorRef(Movie::Ask::Response(T)))
       state.listener = listener_ref.as(ActorRefBase)
+      listener_context = @system.context(listener.id).as(ActorContext(Movie::Ask::Response(T)))
+      listener_context.watch(target)
 
-      target.tell_from(listener_ref.as(ActorRefBase), message)
+      begin
+        target.tell_from(listener_ref.as(ActorRefBase), message)
+      rescue ex : Exception
+        state.promise.try_failure(Movie::Ask::TargetTerminated.new(target.as(ActorRefBase)))
+        state.stop_listener
+        return state.promise.future
+      end
 
       if timeout
         timer_handle = @system.scheduler.schedule_once(timeout) do
@@ -207,8 +229,12 @@ module Movie
       state.promise.future
     end
 
-    protected def register_watcher(actor : ActorRefBase)
-      @watchers << actor unless @watchers.includes?(actor)
+    def register_watcher(actor : ActorRefBase) : Bool
+      @state_mutex.synchronize do
+        return false if @state == State::STOPPING || @state == State::STOPPED || @state == State::TERMINATED
+        @watchers << actor unless @watchers.includes?(actor)
+        true
+      end
     end
 
     def mailbox=(mailbox : Mailbox(T))
@@ -287,15 +313,17 @@ module Movie
         handle_post_stop
       when Watch
         watcher = message.message.as(Watch).actor
-        unless @watchers.includes?(watcher)
-          @watchers << watcher
+        unless register_watcher(watcher)
+          watcher.send_system(Terminated.new(@ref).as(SystemMessage))
         end
       when Unwatch
         unwatcher = message.message.as(Unwatch).actor
-        unless @watchers.includes?(unwatcher)
-          return
+        @state_mutex.synchronize do
+          unless @watchers.includes?(unwatcher)
+            return
+          end
+          @watchers.delete(unwatcher)
         end
-        @watchers.delete(unwatcher)
       when Failed
         handle_failed(message.message.as(Failed))
       when Terminated
@@ -437,13 +465,15 @@ module Movie
     end
 
     protected def notify_for_termination
-      @watchers.each do |watcher|
+      watchers = @state_mutex.synchronize { @watchers.dup }
+      watchers.each do |watcher|
         watcher.send_system(Terminated.new(@ref).as(SystemMessage))
       end
     end
 
     protected def notify_for_failure(ex : Exception)
-      @watchers.each do |watcher|
+      watchers = @state_mutex.synchronize { @watchers.dup }
+      watchers.each do |watcher|
         watcher.send_system(Failed.new(@ref, ex).as(SystemMessage))
       end
     end
@@ -562,13 +592,15 @@ module Movie
     end
 
     protected def transition_to(new_state : State)
-      return if @state == new_state
-      unless legal_transition?(@state, new_state)
-        log.warn { "Ignoring invalid actor transition #{@state} -> #{new_state} for #{@ref}" }
-        return
+      @state_mutex.synchronize do
+        return if @state == new_state
+        unless legal_transition?(@state, new_state)
+          log.warn { "Ignoring invalid actor transition #{@state} -> #{new_state} for #{@ref}" }
+          return
+        end
+        log.debug { "Actor #{@ref} transitioning from #{@state} to #{new_state}" }
+        @state = new_state
       end
-      log.debug { "Actor #{@ref} transitioning from #{@state} to #{new_state}" }
-      @state = new_state
     end
 
     private def legal_transition?(from : State, to : State) : Bool
