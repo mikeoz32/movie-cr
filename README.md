@@ -53,6 +53,10 @@ The high-level `ActorRef#ask`, `ActorContext#watch`, and `ActorContext#ask` APIs
 
 See [doc/movie/remoting.md](doc/movie/remoting.md) and [examples/remoting_example.cr](examples/remoting_example.cr) for the complete supported workflow.
 
+## Configuration
+
+The supported configuration schema and environment-variable mapping are documented in [doc/movie/configuration.md](doc/movie/configuration.md). Runtime settings use dotted paths consistently; for example, `remoting.stripe.count` is overridden by `MOVIE_REMOTING_STRIPE_COUNT`.
+
 ## API stability
 
 Stable application-facing APIs:

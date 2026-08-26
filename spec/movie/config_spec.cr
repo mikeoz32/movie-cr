@@ -72,6 +72,107 @@ describe Movie::Config do
     end
   end
 
+  describe "explicit null values" do
+    it "keeps null paths present and distinguishes them from missing paths" do
+      config = Movie::Config.from_json(%({"nullable": null, "nested": {"value": null}}))
+
+      config.has_path?("nullable").should be_true
+      config.has_path?("nested.value").should be_true
+      config.has_path?("missing").should be_false
+
+      config.get_value!("nullable").should be_nil
+      config["nullable"].should be_nil
+      config["nullable"]?.should be_nil
+
+      expect_raises(Movie::MissingConfigError) do
+        config.get_value!("missing")
+      end
+    end
+
+    it "treats null as a wrong type for typed accessors instead of missing" do
+      config = Movie::Config.from_yaml("nullable: null")
+
+      expect_raises(Movie::WrongTypeConfigError) do
+        config.get_string("nullable")
+      end
+
+      expect_raises(Movie::WrongTypeConfigError) do
+        config.get_string("nullable", "fallback")
+      end
+    end
+
+    it "allows explicit null values in the config builder" do
+      config = Movie::Config.builder
+        .set("nullable", nil)
+        .build
+
+      config.has_path?("nullable").should be_true
+      config.get_value!("nullable").should be_nil
+    end
+  end
+
+  describe "configuration parser errors" do
+    it "wraps invalid integer and float strings as ConfigError" do
+      config = Movie::Config.builder
+        .set("integer", "not-an-integer")
+        .set("float", "not-a-float")
+        .build
+
+      expect_raises(Movie::ConfigError) do
+        config.get_int("integer")
+      end
+
+      expect_raises(Movie::ConfigError) do
+        config.get_float("float")
+      end
+    end
+
+    it "wraps invalid duration strings as ConfigError" do
+      config = Movie::Config.builder.set("timeout", "not-a-duration").build
+
+      expect_raises(Movie::ConfigError) do
+        config.get_duration("timeout")
+      end
+    end
+
+    it "wraps malformed YAML and JSON as ConfigError" do
+      expect_raises(Movie::ConfigError) do
+        Movie::Config.from_yaml("name: [unterminated")
+      end
+
+      expect_raises(Movie::ConfigError) do
+        Movie::Config.from_json(%({"name": "unterminated"))
+      end
+    end
+  end
+
+  describe "ActorSystemConfig strategy parsing" do
+    it "keeps actor restart strategy independent from supervision strategy" do
+      config = Movie::ActorSystemConfig.default.with_override(
+        Movie::Config.builder
+          .set("actor.restart.strategy", "stop")
+          .set("supervision.strategy", "resume")
+          .build
+      )
+
+      Movie::ActorSystemConfig.restart_strategy(config).should eq(Movie::RestartStrategy::STOP)
+      Movie::ActorSystemConfig.supervision_config(config).strategy.should eq(Movie::SupervisionStrategy::RESUME)
+    end
+  end
+
+  describe "canonical runtime configuration keys" do
+    it "publishes dotted defaults for all runtime extensions" do
+      defaults = Movie::ActorSystemConfig.default
+
+      defaults.get_int("supervision.max.restarts").should eq(3)
+      defaults.get_int("remoting.stripe.count").should eq(8)
+      defaults.get_int("executor.pool.size").should eq(4)
+      defaults.get_int("executor.queue.capacity").should eq(128)
+      defaults.get_string("persistence.db.path").should eq("data/movie_persistence.sqlite3")
+      defaults.get_int("persistence.pool.size").should eq(1)
+    end
+  end
+
   describe "#get_string" do
     it "returns string value" do
       config = Movie::Config.builder.set("key", "value").build
@@ -426,6 +527,27 @@ describe Movie::Config do
       ensure
         ENV.delete("MOVIE_TEST_REMOTING_HOST")
         ENV.delete("MOVIE_TEST_REMOTING_PORT")
+      end
+    end
+
+    it "maps runtime environment variables to canonical dotted keys" do
+      ENV["MOVIE_TEST_EXECUTOR_POOL_SIZE"] = "12"
+      ENV["MOVIE_TEST_EXECUTOR_QUEUE_CAPACITY"] = "64"
+      ENV["MOVIE_TEST_REMOTING_STRIPE_COUNT"] = "6"
+      ENV["MOVIE_TEST_PERSISTENCE_DB_PATH"] = "/tmp/movie.sqlite3"
+
+      begin
+        config = Movie::Config.empty.with_env_overrides("MOVIE_TEST")
+
+        config.get_int("executor.pool.size").should eq(12)
+        config.get_int("executor.queue.capacity").should eq(64)
+        config.get_int("remoting.stripe.count").should eq(6)
+        config.get_string("persistence.db.path").should eq("/tmp/movie.sqlite3")
+      ensure
+        ENV.delete("MOVIE_TEST_EXECUTOR_POOL_SIZE")
+        ENV.delete("MOVIE_TEST_EXECUTOR_QUEUE_CAPACITY")
+        ENV.delete("MOVIE_TEST_REMOTING_STRIPE_COUNT")
+        ENV.delete("MOVIE_TEST_PERSISTENCE_DB_PATH")
       end
     end
 

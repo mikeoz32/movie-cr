@@ -80,6 +80,10 @@ module Movie
       else
         raise ConfigError.new("YAML root must be a mapping/object")
       end
+    rescue ex : ConfigError
+      raise ex
+    rescue ex : Exception
+      raise ConfigError.new("Invalid YAML configuration: #{ex.message}")
     end
 
     # Loads a Config from a YAML file.
@@ -118,6 +122,10 @@ module Movie
       else
         raise ConfigError.new("JSON root must be an object")
       end
+    rescue ex : ConfigError
+      raise ex
+    rescue ex : Exception
+      raise ConfigError.new("Invalid JSON configuration: #{ex.message}")
     end
 
     # Loads a Config from a JSON file.
@@ -163,7 +171,7 @@ module Movie
 
     # Returns true if the given path exists in the config.
     def has_path?(path : String) : Bool
-      !get_value(path).nil?
+      lookup(path)[:found]
     end
 
     # --- String accessors ---
@@ -183,15 +191,8 @@ module Movie
 
     # Returns the string value at the given path, or default if not found.
     def get_string(path : String, default : String) : String
-      value = get_value(path)
-      case value
-      when String
-        value
-      when Nil
-        default
-      else
-        raise WrongTypeConfigError.new(path, "String", value.class.name)
-      end
+      return default unless has_path?(path)
+      get_string(path)
     end
 
     # --- Integer accessors ---
@@ -219,7 +220,11 @@ module Movie
       when Float64
         value.to_i64
       when String
-        value.to_i64
+        begin
+          value.to_i64
+        rescue ex : ArgumentError
+          raise ConfigError.new("Invalid Int64 at '#{path}': #{ex.message}")
+        end
       else
         raise WrongTypeConfigError.new(path, "Int64", value.class.name)
       end
@@ -245,7 +250,11 @@ module Movie
       when Int64
         value.to_f64
       when String
-        value.to_f64
+        begin
+          value.to_f64
+        rescue ex : ArgumentError
+          raise ConfigError.new("Invalid Float64 at '#{path}': #{ex.message}")
+        end
       else
         raise WrongTypeConfigError.new(path, "Float64", value.class.name)
       end
@@ -384,31 +393,15 @@ module Movie
 
     # Returns the raw value at the given path, or nil if not found.
     def get_value(path : String) : ConfigValue
-      parts = path.split('.')
-      current : ConfigValue = @root
-
-      parts.each do |part|
-        case current
-        when Hash(String, ConfigValue)
-          if current.has_key?(part)
-            current = current[part]
-          else
-            return nil
-          end
-        else
-          return nil
-        end
-      end
-
-      current
+      lookup(path)[:value]
     end
 
     # Returns the raw value at the given path.
     # Raises MissingConfigError if path doesn't exist.
     def get_value!(path : String) : ConfigValue
-      value = get_value(path)
-      raise MissingConfigError.new(path) if value.nil?
-      value
+      result = lookup(path)
+      raise MissingConfigError.new(path) unless result[:found]
+      result[:value]
     end
 
     # Subscript access - returns raw ConfigValue
@@ -419,6 +412,23 @@ module Movie
     # Subscript access with nil for missing paths
     def []?(path : String) : ConfigValue
       get_value(path)
+    end
+
+    private def lookup(path : String) : NamedTuple(found: Bool, value: ConfigValue)
+      parts = path.split('.')
+      current : ConfigValue = @root
+
+      parts.each do |part|
+        case current
+        when Hash(String, ConfigValue)
+          return {found: false, value: nil} unless current.has_key?(part)
+          current = current[part]
+        else
+          return {found: false, value: nil}
+        end
+      end
+
+      {found: true, value: current}
     end
 
     # --- Merging ---
@@ -438,7 +448,7 @@ module Movie
     # Environment variables are mapped from MOVIE_* pattern:
     #   MOVIE_NAME          -> name
     #   MOVIE_REMOTING_PORT -> remoting.port
-    #   MOVIE_CLUSTER_SEED_NODES -> cluster.seed_nodes
+    #   MOVIE_CLUSTER_SEED_NODES -> cluster.seed.nodes
     #
     # Values are auto-converted:
     #   - "true"/"false" -> Bool
@@ -697,6 +707,11 @@ module Movie
       self
     end
 
+    def set(path : String, value : Nil) : self
+      set_value(path, value.as(ConfigValue))
+      self
+    end
+
     def set(path : String, value : Array(String)) : self
       set_value(path, value.map(&.as(ConfigValue)).as(ConfigValue))
       self
@@ -795,10 +810,11 @@ module Movie
   #
   # Configuration paths:
   #   name                           - Actor system name (default: auto-generated)
+  #   actor.restart.strategy         - Root actor restart strategy: restart|stop
   #   supervision.strategy           - Default supervision strategy: restart|stop|resume|escalate
   #   supervision.scope              - Supervision scope: one-for-one|all-for-one
-  #   supervision.max-restarts       - Max restarts before giving up
-  #   supervision.within             - Time window for max-restarts
+  #   supervision.max.restarts       - Max restarts before giving up
+  #   supervision.within             - Time window for max.restarts
   #   supervision.backoff.min        - Minimum backoff delay
   #   supervision.backoff.max        - Maximum backoff delay
   #   supervision.backoff.factor     - Backoff multiplier
@@ -806,7 +822,11 @@ module Movie
   #   remoting.enabled               - Enable remoting on startup
   #   remoting.host                  - Bind host for remoting
   #   remoting.port                  - Bind port for remoting
-  #   remoting.stripe-count          - Connection pool stripe count
+  #   remoting.stripe.count          - Connection pool stripe count
+  #   executor.pool.size             - Executor worker count
+  #   executor.queue.capacity        - Executor queue capacity
+  #   persistence.db.path            - SQLite database path
+  #   persistence.pool.size          - Persistence connection count
   #
   module ActorSystemConfig
     # Returns the default configuration for an ActorSystem.
@@ -814,11 +834,12 @@ module Movie
       Config.builder
         # System
         .set("name", "")  # Empty means auto-generate
+        .set("actor.restart.strategy", "restart")
 
         # Supervision defaults
         .set("supervision.strategy", "restart")
         .set("supervision.scope", "one-for-one")
-        .set("supervision.max-restarts", 3)
+        .set("supervision.max.restarts", 3)
         .set_duration("supervision.within", 1.second)
         .set_duration("supervision.backoff.min", 10.milliseconds)
         .set_duration("supervision.backoff.max", 1.second)
@@ -829,7 +850,15 @@ module Movie
         .set("remoting.enabled", false)
         .set("remoting.host", "127.0.0.1")
         .set("remoting.port", 2552)
-        .set("remoting.stripe-count", 8)
+        .set("remoting.stripe.count", 8)
+
+        # Executor defaults
+        .set("executor.pool.size", 4)
+        .set("executor.queue.capacity", 128)
+
+        # Persistence defaults
+        .set("persistence.db.path", "data/movie_persistence.sqlite3")
+        .set("persistence.pool.size", 1)
 
         .build
     end
@@ -871,7 +900,7 @@ module Movie
       SupervisionConfig.new(
         strategy: parse_strategy(config.get_string("supervision.strategy", "restart")),
         scope: parse_scope(config.get_string("supervision.scope", "one-for-one")),
-        max_restarts: config.get_int("supervision.max-restarts", 3),
+        max_restarts: config.get_int("supervision.max.restarts", 3),
         within: config.get_duration("supervision.within", 1.second),
         backoff_min: config.get_duration("supervision.backoff.min", 10.milliseconds),
         backoff_max: config.get_duration("supervision.backoff.max", 1.second),
@@ -882,7 +911,7 @@ module Movie
 
     # Creates a RestartStrategy from a Config.
     def self.restart_strategy(config : Config) : RestartStrategy
-      parse_restart_strategy(config.get_string("supervision.strategy", "restart"))
+      parse_restart_strategy(config.get_string("actor.restart.strategy", "restart"))
     end
   end
 end

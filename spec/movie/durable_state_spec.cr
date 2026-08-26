@@ -56,7 +56,7 @@ describe Movie::DurableState do
   it "loads and persists state by persistence id" do
     db_path = "/tmp/movie_durable_state_#{UUID.random}.sqlite3"
     config = Movie::Config.builder
-      .set("movie.persistence.db_path", db_path)
+      .set("persistence.db.path", db_path)
       .build
 
     system = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same, config)

@@ -5,6 +5,7 @@
 - [Actor lifecycle architecture](actor_lifecycle.md)
 - [Streams protocol and DSL notes](streams.md)
 - [Remoting MVP and protocol limits](remoting.md)
+- [Configuration schema](configuration.md)
 - [Development workflow](development_workflow.md)
 - [Recovery backlog](backlog.md)
 
