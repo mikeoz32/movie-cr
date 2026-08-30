@@ -12,8 +12,9 @@ module Movie
           when OutputFormat::Human
             emit_human(results, io)
           when OutputFormat::Csv
+            first = results.first? || return
             CSV.build(io) do |csv|
-              csv.row Measurement::CSV_HEADERS
+              csv.row first.csv_headers
               results.each { |measurement| csv.row measurement.csv_values }
             end
           when OutputFormat::JsonLines

@@ -273,24 +273,46 @@ module Movie
         max_nanoseconds : Int64? do
         include JSON::Serializable
 
-        CSV_HEADERS = [
-          "timestamp_utc", "git_sha", "crystal_version", "release_build", "cpu_count", "crystal_workers",
-          "topology", "operation", "messages", "payload_bytes", "producers", "actors", "in_flight", "stripes", "run",
-          "elapsed_nanoseconds", "processed_messages", "messages_per_second", "nanoseconds_per_message",
-          "client_allocated_bytes", "server_allocated_bytes", "bytes_per_message", "server_bytes_per_message",
-          "client_cpu_seconds", "server_cpu_seconds", "p50_nanoseconds", "p95_nanoseconds", "p99_nanoseconds", "max_nanoseconds",
-        ]
+        def csv_headers
+          csv_fields.keys.map(&.to_s)
+        end
 
-        def csv_values : Array(String)
-          [
-            timestamp_utc, git_sha, crystal_version, release_build.to_s, cpu_count.to_s, crystal_workers,
-            topology, operation, messages.to_s, payload_bytes.to_s, producers.to_s, actors.to_s, in_flight.to_s, stripes.to_s, run.to_s,
-            elapsed_nanoseconds.to_s, processed_messages.to_s, messages_per_second.to_s, nanoseconds_per_message.to_s,
-            client_allocated_bytes.to_s, server_allocated_bytes.try(&.to_s) || "", bytes_per_message.to_s,
-            server_bytes_per_message.try(&.to_s) || "", client_cpu_seconds.to_s, server_cpu_seconds.try(&.to_s) || "",
-            p50_nanoseconds.try(&.to_s) || "", p95_nanoseconds.try(&.to_s) || "",
-            p99_nanoseconds.try(&.to_s) || "", max_nanoseconds.try(&.to_s) || "",
-          ]
+        def csv_values
+          csv_fields.values
+        end
+
+        private def csv_fields
+          {
+            timestamp_utc:            timestamp_utc,
+            git_sha:                  git_sha,
+            crystal_version:          crystal_version,
+            release_build:            release_build,
+            cpu_count:                cpu_count,
+            crystal_workers:          crystal_workers,
+            topology:                 topology,
+            operation:                operation,
+            messages:                 messages,
+            payload_bytes:            payload_bytes,
+            producers:                producers,
+            actors:                   actors,
+            in_flight:                in_flight,
+            stripes:                  stripes,
+            run:                      run,
+            elapsed_nanoseconds:      elapsed_nanoseconds,
+            processed_messages:       processed_messages,
+            messages_per_second:      messages_per_second,
+            nanoseconds_per_message:  nanoseconds_per_message,
+            client_allocated_bytes:   client_allocated_bytes,
+            server_allocated_bytes:   server_allocated_bytes,
+            bytes_per_message:        bytes_per_message,
+            server_bytes_per_message: server_bytes_per_message,
+            client_cpu_seconds:       client_cpu_seconds,
+            server_cpu_seconds:       server_cpu_seconds,
+            p50_nanoseconds:          p50_nanoseconds,
+            p95_nanoseconds:          p95_nanoseconds,
+            p99_nanoseconds:          p99_nanoseconds,
+            max_nanoseconds:          max_nanoseconds,
+          }
         end
       end
 
