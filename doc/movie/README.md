@@ -23,6 +23,7 @@
 - [Epic 10 - IO-native serialization](epics/epic-10-io-native-serialization.md)
 - [Epic 11 - Inbound remoting hot-path optimization](epics/epic-11-inbound-remoting-hot-path.md)
 - [Epic 12 - Inbound envelope allocation reduction](epics/epic-12-inbound-envelope-allocation.md)
+- [Epic 13 - Batched remoting transport](epics/epic-13-batched-remoting-transport.md)
 
 ## How To Use This Folder
 

@@ -9,6 +9,7 @@ module Movie::Remote
     MAX_FRAME_SIZE               = 16 * 1024 * 1024
     INITIAL_BUFFER_CAPACITY      = 1024
     MAX_RETAINED_BUFFER_CAPACITY = 1024 * 1024
+    FRAME_PREFIX_SIZE            = sizeof(UInt32)
 
     # Stateful encoder with a reusable JSON buffer. Callers must serialize
     # access; Connection and InboundConnection already do so with write locks.
@@ -20,20 +21,21 @@ module Movie::Remote
 
       def encode(envelope : WireEnvelope, io : IO) : Nil
         @buffer.clear
+        @buffer.write_bytes(0_u32, IO::ByteFormat::BigEndian)
         begin
           @json.document { envelope.to_json(@json) }
         rescue ex
           reset_buffer
           raise ex
         end
-        length = @buffer.bytesize
+        length = @buffer.bytesize - FRAME_PREFIX_SIZE
 
         if length > MAX_FRAME_SIZE
           reset_buffer
           raise FrameTooLargeError.new("Frame size #{length} exceeds maximum #{MAX_FRAME_SIZE}")
         end
 
-        io.write_bytes(length.to_u32, IO::ByteFormat::BigEndian)
+        IO::ByteFormat::BigEndian.encode(length.to_u32, @buffer.to_slice[0, FRAME_PREFIX_SIZE])
         io.write(@buffer.to_slice)
         io.flush
         reset_buffer if length > MAX_RETAINED_BUFFER_CAPACITY

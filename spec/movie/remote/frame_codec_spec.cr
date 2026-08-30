@@ -28,6 +28,18 @@ struct ThrowingFramePayload
   end
 end
 
+class FrameWriteSpy < IO
+  getter writes = [] of Bytes
+
+  def read(slice : Bytes) : Int32
+    0
+  end
+
+  def write(slice : Bytes) : Nil
+    @writes << slice.dup
+  end
+end
+
 describe Movie::Remote::FrameCodec do
   describe ".encode and .decode" do
     it "encodes and decodes a user message" do
@@ -59,6 +71,20 @@ describe Movie::Remote::FrameCodec do
 
       decoded.should_not be_nil
       decoded.not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::HEARTBEAT)
+    end
+
+    it "emits one complete length-prefixed frame write" do
+      io = FrameWriteSpy.new
+
+      Movie::Remote::FrameCodec::Encoder.new.encode(Movie::Remote::WireEnvelope.heartbeat, io)
+
+      io.writes.size.should eq(1)
+      frame = io.writes.first
+      payload_size = IO::ByteFormat::BigEndian.decode(UInt32, frame[0, 4])
+      payload_size.should eq(frame.size - 4)
+      Movie::Remote::FrameCodec.decode_from_bytes(frame).not_nil!.kind.should eq(
+        Movie::Remote::WireEnvelope::Kind::HEARTBEAT
+      )
     end
 
     it "handles multiple frames in sequence" do
