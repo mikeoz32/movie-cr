@@ -4,7 +4,7 @@
 
 **Depends on:** Epic 11.
 
-**Status:** In progress.
+**Status:** Completed (2026-08-30).
 
 **Done when:**
 
@@ -18,7 +18,7 @@
 
 ## Task 12.1: Remove the next measured inbound envelope allocation boundary
 
-**Status:** In progress.
+**Status:** Completed (2026-08-30).
 
 **Files**
 
@@ -73,16 +73,18 @@ The unchanged ActorSystem matrix was repeated twice with 10,000 messages, 64-byt
 
 Remote throughput improved in both repeated series, while local results remained unrelated and noisy. Allocation ranges were stable: tell-client allocations stayed unchanged, while every process that decodes response or request frames improved.
 
-The parser retains at most 256 pooled JSON keys and discards lexer storage after frames larger than 1 MiB. The implementation passes the full suite on the repository's Crystal 1.19.1 CI version as well as the local Crystal 1.21 toolchain. The stale `shard.yml` minimum was corrected from 1.18.2, which cannot compile the existing `Time::Instant` runtime code, to the verified 1.19.1 baseline.
+The parser retains at most 256 pooled JSON keys and discards lexer storage after frames larger than 1 MiB, including malformed frames that fail during initial tokenization. The implementation passes the full suite on the repository's Crystal 1.19.1 CI version as well as the local Crystal 1.21 toolchain. The stale `shard.yml` minimum was corrected from 1.18.2, which cannot compile the existing `Time::Instant` runtime code, to the verified 1.19.1 baseline. Because parser reuse mirrors private standard-library state, the supported range is explicitly bounded below Crystal 1.22 pending a compatibility review.
 
 ## Completion checklist
 
-- [ ] Failing test written first.
-- [ ] Failing test observed red.
-- [ ] Minimal implementation written.
-- [ ] Targeted verification green.
-- [ ] Broader verification green.
-- [ ] Formatting check green.
-- [ ] Docs/examples updated if needed.
-- [ ] Review requested.
-- [ ] Review feedback addressed.
+- [x] Failing test written first.
+- [x] Failing test observed red.
+- [x] Minimal implementation written.
+- [x] Targeted verification green.
+- [x] Broader verification green.
+- [x] Formatting check green.
+- [x] Docs/examples updated if needed.
+- [x] Review requested.
+- [x] Review feedback addressed.
+
+Final verification: the pull-parser identity regression was observed failing with two parser objects before the reusable parser was introduced. The final frame and end-to-end set passes with 26 examples on both Crystal 1.21 and the minimum supported Crystal 1.19.1; the complete CI-flagged suite passes with 253 examples on both toolchains. The opt-in release remoting benchmark passes with 15 examples and reconfirms 335.6 B/msg for canonical registered decoding, 880.1 B/msg for the raw compatibility path, and 281,368 frame decodes/s in the final run. The stress suite passes with 10 examples, all six examples build, dependencies and formatting are clean, and the standalone release ActorSystem benchmark completed two unchanged five-run matrices. Review findings covering reset-time oversized retention, stale Crystal requirements, and private standard-library coupling were fixed with an ensure-protected reset, a malformed oversized-frame recovery regression, aligned public constraints, and explicit compatibility documentation. Final Standards and Spec reviews have no remaining findings.
