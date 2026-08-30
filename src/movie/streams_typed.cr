@@ -100,6 +100,104 @@ module Movie
         end
       end
 
+      # Shared cancellation signal for a collect sink and its materialized
+      # handle. Closing the signal wakes a delivery fiber even when it is
+      # waiting on an unbuffered output channel.
+      class DeliveryControl
+        getter stop_signal = Channel(Nil).new
+        @mutex = Mutex.new
+        @stopped = false
+
+        def stop
+          @mutex.synchronize do
+            return if @stopped
+            @stopped = true
+            @stop_signal.close
+          end
+        end
+      end
+
+      # Asynchronously preserves output order without letting an unbuffered
+      # consumer channel block the CollectSink actor's control mailbox.
+      private class DeliveryPump(T)
+        @queue = [] of T
+        @mutex = Mutex.new
+        @wakeup = Channel(Nil).new(1)
+        @started = false
+        @finishing = false
+
+        def initialize(@out : Channel(T), @control : DeliveryControl)
+        end
+
+        def enqueue(element : T)
+          start unless @started
+          @mutex.synchronize { @queue << element }
+          wake
+        end
+
+        def finish
+          return unless @started
+          @mutex.synchronize { @finishing = true }
+          wake
+        end
+
+        def stop
+          @control.stop
+        end
+
+        private def start
+          @started = true
+          spawn { deliver }
+        end
+
+        private def deliver
+          loop do
+            has_element = false
+            element : T? = nil
+            finishing = false
+
+            @mutex.synchronize do
+              unless @queue.empty?
+                element = @queue.shift
+                has_element = true
+              end
+              finishing = @finishing && @queue.empty? && !has_element
+            end
+
+            break if finishing
+
+            if has_element
+              select
+              when @out.send(element.as(T))
+              when @control.stop_signal.receive?
+                clear
+                break
+              end
+            else
+              select
+              when @wakeup.receive
+              when @control.stop_signal.receive?
+                clear
+                break
+              end
+            end
+          end
+        rescue Channel::ClosedError
+          clear
+        end
+
+        private def wake
+          select
+          when @wakeup.send(nil)
+          else
+          end
+        end
+
+        private def clear
+          @mutex.synchronize { @queue.clear }
+        end
+      end
+
       class ManualSource(T) < AbstractBehavior(MessageBase(T))
         @downstream : ActorRef(MessageBase(T))?
         @demand : UInt64 = 0u64
@@ -146,7 +244,7 @@ module Movie
         end
 
         private def handle_produce(msg : Produce(T))
-          return if @state == Streams::StageState::Completed || @state == Streams::StageState::Failed
+          return if terminal?
           unless @downstream
             @buffer << msg.elem
             return
@@ -163,7 +261,7 @@ module Movie
         end
 
         private def handle_complete
-          return if @state == Streams::StageState::Completed || @state == Streams::StageState::Failed
+          return if terminal?
           @pending_complete = true
           try_emit_complete
         end
@@ -258,7 +356,7 @@ module Movie
         end
 
         private def handle_on_next(msg : OnNext(T))
-          return if @state == Streams::StageState::Completed || @state == Streams::StageState::Failed
+          return if terminal?
           return unless @downstream
           return if @downstream_demand == 0
           @downstream.not_nil! << OnNext(T).new(msg.elem)
@@ -364,7 +462,7 @@ module Movie
         end
 
         private def handle_on_next(msg : OnNext(T))
-          return if @state == Streams::StageState::Completed || @state == Streams::StageState::Failed
+          return if terminal?
           return unless @downstream
           return if @downstream_demand == 0
           transformed = @fn.call(msg.elem)
@@ -471,7 +569,7 @@ module Movie
         end
 
         private def handle_on_next(msg : OnNext(T))
-          return if @state == Streams::StageState::Completed || @state == Streams::StageState::Failed
+          return if terminal?
           return unless @downstream
           return if @downstream_demand == 0
           spawn { @fn.call(msg.elem) }
@@ -578,7 +676,7 @@ module Movie
         end
 
         private def handle_on_next(msg : OnNext(T))
-          return if @state == Streams::StageState::Completed || @state == Streams::StageState::Failed
+          return if terminal?
           return unless @downstream
           unless @pred.call(msg.elem)
             if @downstream_demand > 0
@@ -690,7 +788,7 @@ module Movie
         end
 
         private def handle_on_next(msg : OnNext(T))
-          return if @state == Streams::StageState::Completed || @state == Streams::StageState::Failed
+          return if terminal?
           return if @remaining == 0
           return unless @downstream
           return if @downstream_demand == 0
@@ -810,7 +908,7 @@ module Movie
         end
 
         private def handle_on_next(msg : OnNext(T))
-          return if @state == Streams::StageState::Completed || @state == Streams::StageState::Failed
+          return if terminal?
           if @pending_drop > 0
             @pending_drop -= 1
             @upstream.try &.request(1_u64) if @downstream_demand > 0
@@ -1021,11 +1119,16 @@ module Movie
       class CollectSink(T) < AbstractBehavior(MessageBase(T))
         getter state : Streams::StageState = Streams::StageState::Active
         @upstream : Subscription(T)?
-        @out : Channel(T)
         @signals : Channel(Symbol)?
         @pending_demand : UInt64 = 0u64
+        @delivery_pump : DeliveryPump(T)
 
-        def initialize(@out : Channel(T), @signals : Channel(Symbol)? = nil)
+        def initialize(
+          output : Channel(T),
+          @signals : Channel(Symbol)? = nil,
+          @delivery_control : DeliveryControl = DeliveryControl.new,
+        )
+          @delivery_pump = DeliveryPump(T).new(output, @delivery_control)
         end
 
         def receive(message : MessageBase(T), context : ActorContext(MessageBase(T)))
@@ -1041,19 +1144,20 @@ module Movie
           when OnNext(T)
             handle_on_next(message)
           when OnComplete(T)
-            @state = Streams::StageState::Completed
-            notify(:complete)
+            handle_complete
           when OnError(T)
-            @state = Streams::StageState::Failed
-            @upstream.try &.cancel
-            notify(:error)
+            handle_error
           end
           Behaviors(MessageBase(T)).same
         end
 
+        def on_signal(signal : SystemMessage)
+          @delivery_pump.stop if signal.is_a?(PreStop)
+        end
+
         private def handle_on_next(msg : OnNext(T))
-          return if @state == Streams::StageState::Completed || @state == Streams::StageState::Failed
-          @out.send(msg.elem)
+          return if terminal?
+          @delivery_pump.enqueue(msg.elem)
         end
 
         private def handle_request(msg : Request(T))
@@ -1068,10 +1172,26 @@ module Movie
         private def handle_cancel
           return if terminal?
           @state = Streams::StageState::Cancelled
+          @delivery_pump.stop
           if up = @upstream
             up.cancel
           end
           notify(:cancel)
+        end
+
+        private def handle_complete
+          return if terminal?
+          @state = Streams::StageState::Completed
+          @delivery_pump.finish
+          notify(:complete)
+        end
+
+        private def handle_error
+          return if terminal?
+          @state = Streams::StageState::Failed
+          @upstream.try &.cancel
+          @delivery_pump.finish
+          notify(:error)
         end
 
         private def flush_pending_demand
@@ -1119,7 +1239,7 @@ module Movie
           @sink : ActorRef(MessageBase(T)),
           @completion : Future(R),
           @cancel : ->,
-          @out_channel : Channel(T)? = nil
+          @out_channel : Channel(T)? = nil,
         )
         end
       end
@@ -1179,7 +1299,7 @@ module Movie
         end
 
         private def handle_on_next(msg : OnNext(T))
-          return if @state == Streams::StageState::Completed || @state == Streams::StageState::Failed
+          return if terminal?
           return unless @downstream
           return if @downstream_demand == 0
           @downstream.not_nil! << OnNext(T).new(msg.elem)
@@ -1321,7 +1441,8 @@ module Movie
           @flows : Array(AbstractBehavior(MessageBase(T))),
           @sink_behavior : AbstractBehavior(MessageBase(T)),
           @initial_demand : UInt64 = 0u64,
-          @out_channel : Channel(T)? = nil
+          @out_channel : Channel(T)? = nil,
+          @pre_cancel : Proc(Nil)? = nil,
         )
         end
 
@@ -1343,7 +1464,10 @@ module Movie
           src << Subscribe(T).new(downstream)
           sink_actor << Request(T).new(@initial_demand) if @initial_demand > 0
 
-          cancel_proc = ->{ sink_actor << Cancel(T).new }
+          cancel_proc = -> do
+            @pre_cancel.try &.call
+            sink_actor << Cancel(T).new
+          end
           MaterializedPipeline(T, Nil).new(system, src, sink_actor, promise.future, cancel_proc, @out_channel)
         end
       end
@@ -1354,7 +1478,7 @@ module Movie
           @flows : Array(AbstractBehavior(MessageBase(T))),
           @initial : R,
           @reducer : R, T -> R,
-          @initial_demand : UInt64 = 0u64
+          @initial_demand : UInt64 = 0u64,
         )
         end
 
@@ -1375,7 +1499,7 @@ module Movie
           src << Subscribe(T).new(downstream)
           sink_actor << Request(T).new(@initial_demand > 0 ? @initial_demand : UInt64::MAX)
 
-          cancel_proc = ->{ sink_actor << Cancel(T).new }
+          cancel_proc = -> { sink_actor << Cancel(T).new }
           MaterializedPipeline(T, R).new(system, src, sink_actor, promise.future, cancel_proc)
         end
       end
@@ -1396,8 +1520,10 @@ module Movie
 
         def to_collect(initial_demand : UInt64 = 0u64, channel_capacity : Int32 = 0) : RunnablePipeline(T)
           out_ch = Channel(T).new(channel_capacity)
-          sink = CollectSink(T).new(out_ch)
-          RunnablePipeline(T).new(@source_behavior, @flows.dup, sink, initial_demand, out_ch)
+          delivery_control = DeliveryControl.new
+          sink = CollectSink(T).new(out_ch, delivery_control: delivery_control)
+          pre_cancel = -> { delivery_control.stop }
+          RunnablePipeline(T).new(@source_behavior, @flows.dup, sink, initial_demand, out_ch, pre_cancel)
         end
 
         def fold(initial : R, reducer : R, T -> R, initial_demand : UInt64 = 0u64) : RunnableFoldPipeline(T, R) forall R

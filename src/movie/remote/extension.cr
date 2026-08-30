@@ -151,6 +151,7 @@ module Movie::Remote
       started = @server.start
       if started
         @address = Address.remote(@address.system, @address.host.not_nil!, @server.local_port)
+        @system.publish_remoting_address(@address)
       end
       started
     end

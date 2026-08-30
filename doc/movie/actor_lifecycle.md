@@ -1,5 +1,7 @@
 # Movie Actor System - Actor Lifecycle Architecture
 
+[Documentation index](README.md) · [Configuration](configuration.md) · [Development workflow](development_workflow.md)
+
 ## Overview
 
 **Movie** is a lightweight actor framework for Crystal that leverages the language's experimental execution contexts and fiber-based concurrency model. This document describes the complete architecture of the actor lifecycle, from creation to message processing.

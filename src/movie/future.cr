@@ -229,7 +229,7 @@ module Movie
             FutureLog.error(exception: ex) { "Unhandled future callback error" }
           end
         end
-        return FutureSubscription.new(->{} )
+        return FutureSubscription.new(-> { })
       end
 
       cancel_proc = -> do

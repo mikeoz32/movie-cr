@@ -70,6 +70,17 @@ describe Movie::Config do
       config.has_path?("missing").should be_false
       config.has_path?("name.nested").should be_false
     end
+
+    it "distinguishes an explicit null from a missing path" do
+      config = Movie::Config.from_json(%({"present": null}))
+
+      config.has_path?("present").should be_true
+      config.has_path?("missing").should be_false
+      config["present"].should be_nil
+      expect_raises(Movie::WrongTypeConfigError) do
+        config.get_string("present", "fallback")
+      end
+    end
   end
 
   describe "#get_string" do
@@ -113,6 +124,22 @@ describe Movie::Config do
       config = Movie::Config.builder.set("value", 42.7).build
       config.get_int("value").should eq(42)
     end
+
+    it "wraps invalid and overflowing values as config errors" do
+      invalid = Movie::Config.builder.set("value", "not-an-int").build
+      overflowing = Movie::Config.builder.set("value", Int64::MAX).build
+
+      expect_raises(Movie::WrongTypeConfigError) { invalid.get_int("value") }
+      expect_raises(Movie::WrongTypeConfigError) { overflowing.get_int("value") }
+    end
+  end
+
+  describe "#get_float" do
+    it "wraps invalid string values as config errors" do
+      config = Movie::Config.builder.set("value", "not-a-float").build
+
+      expect_raises(Movie::WrongTypeConfigError) { config.get_float("value") }
+    end
   end
 
   describe "#get_bool" do
@@ -148,6 +175,12 @@ describe Movie::Config do
       config = Movie::Config.empty
       config.get_bool("missing", true).should be_true
     end
+
+    it "reports invalid strings as config errors" do
+      config = Movie::Config.builder.set("enabled", "sometimes").build
+
+      expect_raises(Movie::WrongTypeConfigError) { config.get_bool("enabled") }
+    end
   end
 
   describe "#get_duration" do
@@ -179,6 +212,14 @@ describe Movie::Config do
     it "returns default for missing path" do
       config = Movie::Config.empty
       config.get_duration("missing", 1.second).should eq(1.second)
+    end
+
+    it "reports invalid and overflowing strings as config errors" do
+      invalid = Movie::Config.builder.set("timeout", "eventually").build
+      overflowing = Movie::Config.builder.set("timeout", "999999999999999999999").build
+
+      expect_raises(Movie::WrongTypeConfigError) { invalid.get_duration("timeout") }
+      expect_raises(Movie::WrongTypeConfigError) { overflowing.get_duration("timeout") }
     end
   end
 
@@ -217,8 +258,8 @@ describe Movie::Config do
         .build
 
       merged = base.with_fallback(fallback)
-      merged.get_string("name").should eq("base")  # base wins
-      merged.get_int("port").should eq(8080)       # from fallback
+      merged.get_string("name").should eq("base") # base wins
+      merged.get_int("port").should eq(8080)      # from fallback
     end
 
     it "deep merges nested configs" do
@@ -232,8 +273,8 @@ describe Movie::Config do
         .build
 
       merged = base.with_fallback(fallback)
-      merged.get_string("remoting.host").should eq("localhost")  # base wins
-      merged.get_int("remoting.port").should eq(9000)            # from fallback
+      merged.get_string("remoting.host").should eq("localhost") # base wins
+      merged.get_int("remoting.port").should eq(9000)           # from fallback
     end
   end
 
@@ -249,8 +290,8 @@ describe Movie::Config do
         .build
 
       merged = base.with_override(override)
-      merged.get_string("name").should eq("base")   # unchanged
-      merged.get_int("port").should eq(9000)        # overridden
+      merged.get_string("name").should eq("base") # unchanged
+      merged.get_int("port").should eq(9000)      # overridden
     end
   end
 
@@ -342,9 +383,9 @@ describe Movie::Config do
       # Simulate load with fallback (from_yaml + with_fallback)
       config = Movie::Config.from_yaml(yaml).with_fallback(default)
 
-      config.get_string("name").should eq("custom-name")  # from YAML
-      config.get_int("port").should eq(8080)              # from default
-      config.get_bool("debug").should eq(false)           # from default
+      config.get_string("name").should eq("custom-name") # from YAML
+      config.get_int("port").should eq(8080)             # from default
+      config.get_bool("debug").should eq(false)          # from default
     end
   end
 
@@ -429,6 +470,49 @@ describe Movie::Config do
       end
     end
 
+    it "maps canonical double-underscore paths and hyphenated keys" do
+      ENV["MOVIE_TEST_REMOTING__STRIPE_COUNT"] = "3"
+      ENV["MOVIE_TEST_EXECUTOR__QUEUE_CAPACITY"] = "64"
+
+      begin
+        config = Movie::ActorSystemConfig.default.with_env_overrides("MOVIE_TEST")
+
+        config.get_int("remoting.stripe-count").should eq(3)
+        config.get_int("executor.queue-capacity").should eq(64)
+        config.has_path?("remoting.stripe.count").should be_false
+      ensure
+        ENV.delete("MOVIE_TEST_REMOTING__STRIPE_COUNT")
+        ENV.delete("MOVIE_TEST_EXECUTOR__QUEUE_CAPACITY")
+      end
+    end
+
+    it "preserves canonical schema types for zero and one overrides" do
+      ENV["MOVIE_TEST_REMOTING__PORT"] = "0"
+      ENV["MOVIE_TEST_REMOTING__ENABLED"] = "1"
+
+      begin
+        config = Movie::ActorSystemConfig.default.with_env_overrides("MOVIE_TEST")
+
+        config.get_int("remoting.port").should eq(0)
+        config.get_bool("remoting.enabled").should be_true
+      ensure
+        ENV.delete("MOVIE_TEST_REMOTING__PORT")
+        ENV.delete("MOVIE_TEST_REMOTING__ENABLED")
+      end
+    end
+
+    it "normalizes overflowing typed overrides as config errors" do
+      ENV["MOVIE_TEST_REMOTING__PORT"] = "999999999999999999999999999999"
+
+      begin
+        expect_raises(Movie::WrongTypeConfigError) do
+          Movie::ActorSystemConfig.default.with_env_overrides("MOVIE_TEST")
+        end
+      ensure
+        ENV.delete("MOVIE_TEST_REMOTING__PORT")
+      end
+    end
+
     it "parses comma-separated values as arrays" do
       ENV["MOVIE_TEST_HOSTS"] = "host1,host2,host3"
 
@@ -441,5 +525,30 @@ describe Movie::Config do
         ENV.delete("MOVIE_TEST_HOSTS")
       end
     end
+  end
+end
+
+describe Movie::ActorSystemConfig do
+  it "publishes one canonical schema for feature configuration" do
+    config = Movie::ActorSystemConfig.default
+
+    config.get_int("executor.pool-size").should eq(4)
+    config.get_int("executor.queue-capacity").should eq(128)
+    config.get_string("persistence.db-path").should eq("data/movie_persistence.sqlite3")
+    config.get_int("persistence.pool-size").should eq(1)
+    config.has_path?("movie.persistence.db_path").should be_false
+  end
+
+  it "keeps root restart behavior independent from supervision strategy" do
+    config = Movie::Config.builder
+      .set("supervision.strategy", "resume")
+      .set("root.restart-strategy", "stop")
+      .build
+    system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, config)
+
+    Movie::ActorSystemConfig.restart_strategy(system.config).should eq(Movie::RestartStrategy::STOP)
+    Movie::ActorSystemConfig.supervision_config(system.config).strategy.should eq(Movie::SupervisionStrategy::RESUME)
+  ensure
+    system.try &.shutdown
   end
 end

@@ -21,12 +21,14 @@ module Movie
 
   struct Increment
     getter amount : Int32
+
     def initialize(@amount : Int32)
     end
   end
 
   struct GetValue
     getter reply_to : Movie::ActorRef(Int32)
+
     def initialize(@reply_to : Movie::ActorRef(Int32))
     end
   end
@@ -70,7 +72,7 @@ describe Movie::EventSourcing do
   it "replays events to recover state" do
     db_path = "/tmp/movie_event_sourcing_#{UUID.random}.sqlite3"
     config = Movie::Config.builder
-      .set("movie.persistence.db_path", db_path)
+      .set("persistence.db-path", db_path)
       .build
 
     system = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same, config)

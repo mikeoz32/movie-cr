@@ -56,6 +56,5 @@ module Movie
     def self.receive(&block : Proc(T, ActorContext(T), AbstractBehavior(T))) : ReceiveMessageBehavior(T)
       ReceiveMessageBehavior.new(block)
     end
-
   end
 end

@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
   pull_request:
@@ -17,6 +20,8 @@ jobs:
           apt-get install -y libsqlite3-dev
       - name: Install shards
         run: shards install
+      - name: Check formatting
+        run: crystal tool format --check src spec examples
       - name: Run specs
         run: crystal spec spec/movie -Dpreview_mt -Dexecution_context
       - name: Build examples

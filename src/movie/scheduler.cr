@@ -22,7 +22,7 @@ module Movie
   # handle = scheduler.schedule_once(5.seconds) do
   #   puts "Timer fired!"
   # end
-  # handle.cancel  # Cancels the timer if not yet fired
+  # handle.cancel # Cancels the timer if not yet fired
   # ```
   class Scheduler
     @log : Log

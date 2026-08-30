@@ -7,7 +7,7 @@ end
 private def receive_replies(
   replies : Channel(Movie::ExecutorExtension::TaskReply(Int32)),
   count : Int32,
-  timeout : Time::Span
+  timeout : Time::Span,
 ) : Array(Movie::ExecutorExtension::TaskReply(Int32))
   deadline = Time.instant + timeout
   received = [] of Movie::ExecutorExtension::TaskReply(Int32)

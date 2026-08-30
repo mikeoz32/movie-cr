@@ -164,10 +164,9 @@ module Movie
   class Execution < ExtensionId(ExecutorExtension)
     def create(system : AbstractActorSystem) : ExecutorExtension
       cfg = system.config
-      pool = cfg.get_int("executor.pool-size", 4)
-      cap = cfg.get_int("executor.queue-capacity", 128)
+      pool = cfg.get_int(ActorSystemConfig::EXECUTOR_POOL_SIZE, 4)
+      cap = cfg.get_int(ActorSystemConfig::EXECUTOR_QUEUE_CAPACITY, 128)
       ExecutorExtension.new(system, pool, cap)
     end
   end
-
 end

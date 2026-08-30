@@ -3,6 +3,7 @@
 ## Core Docs
 
 - [Actor lifecycle architecture](actor_lifecycle.md)
+- [Configuration schema and semantics](configuration.md)
 - [Streams protocol and DSL notes](streams.md)
 - [Remoting MVP and protocol limits](remoting.md)
 - [Development workflow](development_workflow.md)

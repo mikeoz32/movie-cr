@@ -12,7 +12,7 @@ module Movie
   class EventStoreProbe < AbstractBehavior(StoreProbeMessage)
     def initialize(
       @store : ActorRef(Movie::Persistence::EventStoreMessage),
-      @promise : Promise(Array(String))
+      @promise : Promise(Array(String)),
     )
     end
 
@@ -31,7 +31,7 @@ module Movie
   class StateStoreProbe < AbstractBehavior(StoreProbeMessage)
     def initialize(
       @store : ActorRef(Movie::Persistence::StateStoreMessage),
-      @promise : Promise(String?)
+      @promise : Promise(String?),
     )
     end
 
@@ -48,6 +48,25 @@ module Movie
 end
 
 describe "Movie persistence store actors" do
+  it "creates the configured database parent directory" do
+    root = "/tmp/movie_database_#{UUID.random}"
+    db_path = "#{root}/nested/movie.sqlite3"
+    config = Movie::Config.builder
+      .set("persistence.db-path", db_path)
+      .build
+    system = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same, config)
+    database = Movie::Database.get(system)
+
+    system.ask(database.pool, Movie::Persistence::DbExec.new("CREATE TABLE path_probe (id INTEGER)"), Bool, 2.seconds).await(2.seconds)
+    File.exists?(db_path).should be_true
+  ensure
+    system.try &.shutdown
+    File.delete(db_path) if db_path && File.exists?(db_path)
+    nested = "#{root}/nested" if root
+    Dir.delete(nested) if nested && Dir.exists?(nested)
+    Dir.delete(root) if root && Dir.exists?(root)
+  end
+
   it "appends and reads events through the event store actor" do
     path = "/tmp/movie_event_store_#{UUID.random}.sqlite3"
     db_uri = "sqlite3:#{path}"

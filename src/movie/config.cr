@@ -44,6 +44,14 @@ module Movie
   #   config.get_config("remoting")       # => Config subsection
   #
   class Config
+    private struct LookupResult
+      getter found : Bool
+      getter value : ConfigValue
+
+      def initialize(@found : Bool, @value : ConfigValue)
+      end
+    end
+
     @root : Hash(String, ConfigValue)
 
     def initialize(@root : Hash(String, ConfigValue) = {} of String => ConfigValue)
@@ -163,7 +171,7 @@ module Movie
 
     # Returns true if the given path exists in the config.
     def has_path?(path : String) : Bool
-      !get_value(path).nil?
+      lookup_value(path).found
     end
 
     # --- String accessors ---
@@ -183,15 +191,7 @@ module Movie
 
     # Returns the string value at the given path, or default if not found.
     def get_string(path : String, default : String) : String
-      value = get_value(path)
-      case value
-      when String
-        value
-      when Nil
-        default
-      else
-        raise WrongTypeConfigError.new(path, "String", value.class.name)
-      end
+      has_path?(path) ? get_string(path) : default
     end
 
     # --- Integer accessors ---
@@ -199,6 +199,9 @@ module Movie
     # Returns the integer value at the given path.
     def get_int(path : String) : Int32
       get_long(path).to_i32
+    rescue ex : OverflowError
+      value = get_value(path)
+      raise WrongTypeConfigError.new(path, "Int32", value.class.name)
     end
 
     # Returns the integer value at the given path, or default if not found.
@@ -223,6 +226,8 @@ module Movie
       else
         raise WrongTypeConfigError.new(path, "Int64", value.class.name)
       end
+    rescue ex : ArgumentError | OverflowError
+      raise WrongTypeConfigError.new(path, "Int64", value.class.name)
     end
 
     # Returns the Int64 value at the given path, or default if not found.
@@ -249,6 +254,8 @@ module Movie
       else
         raise WrongTypeConfigError.new(path, "Float64", value.class.name)
       end
+    rescue ex : ArgumentError | OverflowError
+      raise WrongTypeConfigError.new(path, "Float64", value.class.name)
     end
 
     # Returns the float value at the given path, or default if not found.
@@ -384,6 +391,10 @@ module Movie
 
     # Returns the raw value at the given path, or nil if not found.
     def get_value(path : String) : ConfigValue
+      lookup_value(path).value
+    end
+
+    private def lookup_value(path : String) : LookupResult
       parts = path.split('.')
       current : ConfigValue = @root
 
@@ -393,22 +404,22 @@ module Movie
           if current.has_key?(part)
             current = current[part]
           else
-            return nil
+            return LookupResult.new(false, nil)
           end
         else
-          return nil
+          return LookupResult.new(false, nil)
         end
       end
 
-      current
+      LookupResult.new(true, current)
     end
 
     # Returns the raw value at the given path.
     # Raises MissingConfigError if path doesn't exist.
     def get_value!(path : String) : ConfigValue
-      value = get_value(path)
-      raise MissingConfigError.new(path) if value.nil?
-      value
+      result = lookup_value(path)
+      raise MissingConfigError.new(path) unless result.found
+      result.value
     end
 
     # Subscript access - returns raw ConfigValue
@@ -459,12 +470,10 @@ module Movie
         next unless key.starts_with?("#{prefix}_")
 
         # Convert MOVIE_REMOTING_PORT to remoting.port
-        path = key[(prefix.size + 1)..]
-          .downcase
-          .gsub("_", ".")
+        path = env_key_to_path(key[(prefix.size + 1)..])
 
         # Auto-convert value
-        converted = convert_env_value(value)
+        converted = convert_env_value(path, value)
         set_builder_value(overrides, path, converted)
       end
 
@@ -532,6 +541,8 @@ module Movie
       else
         raise WrongTypeConfigError.new(path, "Duration", "String(#{str})")
       end
+    rescue ex : ArgumentError | OverflowError
+      raise WrongTypeConfigError.new(path, "Duration", "String(#{str})")
     end
 
     private def deep_merge(base : Hash(String, ConfigValue), override : Hash(String, ConfigValue)) : Hash(String, ConfigValue)
@@ -552,13 +563,39 @@ module Movie
       result
     end
 
-    # Converts environment variable string to appropriate ConfigValue type.
-    private def convert_env_value(value : String) : ConfigValue
-      # Boolean
+    # Converts an environment variable while preserving the type of an
+    # existing schema value. New paths use conservative value inference.
+    private def convert_env_value(path : String, value : String) : ConfigValue
+      existing = lookup_value(path)
+      if existing.found
+        case current = existing.value
+        when String
+          return value
+        when Int64
+          return value.to_i64
+        when Float64
+          return value.to_f64
+        when Bool
+          return parse_env_bool(path, value)
+        when Array(ConfigValue)
+          return value.split(",").map(&.strip.as(ConfigValue))
+        when Hash(String, ConfigValue)
+          raise WrongTypeConfigError.new(path, "scalar or Array", current.class.name)
+        end
+      end
+
+      infer_env_value(value)
+    rescue ex : ArgumentError | OverflowError
+      raise WrongTypeConfigError.new(path, "schema-compatible value", "String(#{value})")
+    end
+
+    private def infer_env_value(value : String) : ConfigValue
+      # Boolean words are unambiguous. Numeric 0/1 remain integers unless the
+      # existing schema explicitly identifies the target as a Bool.
       case value.downcase
-      when "true", "yes", "on", "1"
+      when "true", "yes", "on"
         return true
-      when "false", "no", "off", "0"
+      when "false", "no", "off"
         return false
       end
 
@@ -579,6 +616,31 @@ module Movie
 
       # String (default)
       value
+    end
+
+    private def parse_env_bool(path : String, value : String) : Bool
+      case value.downcase
+      when "true", "yes", "on", "1"
+        true
+      when "false", "no", "off", "0"
+        false
+      else
+        raise WrongTypeConfigError.new(path, "Bool", "String(#{value})")
+      end
+    end
+
+    # Canonical environment keys use a double underscore between path
+    # segments and a single underscore for hyphens inside a segment:
+    # MOVIE_REMOTING__STRIPE_COUNT -> remoting.stripe-count.
+    # Single-underscore keys remain supported for simple legacy paths such as
+    # MOVIE_REMOTING_PORT -> remoting.port.
+    private def env_key_to_path(key : String) : String
+      normalized = key.downcase
+      if normalized.includes?("__")
+        normalized.split("__").map(&.gsub("_", "-")).join(".")
+      else
+        normalized.gsub("_", ".")
+      end
     end
 
     # Sets a value on a ConfigBuilder, handling different types.
@@ -795,6 +857,7 @@ module Movie
   #
   # Configuration paths:
   #   name                           - Actor system name (default: auto-generated)
+  #   root.restart-strategy          - Root actor failure behavior: restart|stop
   #   supervision.strategy           - Default supervision strategy: restart|stop|resume|escalate
   #   supervision.scope              - Supervision scope: one-for-one|all-for-one
   #   supervision.max-restarts       - Max restarts before giving up
@@ -809,27 +872,55 @@ module Movie
   #   remoting.stripe-count          - Connection pool stripe count
   #
   module ActorSystemConfig
+    NAME                       = "name"
+    ROOT_RESTART_STRATEGY      = "root.restart-strategy"
+    SUPERVISION_STRATEGY       = "supervision.strategy"
+    SUPERVISION_SCOPE          = "supervision.scope"
+    SUPERVISION_MAX_RESTARTS   = "supervision.max-restarts"
+    SUPERVISION_WITHIN         = "supervision.within"
+    SUPERVISION_BACKOFF_MIN    = "supervision.backoff.min"
+    SUPERVISION_BACKOFF_MAX    = "supervision.backoff.max"
+    SUPERVISION_BACKOFF_FACTOR = "supervision.backoff.factor"
+    SUPERVISION_BACKOFF_JITTER = "supervision.backoff.jitter"
+    REMOTING_ENABLED           = "remoting.enabled"
+    REMOTING_HOST              = "remoting.host"
+    REMOTING_PORT              = "remoting.port"
+    REMOTING_STRIPE_COUNT      = "remoting.stripe-count"
+    EXECUTOR_POOL_SIZE         = "executor.pool-size"
+    EXECUTOR_QUEUE_CAPACITY    = "executor.queue-capacity"
+    PERSISTENCE_DB_PATH        = "persistence.db-path"
+    PERSISTENCE_POOL_SIZE      = "persistence.pool-size"
+
     # Returns the default configuration for an ActorSystem.
     def self.default : Config
       Config.builder
         # System
-        .set("name", "")  # Empty means auto-generate
+        .set(NAME, "") # Empty means auto-generate
+        .set(ROOT_RESTART_STRATEGY, "restart")
 
         # Supervision defaults
-        .set("supervision.strategy", "restart")
-        .set("supervision.scope", "one-for-one")
-        .set("supervision.max-restarts", 3)
-        .set_duration("supervision.within", 1.second)
-        .set_duration("supervision.backoff.min", 10.milliseconds)
-        .set_duration("supervision.backoff.max", 1.second)
-        .set("supervision.backoff.factor", 2.0)
-        .set("supervision.backoff.jitter", 0.0)
+        .set(SUPERVISION_STRATEGY, "restart")
+        .set(SUPERVISION_SCOPE, "one-for-one")
+        .set(SUPERVISION_MAX_RESTARTS, 3)
+        .set_duration(SUPERVISION_WITHIN, 1.second)
+        .set_duration(SUPERVISION_BACKOFF_MIN, 10.milliseconds)
+        .set_duration(SUPERVISION_BACKOFF_MAX, 1.second)
+        .set(SUPERVISION_BACKOFF_FACTOR, 2.0)
+        .set(SUPERVISION_BACKOFF_JITTER, 0.0)
 
         # Remoting defaults
-        .set("remoting.enabled", false)
-        .set("remoting.host", "127.0.0.1")
-        .set("remoting.port", 2552)
-        .set("remoting.stripe-count", 8)
+        .set(REMOTING_ENABLED, false)
+        .set(REMOTING_HOST, "127.0.0.1")
+        .set(REMOTING_PORT, 2552)
+        .set(REMOTING_STRIPE_COUNT, 8)
+
+        # Executor defaults
+        .set(EXECUTOR_POOL_SIZE, 4)
+        .set(EXECUTOR_QUEUE_CAPACITY, 128)
+
+        # Persistence defaults
+        .set(PERSISTENCE_DB_PATH, "data/movie_persistence.sqlite3")
+        .set(PERSISTENCE_POOL_SIZE, 1)
 
         .build
     end
@@ -869,20 +960,20 @@ module Movie
     # Creates a SupervisionConfig from a Config.
     def self.supervision_config(config : Config) : SupervisionConfig
       SupervisionConfig.new(
-        strategy: parse_strategy(config.get_string("supervision.strategy", "restart")),
-        scope: parse_scope(config.get_string("supervision.scope", "one-for-one")),
-        max_restarts: config.get_int("supervision.max-restarts", 3),
-        within: config.get_duration("supervision.within", 1.second),
-        backoff_min: config.get_duration("supervision.backoff.min", 10.milliseconds),
-        backoff_max: config.get_duration("supervision.backoff.max", 1.second),
-        backoff_factor: config.get_float("supervision.backoff.factor", 2.0),
-        jitter: config.get_float("supervision.backoff.jitter", 0.0)
+        strategy: parse_strategy(config.get_string(SUPERVISION_STRATEGY, "restart")),
+        scope: parse_scope(config.get_string(SUPERVISION_SCOPE, "one-for-one")),
+        max_restarts: config.get_int(SUPERVISION_MAX_RESTARTS, 3),
+        within: config.get_duration(SUPERVISION_WITHIN, 1.second),
+        backoff_min: config.get_duration(SUPERVISION_BACKOFF_MIN, 10.milliseconds),
+        backoff_max: config.get_duration(SUPERVISION_BACKOFF_MAX, 1.second),
+        backoff_factor: config.get_float(SUPERVISION_BACKOFF_FACTOR, 2.0),
+        jitter: config.get_float(SUPERVISION_BACKOFF_JITTER, 0.0)
       )
     end
 
     # Creates a RestartStrategy from a Config.
     def self.restart_strategy(config : Config) : RestartStrategy
-      parse_restart_strategy(config.get_string("supervision.strategy", "restart"))
+      parse_restart_strategy(config.get_string(ROOT_RESTART_STRATEGY, "restart"))
     end
   end
 end

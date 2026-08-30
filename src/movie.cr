@@ -607,10 +607,12 @@ module Movie
   # Registry for managing extensions within an ActorSystem.
   class ExtensionRegistry
     @extensions : Hash(String, Extension)
+    @starting : Hash(String, Channel(Nil))
     @mutex : Mutex
 
     def initialize
       @extensions = {} of String => Extension
+      @starting = {} of String => Channel(Nil)
       @mutex = Mutex.new
     end
 
@@ -633,30 +635,64 @@ module Movie
       end
     end
 
-    # Registers an extension if missing and returns the registered instance.
-    # Uses the provided type to key the registry to avoid races.
-    def get_or_register(type : T.class, extension : Extension) : T forall T
+    # Creates, starts, and registers an extension once. Concurrent callers wait
+    # for startup to finish and never observe a partially started instance.
+    def get_or_register(type : T.class, &factory : -> Extension) : T forall T
       key = T.name
-      existing = nil.as(Extension?)
-      @mutex.synchronize do
-        if ext = @extensions[key]?
-          existing = ext
-        else
-          @extensions[key] = extension
-        end
-      end
-      if existing
-        return existing.as(T)
-      end
-      started = extension.start
-      if started == false
-        extension.stop
+      loop do
+        existing = nil.as(Extension?)
+        start_signal = nil.as(Channel(Nil)?)
+        starts_extension = false
+
         @mutex.synchronize do
-          @extensions.delete(key) if @extensions[key]?.same?(extension)
+          if ext = @extensions[key]?
+            existing = ext
+          elsif signal = @starting[key]?
+            start_signal = signal
+          else
+            start_signal = Channel(Nil).new
+            @starting[key] = start_signal.not_nil!
+            starts_extension = true
+          end
         end
-        raise ExtensionStartError.new("Extension #{key} failed to start")
+
+        return existing.as(T) if existing
+
+        unless starts_extension
+          start_signal.not_nil!.receive?
+          next
+        end
+
+        extension = nil.as(Extension?)
+        begin
+          extension = factory.call
+          started = extension.start
+          if started == false
+            raise ExtensionStartError.new("Extension #{key} failed to start")
+          end
+
+          @mutex.synchronize do
+            @extensions[key] = extension
+            @starting.delete(key)
+          end
+          start_signal.not_nil!.close
+          return extension.as(T)
+        rescue ex
+          begin
+            extension.try &.stop
+          rescue stop_error
+            Log.for(self.class).error(exception: stop_error) { "Failed to stop extension #{key} after startup failure" }
+          end
+          @mutex.synchronize { @starting.delete(key) }
+          start_signal.not_nil!.close
+          raise ex
+        end
       end
-      extension.as(T)
+    end
+
+    # Compatibility overload for callers that already constructed an instance.
+    def get_or_register(type : T.class, extension : Extension) : T forall T
+      get_or_register(T) { extension }
     end
 
     # Returns an extension by type, or nil if not registered.
@@ -828,16 +864,16 @@ module Movie
     # Enables remoting on this actor system.
     # Returns the RemoteExtension for configuring remote communication.
     def enable_remoting(host : String, port : Int32, stripe_count : Int32 = Remote::StripedConnectionPool::DEFAULT_STRIPE_COUNT) : Remote::RemoteExtension
-      # Check if already registered
-      if existing = @extensions.get(Remote::RemoteExtension)
-        return existing
+      @extensions.get_or_register(Remote::RemoteExtension) do
+        Remote::RemoteExtension.new(self, host, port, stripe_count)
       end
+    end
 
-      extension = Remote::RemoteExtension.new(self, host, port, stripe_count)
-      @extensions.register(extension)
-      @address = extension.address
-      @registry.try &.rebind_paths(@address)
-      extension
+    # Publishes the actual address selected by a remoting extension and rebinds
+    # every existing local actor path to it.
+    def publish_remoting_address(address : Address) : Nil
+      @address = address
+      @registry.try &.rebind_paths(address)
     end
 
     # Returns the remote extension if remoting is enabled.
@@ -1030,7 +1066,7 @@ module Movie
       full_config = config.with_fallback(ActorSystemConfig.default)
 
       # Extract values from config
-      name = full_config.get_string("name", "")
+      name = full_config.get_string(ActorSystemConfig::NAME, "")
       name = "actor-system-#{UUID.random.to_s[0..7]}" if name.empty?
 
       restart_strategy = ActorSystemConfig.restart_strategy(full_config)
@@ -1073,11 +1109,11 @@ module Movie
     # Automatically enables remoting if configured.
     protected def auto_enable_remoting
       return if @config.empty?
-      return unless @config.get_bool("remoting.enabled", false)
+      return unless @config.get_bool(ActorSystemConfig::REMOTING_ENABLED, false)
 
-      host = @config.get_string("remoting.host", "127.0.0.1")
-      port = @config.get_int("remoting.port", 2552)
-      stripe_count = @config.get_int("remoting.stripe-count", Remote::StripedConnectionPool::DEFAULT_STRIPE_COUNT)
+      host = @config.get_string(ActorSystemConfig::REMOTING_HOST, "127.0.0.1")
+      port = @config.get_int(ActorSystemConfig::REMOTING_PORT, 2552)
+      stripe_count = @config.get_int(ActorSystemConfig::REMOTING_STRIPE_COUNT, Remote::StripedConnectionPool::DEFAULT_STRIPE_COUNT)
       enable_remoting(host, port, stripe_count)
     end
 

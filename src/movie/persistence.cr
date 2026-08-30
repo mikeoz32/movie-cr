@@ -173,7 +173,7 @@ module Movie
 
       def initialize(
         @persistence_id : Id,
-        @spawn : Proc(Movie::ActorContext(GetEntity), Id, Movie::ActorRefBase)
+        @spawn : Proc(Movie::ActorContext(GetEntity), Id, Movie::ActorRefBase),
       )
       end
     end
@@ -430,8 +430,10 @@ module Movie
   class Database < ExtensionId(DatabaseExtension)
     def create(system : AbstractActorSystem) : DatabaseExtension
       cfg = system.config
-      path = cfg.get_string("movie.persistence.db_path", "data/movie_persistence.sqlite3")
-      pool_size = cfg.get_int("movie.persistence.pool_size", 1)
+      path = cfg.get_string(ActorSystemConfig::PERSISTENCE_DB_PATH, "data/movie_persistence.sqlite3")
+      pool_size = cfg.get_int(ActorSystemConfig::PERSISTENCE_POOL_SIZE, 1)
+      parent = File.dirname(path)
+      Dir.mkdir_p(parent) unless parent == "." || Dir.exists?(parent)
       DatabaseExtension.new(system, "sqlite3:#{path}", pool_size)
     end
   end
@@ -513,7 +515,7 @@ module Movie
     alias EventFactory = Proc(
       Movie::ActorContext(Persistence::RegistryMessage),
       Persistence::Id,
-      Movie::ActorRefBase
+      Movie::ActorRefBase,
     )
 
     def initialize(
@@ -521,7 +523,7 @@ module Movie
       @store_ref : Movie::ActorRef(Persistence::EventStoreMessage),
       @store : Persistence::EventStoreClient,
       @registry : Movie::ActorRef(Persistence::RegistryMessage),
-      @timeout : Time::Span = 5.seconds
+      @timeout : Time::Span = 5.seconds,
     )
       @factories = {} of String => EventFactory
     end
@@ -543,28 +545,28 @@ module Movie
       register_entity(type.name, &factory)
     end
 
-      def get_entity_ref(persistence_id : Persistence::Id) : Movie::ActorRefBase
-        spawn_proc = @factories[persistence_id.entity_type]? ||
-          raise "Entity type not registered: #{persistence_id.entity_type}"
+    def get_entity_ref(persistence_id : Persistence::Id) : Movie::ActorRefBase
+      spawn_proc = @factories[persistence_id.entity_type]? ||
+                   raise "Entity type not registered: #{persistence_id.entity_type}"
 
-        @system.ask(
-          @registry,
-          Persistence::GetEntity.new(persistence_id, spawn_proc),
-          Movie::ActorRefBase,
-          @timeout
-        ).await(@timeout)
-      end
-
-      def get_entity_ref_as(type : T.class, persistence_id : Persistence::Id) : ActorRef(T) forall T
-        get_entity_ref(persistence_id).as(ActorRef(T))
-      end
+      @system.ask(
+        @registry,
+        Persistence::GetEntity.new(persistence_id, spawn_proc),
+        Movie::ActorRefBase,
+        @timeout
+      ).await(@timeout)
     end
+
+    def get_entity_ref_as(type : T.class, persistence_id : Persistence::Id) : ActorRef(T) forall T
+      get_entity_ref(persistence_id).as(ActorRef(T))
+    end
+  end
 
   class DurableStateExtension < Extension
     alias StateFactory = Proc(
       Movie::ActorContext(Persistence::RegistryMessage),
       Persistence::Id,
-      Movie::ActorRefBase
+      Movie::ActorRefBase,
     )
 
     def initialize(
@@ -572,7 +574,7 @@ module Movie
       @store_ref : Movie::ActorRef(Persistence::StateStoreMessage),
       @store : Persistence::StateStoreClient,
       @registry : Movie::ActorRef(Persistence::RegistryMessage),
-      @timeout : Time::Span = 5.seconds
+      @timeout : Time::Span = 5.seconds,
     )
       @factories = {} of String => StateFactory
     end
@@ -594,22 +596,22 @@ module Movie
       register_entity(type.name, &factory)
     end
 
-      def get_entity_ref(persistence_id : Persistence::Id) : Movie::ActorRefBase
-        spawn_proc = @factories[persistence_id.entity_type]? ||
-          raise "Entity type not registered: #{persistence_id.entity_type}"
+    def get_entity_ref(persistence_id : Persistence::Id) : Movie::ActorRefBase
+      spawn_proc = @factories[persistence_id.entity_type]? ||
+                   raise "Entity type not registered: #{persistence_id.entity_type}"
 
-        @system.ask(
-          @registry,
-          Persistence::GetEntity.new(persistence_id, spawn_proc),
-          Movie::ActorRefBase,
-          @timeout
-        ).await(@timeout)
-      end
-
-      def get_entity_ref_as(type : T.class, persistence_id : Persistence::Id) : ActorRef(T) forall T
-        get_entity_ref(persistence_id).as(ActorRef(T))
-      end
+      @system.ask(
+        @registry,
+        Persistence::GetEntity.new(persistence_id, spawn_proc),
+        Movie::ActorRefBase,
+        @timeout
+      ).await(@timeout)
     end
+
+    def get_entity_ref_as(type : T.class, persistence_id : Persistence::Id) : ActorRef(T) forall T
+      get_entity_ref(persistence_id).as(ActorRef(T))
+    end
+  end
 
   class EventSourcing < ExtensionId(EventSourcingExtension)
     def create(system : AbstractActorSystem) : EventSourcingExtension

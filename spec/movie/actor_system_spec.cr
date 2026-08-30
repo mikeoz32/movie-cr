@@ -86,7 +86,71 @@ private class ShutdownRecordingExtension < Movie::Extension
   end
 end
 
+private class BlockingStartExtension < Movie::Extension
+  @@start_entered : Channel(Nil) = Channel(Nil).new(1)
+  @@start_release : Channel(Nil) = Channel(Nil).new(1)
+
+  getter started : Atomic(Bool) = Atomic(Bool).new(false)
+
+  def self.reset
+    @@start_entered = Channel(Nil).new(1)
+    @@start_release = Channel(Nil).new(1)
+  end
+
+  def self.wait_until_starting
+    @@start_entered.receive
+  end
+
+  def self.release_start
+    @@start_release.send(nil)
+  end
+
+  def start
+    @@start_entered.send(nil)
+    @@start_release.receive
+    @started.set(true)
+  end
+
+  def stop
+  end
+end
+
+private class BlockingStartExtensionId < Movie::ExtensionId(BlockingStartExtension)
+  def create(system : Movie::AbstractActorSystem) : BlockingStartExtension
+    BlockingStartExtension.new
+  end
+end
+
 describe Movie::ActorSystem do
+  it "does not expose a lazy extension before start completes" do
+    BlockingStartExtension.reset
+    system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same)
+    first_result = Channel(BlockingStartExtension).new(1)
+    second_result = Channel(BlockingStartExtension).new(1)
+
+    spawn { first_result.send(BlockingStartExtensionId.get(system)) }
+    BlockingStartExtension.wait_until_starting
+    spawn { second_result.send(BlockingStartExtensionId.get(system)) }
+
+    second_completed_early = false
+    select
+    when second = second_result.receive
+      second_completed_early = !second.started.get
+    when timeout(50.milliseconds)
+    end
+
+    BlockingStartExtension.release_start
+    first = first_result.receive
+    second = second_completed_early ? system.extension!(BlockingStartExtension) : second_result.receive
+
+    second_completed_early.should be_false
+    second.should be(first)
+    second.started.get.should be_true
+  ensure
+    BlockingStartExtension.release_start rescue nil
+    system.try &.shutdown
+  end
+
   it "supports ask on the system root" do
     system = Movie::ActorSystem(String).new(EchoRoot.new)
     result = system.ask("hi", String).await(1.second)

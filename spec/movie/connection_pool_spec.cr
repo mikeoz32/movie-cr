@@ -24,7 +24,7 @@ module Movie
   class PoolProbe < AbstractBehavior(PoolProbeMessage)
     def initialize(
       @pool : ActorRef(Persistence::ConnectionMessage),
-      @promise : Promise(Array(String?))
+      @promise : Promise(Array(String?)),
     )
     end
 

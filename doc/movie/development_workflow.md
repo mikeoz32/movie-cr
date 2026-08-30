@@ -35,15 +35,26 @@ No task may be marked done without fresh command output from the current branch.
 
 Minimum verification stack:
 
-1. Targeted spec command for the changed behavior.
-2. Relevant broader suite for the touched subsystem.
-3. Example build or runtime smoke check if public API or examples changed.
+1. Formatting check for Crystal sources.
+2. Targeted spec command for the changed behavior.
+3. Relevant broader suite for the touched subsystem.
+4. Example build or runtime smoke check if public API or examples changed.
 
 Baseline commands for this repository:
 
 ```bash
+crystal tool format --check src spec examples
 crystal spec spec/movie -Dpreview_mt -Dexecution_context
 ```
+
+Benchmark and stress specs are opt-in and are not part of the default correctness suite:
+
+```bash
+MOVIE_BENCH=1 crystal spec spec/movie/remote/benchmark_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_STRESS=1 crystal spec spec/movie/remote/stress_spec.cr -Dpreview_mt -Dexecution_context
+```
+
+Benchmark runs report measurements without host-dependent pass/fail thresholds. Compare results only across repeated runs on the same environment.
 
 When examples are touched, also run:
 
@@ -62,7 +73,7 @@ Required sequence after verification:
 3. Fix critical and important findings before moving on.
 4. Record any intentionally deferred minor items in the task notes.
 
-If using Codex workflows, use the local review skill that corresponds to `requesting-code-review`.
+If using Codex workflows, use the local `code-review` skill against the task's fixed starting point.
 
 ### 5. Keep changes small
 
@@ -83,6 +94,7 @@ Copy this checklist into task notes when executing an epic:
 - [ ] Minimal implementation written
 - [ ] Targeted verification green
 - [ ] Broader verification green
+- [ ] Formatting check green
 - [ ] Docs/examples updated if needed
 - [ ] Review requested
 - [ ] Review feedback addressed

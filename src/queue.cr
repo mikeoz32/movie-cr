@@ -1,4 +1,3 @@
-
 module Movie
   class QueueNode(T)
     getter next : QueueNode(T)?
@@ -41,7 +40,6 @@ module Movie
         @last = node
         @size += 1
       end
-
     end
 
     def dequeue

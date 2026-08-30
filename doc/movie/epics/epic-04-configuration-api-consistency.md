@@ -6,6 +6,8 @@
 
 **Depends on:** None.
 
+**Status:** Completed on 2026-08-30.
+
 **Done when:**
 
 - config path semantics are unambiguous,
@@ -14,6 +16,8 @@
 - naming and env override conventions are consistent and documented.
 
 ## Task 04.1: Decide null semantics and encode them in tests
+
+**Implementation:** Complete. Explicit `null` is a present first-class value; typed getters reject it when a non-null type is required.
 
 **Files**
 
@@ -32,6 +36,8 @@
 
 ## Task 04.2: Normalize config error handling
 
+**Implementation:** Complete. Numeric, boolean, duration, and environment conversion failures use `WrongTypeConfigError`.
+
 **Files**
 
 - Modify: `src/movie/config.cr`
@@ -48,6 +54,8 @@
 - Run targeted config specs and full suite.
 
 ## Task 04.3: Split actor restart strategy from supervision strategy
+
+**Implementation:** Complete. `root.restart-strategy` is independent from `supervision.strategy`.
 
 **Files**
 
@@ -67,6 +75,8 @@
 - Run targeted config and actor-system specs.
 
 ## Task 04.4: Canonicalize key naming and env overrides
+
+**Implementation:** Complete. Dotted sections and hyphenated compound keys are canonical; environment paths use double underscores.
 
 **Files**
 
@@ -88,6 +98,8 @@
 
 ## Task 04.5: Publish the supported config schema
 
+**Implementation:** Complete. See [configuration.md](../configuration.md).
+
 **Files**
 
 - Modify: `README.md`
@@ -102,3 +114,14 @@
 
 - Build any touched examples if their config usage changes.
 
+## Completion evidence
+
+- [x] Failing test written first.
+- [x] Failing test observed red.
+- [x] Minimal implementation written.
+- [x] Targeted verification green.
+- [x] Broader verification green.
+- [x] Formatting check green.
+- [x] Docs/examples updated if needed.
+- [x] Review requested.
+- [x] Review feedback addressed.

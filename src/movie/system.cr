@@ -2,12 +2,12 @@ module Movie
   abstract class SystemMessage
   end
 
-  PRE_START = PreStart.new().as(SystemMessage)
-  POST_START = PostStart.new().as(SystemMessage)
-  STOP = Stop.new().as(SystemMessage)
-  PRE_STOP = PreStop.new().as(SystemMessage)
-  POST_STOP = PostStop.new().as(SystemMessage)
-  RESUME = Resume.new().as(SystemMessage)
+  PRE_START  = PreStart.new.as(SystemMessage)
+  POST_START = PostStart.new.as(SystemMessage)
+  STOP       = Stop.new.as(SystemMessage)
+  PRE_STOP   = PreStop.new.as(SystemMessage)
+  POST_STOP  = PostStop.new.as(SystemMessage)
+  RESUME     = Resume.new.as(SystemMessage)
 
   # Lifecycle Events
   class PreStart < SystemMessage
@@ -33,6 +33,7 @@ module Movie
   class PreRestart < SystemMessage
     # Sent before actor restarts
     getter cause : Exception?
+
     def initialize(@cause : Exception?)
     end
   end
@@ -54,6 +55,7 @@ module Movie
   class Restart < SystemMessage
     # request actor to restart
     getter cause : Exception?
+
     def initialize(@cause : Exception?)
     end
   end
@@ -116,6 +118,7 @@ module Movie
   class Watch < SystemMessage
     # request actor to watch another actor
     getter actor : ActorRefBase
+
     def initialize(@actor : ActorRefBase)
     end
   end
@@ -123,6 +126,7 @@ module Movie
   class Unwatch < SystemMessage
     # request actor to stop watching another actor
     getter actor : ActorRefBase
+
     def initialize(@actor : ActorRefBase)
     end
   end
@@ -132,6 +136,7 @@ module Movie
     # Notification that watched actor terminated
     getter actor : ActorRefBase
     getter cause : Exception?
+
     def initialize(@actor : ActorRefBase, @cause : Exception? = nil)
     end
   end
@@ -140,8 +145,8 @@ module Movie
     # Notification that actor failed
     getter cause : Exception?
     getter actor : ActorRefBase
+
     def initialize(@actor : ActorRefBase, @cause : Exception?)
     end
   end
-
 end

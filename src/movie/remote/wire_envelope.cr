@@ -8,12 +8,12 @@ module Movie::Remote
 
     # The kind of message being sent.
     enum Kind
-      USER_MESSAGE    # Regular user message to an actor
-      SYSTEM_MESSAGE  # System message (watch, stop, etc.)
-      ASK_REQUEST     # Request part of ask pattern
-      ASK_RESPONSE    # Response part of ask pattern
-      HANDSHAKE       # Connection handshake
-      HEARTBEAT       # Keep-alive heartbeat
+      USER_MESSAGE   # Regular user message to an actor
+      SYSTEM_MESSAGE # System message (watch, stop, etc.)
+      ASK_REQUEST    # Request part of ask pattern
+      ASK_RESPONSE   # Response part of ask pattern
+      HANDSHAKE      # Connection handshake
+      HEARTBEAT      # Keep-alive heartbeat
     end
 
     # The kind of this envelope.
@@ -45,7 +45,7 @@ module Movie::Remote
       @payload : JSON::Any,
       @correlation_id : String? = nil,
       @sender_path : String? = nil,
-      @timestamp : Int64 = Time.utc.to_unix_ms
+      @timestamp : Int64 = Time.utc.to_unix_ms,
     )
     end
 
@@ -54,7 +54,7 @@ module Movie::Remote
       target_path : String,
       message_type : String,
       payload : JSON::Any,
-      sender_path : String? = nil
+      sender_path : String? = nil,
     ) : WireEnvelope
       new(
         kind: Kind::USER_MESSAGE,
@@ -70,7 +70,7 @@ module Movie::Remote
       target_path : String,
       message_type : String,
       payload : JSON::Any,
-      sender_path : String? = nil
+      sender_path : String? = nil,
     ) : WireEnvelope
       new(
         kind: Kind::SYSTEM_MESSAGE,
@@ -87,7 +87,7 @@ module Movie::Remote
       message_type : String,
       payload : JSON::Any,
       correlation_id : String,
-      sender_path : String? = nil
+      sender_path : String? = nil,
     ) : WireEnvelope
       new(
         kind: Kind::ASK_REQUEST,
@@ -104,7 +104,7 @@ module Movie::Remote
       target_path : String,
       message_type : String,
       payload : JSON::Any,
-      correlation_id : String
+      correlation_id : String,
     ) : WireEnvelope
       new(
         kind: Kind::ASK_RESPONSE,
@@ -118,11 +118,11 @@ module Movie::Remote
     # Creates a handshake envelope.
     def self.handshake(
       system_name : String,
-      address : String
+      address : String,
     ) : WireEnvelope
       payload = JSON::Any.new({
-        "system" => JSON::Any.new(system_name),
-        "address" => JSON::Any.new(address)
+        "system"  => JSON::Any.new(system_name),
+        "address" => JSON::Any.new(address),
       })
       new(
         kind: Kind::HANDSHAKE,

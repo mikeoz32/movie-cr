@@ -1,5 +1,7 @@
 # Streams Protocol (Source/Flow/Sink MVP)
 
+[Documentation index](README.md) · [Development workflow](development_workflow.md) · [Direct stream specs](../../spec/movie/streams_typed_spec.cr)
+
 ## Goals
 - Backpressure-first: downstream explicitly requests demand; upstream never overruns demand.
 - Clear terminals: completion, error, cancel are terminal; no signals after terminal.
@@ -51,14 +53,14 @@ Control/Data messages exchanged between adjacent stages (upstream -> downstream 
 - If `Request` arrives before `OnSubscribe`, either queue until subscribed or drop with warning.
 - If `Subscribe` arrives when already subscribed, respond with `OnError` or ignore; choose consistent behaviour across stages.
 
-## Next steps
-- API surface / builder DSL (see OZW-65) and Future/Promise materialization (see OZW-66).
-- Operator semantics per stage (see OZW-69/72/77/76).
-- E2E tests per scenarios (OZW-63/64/71/73/75).
+## Future work
+- Add source types beyond the current manual source.
+- Add operators beyond the current map/tap/filter/take/drop MVP.
+- Expand multi-subscriber, failure-race, and performance coverage.
 
 ## Builder surface & materialization (OZW-65)
 - Single-subscription builders in MVP.
-- Sources (initial set): `Source.from_array(enum)`, `Source.single(elem)`, `Source.tick(interval, supplier)`, `Source.manual` (external push via an exposed ref).
+- Sources: `Streams::Typed.manual(T)` is the currently implemented source builder. Array, single, and tick sources are future work.
 - Flows (initial set): `Flow.map`, `Flow.filter`, `Flow.take(n)`, `Flow.drop(n)`; more to follow in operator tasks. MVP implementations exist as actors: `MapFlow`, `FilterFlow`, `TakeFlow`, `DropFlow`.
 - Sinks (initial set): `Sink.foreach(&block)`, `Sink.fold(seed, &block)`, `Sink.first`.
 - Composition DSL: `Streams::Typed.manual(T).via(flow).to(sink).run(system)` returns a materialized handle.
@@ -96,15 +98,8 @@ Control/Data messages exchanged between adjacent stages (upstream -> downstream 
 - Usage: `curl -N http://localhost:9292/stream?n=5`
 - Flow: per request builds pipeline on shared external system (manual source -> map `*2` -> take(n) -> collect) and streams NDJSON over chunked HTTP.
 
-## Future/Promise primitive (OZW-66)
-- States: `Pending`, `Completed(value)`, `Failed(error)`, `Cancelled` (terminal, mutually exclusive).
-- Future API sketch:
-	- `await(timeout? = nil) : T` (raises on failure/cancel; Timeout on expiry).
-	- `on_complete(&Result(T) ->)` register multiple callbacks; fire immediately if already terminal.
-	- Predicates: `completed?`, `failed?`, `cancelled?`, `pending?`; accessors `value?`, `error?`.
-- Promise API sketch:
-	- `success(value : T = nil)`, `failure(error : Exception)`, `cancel`, and `try_*` variants returning Bool for idempotence.
-	- `future : Future(T)` to hand out read-only view.
-- Concurrency: thread-safe for actor usage; single terminal transition wins; callbacks run exactly once per waiter even under races.
-- Cancellation hook: `cancel` should trigger upstream `Cancel` when wired to a stream materialization.
-- Zero allocations on steady path where possible; no busy-waiting (use condition/channel under the hood in impl).
+## Future and Promise integration
+- `FutureStatus` has `Pending`, `Success`, `Failure`, and `Cancelled` terminal states.
+- `Future#await`, callbacks, status predicates, and `result` are thread-safe; a single terminal transition wins.
+- `Promise#success`, `failure`, `cancel`, and their `try_*` variants complete the read-only future.
+- A materialized stream completes its future on `OnComplete`, fails it on `OnError`, and cancels it when cancellation propagates through the sink.

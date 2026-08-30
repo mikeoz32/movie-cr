@@ -22,8 +22,9 @@ module Movie
       if ext = system.extension(T)
         return ext
       end
-      ext = create(system)
-      system.extensions.get_or_register(T, ext.as(Extension))
+      system.extensions.get_or_register(T) do
+        create(system).as(Extension)
+      end
     end
   end
 end

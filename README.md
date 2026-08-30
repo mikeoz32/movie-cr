@@ -1,19 +1,24 @@
 # Movie
 
-A lightweight actor framework for Crystal with typed actors, supervision, remoting, persistence, futures, ask-pattern support, and typed streams.
+Movie is a lightweight typed actor framework for Crystal. It provides actor lifecycle and supervision, ask/futures, scheduling, bounded execution, optional SQLite persistence, typed streams, and an experimental TCP remoting MVP.
 
-## Features
+## Feature maturity
 
-- Typed actor system and actor references
-- Supervision and lifecycle hooks
-- Ask pattern and futures
-- Persistence helpers and SQLite-backed stores
-- Experimental remoting MVP
-- Typed streams
+| Area | Status | Notes |
+|---|---|---|
+| Typed actors and lifecycle | Stable core | Hierarchical actors, mailbox isolation, watching, restart/stop/resume supervision, and orderly shutdown. |
+| Futures, ask, scheduler | Stable public API | Thread-safe terminal futures, local ask listeners, and cancellable one-shot timers. |
+| Executor | Advanced API | Bounded worker pool; task timeout does not cancel the task body. |
+| Persistence | Optional, usable | SQLite event journal and durable state helpers; require the persistence entrypoint explicitly. |
+| Typed streams | MVP | Manual sources, transform stages, fold/collect sinks, cancellation, backpressure, and broadcast fan-out. |
+| Remoting | Experimental MVP | Typed TCP delivery and remote ask, without production transport guarantees. |
 
-## Installation
+## Requirements and installation
 
-Add this to your `shard.yml`:
+- Crystal 1.18.2 or newer.
+- SQLite development headers when using persistence or running the full test suite.
+
+Add Movie to `shard.yml`:
 
 ```yaml
 dependencies:
@@ -21,25 +26,102 @@ dependencies:
     github: mikeoz32/movie
 ```
 
-## Usage
+Then install dependencies:
+
+```bash
+shards install
+```
+
+## Typed actors
+
+The main entrypoint includes the actor runtime, async primitives, streams, and remoting:
 
 ```crystal
 require "movie"
+
+class Printer < Movie::AbstractBehavior(String)
+  def initialize(@received : Channel(String))
+  end
+
+  def receive(message : String, context : Movie::ActorContext(String))
+    puts message
+    @received.send(message)
+    Movie::Behaviors(String).same
+  end
+end
+
+received = Channel(String).new(1)
+system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, name: "example")
+printer = system.spawn(Printer.new(received), name: "printer")
+printer << "hello from Movie"
+received.receive
+system.shutdown
 ```
 
-## Async primitives
+An actor returns its next behavior from `receive`. `Behaviors(T).same` keeps the active behavior, `Behaviors(T).stopped` requests a graceful stop, and `Behaviors(T).setup` builds a behavior with access to its `ActorContext`.
 
-`ActorRef#ask` and `ActorContext#ask` are the primary request/response APIs. They return `Future(T)`, which completes once with either a value, an exception, or cancellation. `Future#await` raises `Movie::FutureTimeout` when the waiting side times out, `Movie::FutureCancelled` when the future is cancelled, and re-raises the original exception on failure.
+A parent's `SupervisionConfig` controls failures of that parent's children. See [the lifecycle architecture](doc/movie/actor_lifecycle.md) and the corrected [supervision example](examples/supervision_example.cr).
 
-`Movie::Scheduler` is the supported one-shot timer API. `schedule_once`, `schedule_message`, and `schedule_system_message` all return `TimerHandle`. Cancelling the handle prevents execution only if the callback has not fired yet; it does not interrupt a callback that is already running.
+## Ask, futures, scheduler, and executor
 
-`Movie::Execution.get(system)` exposes a bounded executor for offloading blocking or expensive work away from actor message handling. `execute` returns a `Future(T)`. `execute_with_reply` sends either `TaskSuccess(T)` or `TaskFailure(T)` to the supplied actor. Timeout on executor work completes the future or reply path with `Movie::FutureTimeout`, but it does not cancel the underlying task body.
+`ActorRef#ask`, `ActorContext#ask`, and `ActorSystem#ask` are the local request/response APIs. They return `Future(T)`, which completes once with a value, exception, or cancellation. `Future#await` raises `Movie::FutureTimeout` for a waiting timeout, `Movie::FutureCancelled` for cancellation, and re-raises the original failure.
+
+Actors reply with `Movie::Ask.reply_if_asked(context.sender, value)` or the explicit success/failure helpers.
+
+`Movie::Scheduler` provides `schedule_once`, `schedule_message`, and `schedule_system_message`. Cancelling a `TimerHandle` prevents a callback only if it has not fired; it does not interrupt running work.
+
+`Movie::Execution.get(system)` exposes the bounded executor. `execute` returns a future; `execute_with_reply` sends `TaskSuccess(T)` or `TaskFailure(T)`. A timeout completes the result path with `FutureTimeout` but does not cancel the underlying task body.
+
+## Persistence
+
+Persistence is intentionally optional and has a separate entrypoint:
+
+```crystal
+require "movie"
+require "movie/persistence"
+
+config = Movie::Config.builder
+  .set("persistence.db-path", "data/movie.sqlite3")
+  .set("persistence.pool-size", 1)
+  .build
+
+system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, config)
+event_sourcing = Movie::EventSourcing.get(system)
+durable_state = Movie::DurableState.get(system)
+```
+
+`EventSourcedBehavior` replays JSON events and appends new events. `DurableStateBehavior` loads and replaces a JSON state snapshot. Entity factories must be registered with the corresponding extension before resolving entity references.
+
+## Typed streams
+
+Typed streams run on an existing actor system and do not create a hidden runtime:
+
+```crystal
+alias Streams = Movie::Streams::Typed
+alias Message = Streams::MessageBase(Int32)
+
+system = Movie::ActorSystem(Message).new(Movie::Behaviors(Message).same)
+pipeline = Streams.manual(Int32)
+  .via(Streams::MapFlow(Int32).new { |value| value * 2 })
+  .to_collect(initial_demand: 2u64, channel_capacity: 2)
+  .run(system)
+
+pipeline.source << Streams::Produce(Int32).new(1)
+pipeline.source << Streams::Produce(Int32).new(2)
+pipeline.source << Streams::OnComplete(Int32).new
+pipeline.completion.await
+system.shutdown
+```
+
+See [the streams protocol](doc/movie/streams.md), [basic example](examples/streams_basic.cr), and [showcase](examples/streams_showcase.cr).
 
 ## Remoting
 
-Remoting is currently an experimental MVP. It supports typed user-message delivery, remote ask request/response, and a limited system-message protocol over TCP. Messages sent over the wire must include `JSON::Serializable` and be registered with `Movie::Remote::MessageRegistry` on both systems.
+Remoting is an experimental MVP for validating typed delivery between Movie systems. Wire messages must include `JSON::Serializable` and be registered with `Movie::Remote::MessageRegistry` on both systems.
 
-`ActorSystem#actor_for` returns `ActorRefBase`, so a remote reference must be narrowed to `Movie::Remote::RemoteActorRef(T)` before sending or asking:
+It supports typed fire-and-forget delivery, remote ask, sender paths, and remote `Stop`, `Watch`, `Unwatch`, `Terminated`, and `Failed`. It does not provide authentication, encryption, automatic reconnect, acknowledgements, version negotiation, or durable delivery.
+
+`ActorSystem#actor_for` returns `ActorRefBase`; narrow a remote result before using its typed API:
 
 ```crystal
 remote = system.actor_for(remote_path, Ping).as(Movie::Remote::RemoteActorRef(Ping))
@@ -47,38 +129,48 @@ remote << Ping.new(1)
 reply = remote.ask(Request.new("hello"), Response).await(2.seconds)
 ```
 
-Remote ask failures, connection loss, and timeouts complete the returned future with an exception. The supported remote system messages are `Stop`, `Watch`, `Unwatch`, `Terminated`, and `Failed`. Lifecycle messages such as `PreStart`, `PostStart`, `PreStop`, `PostStop`, and `Restart` are intentionally unsupported and raise `RemoteUnsupportedSystemMessageError` when sent through the remote protocol.
+See [the remoting contract](doc/movie/remoting.md) and [complete example](examples/remoting_example.cr).
 
-The high-level `ActorRef#ask`, `ActorContext#watch`, and `ActorContext#ask` APIs currently accept local typed `ActorRef` values only. Use `RemoteActorRef#ask` for remote request/response, and use the low-level `send_system` API for remote watch operations when the watcher has a registered actor path. Binding to port `0` is supported; use `RemoteExtension#local_port` and the actor's rebound path after startup.
+## Configuration
 
-See [doc/movie/remoting.md](doc/movie/remoting.md) and [examples/remoting_example.cr](examples/remoting_example.cr) for the complete supported workflow.
+Configuration supports YAML, JSON, builders, fallbacks, and environment overrides. Public keys use dotted sections and hyphenated compound names, for example `supervision.max-restarts` and `remoting.stripe-count`.
+
+The complete schema, null semantics, error behavior, defaults, and environment-variable mapping are documented in [configuration.md](doc/movie/configuration.md).
 
 ## API stability
 
 Stable application-facing APIs:
 
-- `ActorRef#ask` and `ActorContext#ask`
-- `Future(T)` read-side APIs such as `await`, `status`, `result`, and callback registration
-- `Scheduler` one-shot timer APIs and `TimerHandle`
+- typed actors, actor references, lifecycle, supervision, and shutdown;
+- local ask APIs and `Future(T)` read-side operations;
+- scheduler one-shot timers and `TimerHandle`.
 
-Advanced or internal building blocks that may change more aggressively:
+Advanced APIs that may change more aggressively:
 
-- `Promise(T)`, which is intended for bridging callback-style code into `Future(T)`
-- `ExecutorExtension` / `Execution`, especially direct `execute_with_reply` integrations
-- `ExecutorExtension::TaskReply`, `TaskSuccess`, and `TaskFailure`, which are executor protocol messages rather than general actor reply contracts
+- `Promise(T)` callback bridging;
+- executor protocol types and direct executor integrations;
+- persistence entity/store internals;
+- streams and remoting while they remain MVP features.
 
-More detail is in [doc/movie/actor_lifecycle.md](doc/movie/actor_lifecycle.md).
+## Development and verification
 
-## Development
+Every implementation task follows the repository workflow: start from an explicit epic task, write and observe a failing test before production code, run fresh targeted and broad verification, update public documentation, and complete a review pass. See [development_workflow.md](doc/movie/development_workflow.md).
 
-Run specs:
+Default correctness gates:
 
 ```bash
+crystal tool format --check src spec examples
 crystal spec spec/movie -Dpreview_mt -Dexecution_context
+for file in examples/*.cr; do crystal build "$file" -Dpreview_mt -Dexecution_context -o "/tmp/movie-$(basename "$file" .cr)"; done
 ```
 
-Build all examples:
+Benchmarks and stress scenarios are intentionally opt-in:
 
 ```bash
-for f in examples/*.cr; do crystal build "$f" -Dpreview_mt -Dexecution_context -o "/tmp/movie-$(basename "$f" .cr)"; done
+MOVIE_BENCH=1 crystal spec spec/movie/remote/benchmark_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_STRESS=1 crystal spec spec/movie/remote/stress_spec.cr -Dpreview_mt -Dexecution_context
 ```
+
+Benchmark output is measurement-only because absolute throughput and relative speedup depend on the host, Crystal version, and scheduler. Correctness remains enforced by the default and stress suites.
+
+The documentation index and recovery history live under [doc/movie](doc/movie/README.md).
