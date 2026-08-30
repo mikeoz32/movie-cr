@@ -319,7 +319,7 @@ module Movie
             git_sha: @git_sha,
             crystal_version: Crystal::VERSION,
             release_build: {{ flag?(:release) }},
-            cpu_count: System.cpu_count,
+            cpu_count: System.cpu_count.to_i32,
             crystal_workers: ENV["CRYSTAL_WORKERS"]? || "default",
             topology: topology.label,
             operation: operation.label,
