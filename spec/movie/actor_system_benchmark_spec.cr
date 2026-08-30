@@ -3,6 +3,14 @@ require "../../benchmarks/support/actor_system_benchmark"
 
 alias ActorBench = Movie::Benchmarks::ActorSystem
 
+record DirectBenchmarkJson, value : String do
+  include JSON::Serializable
+
+  def to_json : String
+    raise "JSON Lines output must write to IO"
+  end
+end
+
 describe ActorBench::Config do
   it "parses a reproducible benchmark matrix" do
     config = ActorBench::Config.parse([
@@ -46,6 +54,16 @@ describe ActorBench::Statistics do
     ActorBench::Statistics.percentile(samples, 0.50).should eq(30_i64)
     ActorBench::Statistics.percentile(samples, 0.95).should eq(50_i64)
     ActorBench::Statistics.percentile(samples, 0.99).should eq(50_i64)
+  end
+end
+
+describe ActorBench::JsonOutput do
+  it "writes JSON Lines directly to the destination IO" do
+    io = IO::Memory.new
+
+    ActorBench::JsonOutput.write_line(DirectBenchmarkJson.new("direct"), io)
+
+    io.to_s.should eq(%({"value":"direct"}\n))
   end
 end
 

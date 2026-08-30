@@ -14,6 +14,14 @@ record CollisionMessage, value : Int32 do
   include JSON::Serializable
 end
 
+record DirectWriteMessage, value : String do
+  include JSON::Serializable
+
+  def to_json : String
+    raise "no-argument to_json must not be used"
+  end
+end
+
 describe Movie::Remote::MessageRegistry do
   before_each do
     Movie::Remote::MessageRegistry.clear
@@ -57,6 +65,15 @@ describe Movie::Remote::MessageRegistry do
 
       tag.should eq("AnotherMessage")
       json["count"].as_i.should eq(42)
+    end
+
+    it "does not materialize a message JSON string" do
+      Movie::Remote::MessageRegistry.register(DirectWriteMessage)
+
+      tag, payload = Movie::Remote::MessageRegistry.serialize(DirectWriteMessage.new("direct"))
+
+      tag.should eq("DirectWriteMessage")
+      payload["value"].as_s.should eq("direct")
     end
   end
 

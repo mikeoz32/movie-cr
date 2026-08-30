@@ -21,7 +21,7 @@ if BENCH_ENABLED
         Movie::Remote::MessageRegistry.register(LargeMessage)
       end
 
-      it "benchmarks small message serialization" do
+      it "benchmarks small message payload preparation" do
         msg = BenchmarkMessage.new(id: 1_i64, data: "hello", timestamp: Time.utc.to_unix_ms)
         iterations = 10_000
 
@@ -32,18 +32,22 @@ if BENCH_ENABLED
         end
 
         ops_per_sec = iterations / elapsed.total_seconds
-        puts "\n  Small message serialization: #{ops_per_sec.round(0)} ops/sec (#{iterations} iterations in #{elapsed.total_milliseconds.round(2)}ms)"
+        puts "\n  Small message payload preparation: #{ops_per_sec.round(0)} ops/sec (#{iterations} iterations in #{elapsed.total_milliseconds.round(2)}ms)"
       end
 
       it "benchmarks small message deserialization" do
         Movie::Remote::MessageRegistry.register(BenchmarkMessage)
         msg = BenchmarkMessage.new(id: 1_i64, data: "hello", timestamp: Time.utc.to_unix_ms)
-        tag, json = Movie::Remote::MessageRegistry.serialize(msg)
+        tag, payload = Movie::Remote::MessageRegistry.serialize(msg)
+        envelope = Movie::Remote::WireEnvelope.user_message("movie://bench/user/target", tag, payload)
+        decoded_payload = Movie::Remote::FrameCodec.decode_from_bytes(
+          Movie::Remote::FrameCodec.encode_to_bytes(envelope)
+        ).not_nil!.payload_data
         iterations = 10_000
 
         elapsed = Time.measure do
           iterations.times do
-            wrapper = Movie::Remote::MessageRegistry.deserialize(tag, json)
+            wrapper = Movie::Remote::MessageRegistry.deserialize(tag, decoded_payload)
           end
         end
 
@@ -51,7 +55,7 @@ if BENCH_ENABLED
         puts "\n  Small message deserialization: #{ops_per_sec.round(0)} ops/sec (#{iterations} iterations in #{elapsed.total_milliseconds.round(2)}ms)"
       end
 
-      it "benchmarks large message serialization" do
+      it "benchmarks large message payload preparation" do
         items = (1..100).map { |i| "item-#{i}-with-some-extra-data" }
         metadata = (1..20).map { |i| {"key#{i}", "value#{i}"} }.to_h
         msg = LargeMessage.new(id: 1_i64, items: items, metadata: metadata)
@@ -64,18 +68,26 @@ if BENCH_ENABLED
         end
 
         ops_per_sec = iterations / elapsed.total_seconds
-        puts "\n  Large message serialization: #{ops_per_sec.round(0)} ops/sec (#{iterations} iterations in #{elapsed.total_milliseconds.round(2)}ms)"
+        puts "\n  Large message payload preparation: #{ops_per_sec.round(0)} ops/sec (#{iterations} iterations in #{elapsed.total_milliseconds.round(2)}ms)"
       end
 
       it "benchmarks roundtrip serialization" do
         Movie::Remote::MessageRegistry.register(BenchmarkMessage)
         msg = BenchmarkMessage.new(id: 1_i64, data: "hello", timestamp: Time.utc.to_unix_ms)
         iterations = 5_000
+        encoder = Movie::Remote::FrameCodec::Encoder.new
+        decoder = Movie::Remote::FrameCodec::Decoder.new
+        io = IO::Memory.new
 
         elapsed = Time.measure do
           iterations.times do
-            tag, json = Movie::Remote::MessageRegistry.serialize(msg)
-            wrapper = Movie::Remote::MessageRegistry.deserialize(tag, json)
+            tag, payload = Movie::Remote::MessageRegistry.serialize(msg)
+            envelope = Movie::Remote::WireEnvelope.user_message("movie://bench/user/target", tag, payload)
+            io.clear
+            encoder.encode(envelope, io)
+            io.rewind
+            decoded = decoder.decode(io).not_nil!
+            wrapper = Movie::Remote::MessageRegistry.deserialize(tag, decoded.payload_data)
             restored = wrapper.unwrap(BenchmarkMessage)
           end
         end
@@ -94,10 +106,13 @@ if BENCH_ENABLED
           payload: payload
         )
         iterations = 10_000
+        encoder = Movie::Remote::FrameCodec::Encoder.new
+        output = IO::Memory.new
 
         elapsed = Time.measure do
           iterations.times do
-            bytes = Movie::Remote::FrameCodec.encode_to_bytes(envelope)
+            output.clear
+            encoder.encode(envelope, output)
           end
         end
 
@@ -114,10 +129,13 @@ if BENCH_ENABLED
         )
         bytes = Movie::Remote::FrameCodec.encode_to_bytes(envelope)
         iterations = 10_000
+        decoder = Movie::Remote::FrameCodec::Decoder.new
+        input = IO::Memory.new(bytes, writable: false)
 
         elapsed = Time.measure do
           iterations.times do
-            decoded = Movie::Remote::FrameCodec.decode_from_bytes(bytes)
+            input.rewind
+            decoded = decoder.decode(input)
           end
         end
 
@@ -133,11 +151,16 @@ if BENCH_ENABLED
           payload: payload
         )
         iterations = 5_000
+        encoder = Movie::Remote::FrameCodec::Encoder.new
+        decoder = Movie::Remote::FrameCodec::Decoder.new
+        io = IO::Memory.new
 
         elapsed = Time.measure do
           iterations.times do
-            bytes = Movie::Remote::FrameCodec.encode_to_bytes(envelope)
-            decoded = Movie::Remote::FrameCodec.decode_from_bytes(bytes)
+            io.clear
+            encoder.encode(envelope, io)
+            io.rewind
+            decoded = decoder.decode(io)
           end
         end
 

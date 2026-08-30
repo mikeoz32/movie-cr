@@ -20,6 +20,7 @@
 - [Epic 07 - Stream blueprints, boundedness, and TestKit](epics/epic-07-stream-blueprints-boundedness-and-testkit.md)
 - [Epic 08 - Actor system performance benchmarks](epics/epic-08-actor-system-performance-benchmarks.md)
 - [Epic 09 - Local ask hot-path optimization](epics/epic-09-local-ask-hot-path.md)
+- [Epic 10 - IO-native serialization](epics/epic-10-io-native-serialization.md)
 
 ## How To Use This Folder
 

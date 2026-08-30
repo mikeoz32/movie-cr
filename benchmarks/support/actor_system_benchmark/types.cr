@@ -326,6 +326,15 @@ module Movie
         processed_messages : Int64,
         latencies : Array(Int64)
 
+      module JsonOutput
+        extend self
+
+        def write_line(value, io : IO) : Nil
+          value.to_json(io)
+          io << '\n'
+        end
+      end
+
       module Metadata
         extend self
 

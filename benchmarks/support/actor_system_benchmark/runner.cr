@@ -389,7 +389,7 @@ module Movie
           end
           remote = system.enable_remoting("127.0.0.1", 0, config.stripes)
           ready = ServerReady.new(remote.local_port, refs.map { |ref| ref.path.not_nil!.to_s })
-          STDOUT.puts(ready.to_json)
+          JsonOutput.write_line(ready, STDOUT)
           STDOUT.flush
           STDIN.gets
         ensure

@@ -1,6 +1,15 @@
 require "../../spec_helper"
 require "../../../src/movie/remote/wire_envelope"
 require "../../../src/movie/remote/frame_codec"
+require "../../../src/movie/remote/message_registry"
+
+record FrameDirectWriteMessage, value : String do
+  include JSON::Serializable
+
+  def to_json : String
+    raise "frame payload must use JSON::Builder"
+  end
+end
 
 describe Movie::Remote::FrameCodec do
   describe ".encode and .decode" do
@@ -58,6 +67,34 @@ describe Movie::Remote::FrameCodec do
 
       decoded2.should_not be_nil
       decoded2.not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::USER_MESSAGE)
+    end
+
+    it "writes a serializable payload directly through the frame encoder" do
+      tag, payload = Movie::Remote::MessageRegistry.serialize(FrameDirectWriteMessage.new("direct"))
+      envelope = Movie::Remote::WireEnvelope.user_message(
+        target_path: "movie://sys/user/direct",
+        message_type: tag,
+        payload: payload
+      )
+
+      decoded = Movie::Remote::FrameCodec.decode_from_bytes(
+        Movie::Remote::FrameCodec.encode_to_bytes(envelope)
+      ).not_nil!
+
+      decoded.payload["value"].as_s.should eq("direct")
+    end
+
+    it "reuses stateful frame encoders and decoders across messages" do
+      encoder = Movie::Remote::FrameCodec::Encoder.new
+      decoder = Movie::Remote::FrameCodec::Decoder.new
+      io = IO::Memory.new
+
+      encoder.encode(Movie::Remote::WireEnvelope.heartbeat, io)
+      encoder.encode(Movie::Remote::WireEnvelope.heartbeat, io)
+      io.rewind
+
+      decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::HEARTBEAT)
+      decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::HEARTBEAT)
     end
   end
 

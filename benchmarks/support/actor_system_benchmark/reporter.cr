@@ -18,7 +18,7 @@ module Movie
               results.each { |measurement| csv.row measurement.csv_values }
             end
           when OutputFormat::JsonLines
-            results.each { |measurement| io.puts(measurement.to_json) }
+            results.each { |measurement| JsonOutput.write_line(measurement, io) }
           else
             raise "unreachable output format"
           end

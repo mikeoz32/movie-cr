@@ -17,6 +17,8 @@ module Movie::Remote
     @pending_asks : Hash(String, Channel(WireEnvelope))
     @pending_asks_mutex : Mutex
     @reader_fiber : Fiber?
+    @frame_encoder : FrameCodec::Encoder
+    @frame_decoder : FrameCodec::Decoder
 
     def initialize(
       @address : Address,
@@ -27,6 +29,8 @@ module Movie::Remote
       @write_mutex = Mutex.new
       @pending_asks = {} of String => Channel(WireEnvelope)
       @pending_asks_mutex = Mutex.new
+      @frame_encoder = FrameCodec::Encoder.new
+      @frame_decoder = FrameCodec::Decoder.new
     end
 
     # Connects to the remote system.
@@ -63,7 +67,7 @@ module Movie::Remote
 
       begin
         @write_mutex.synchronize do
-          FrameCodec.encode(envelope, socket)
+          @frame_encoder.encode(envelope, socket)
         end
         true
       rescue ex : IO::Error
@@ -122,7 +126,7 @@ module Movie::Remote
         break if @closed
 
         envelope = begin
-          FrameCodec.decode(socket)
+          @frame_decoder.decode(socket)
         rescue ex : Exception
           Log.debug { "Read error from #{@address}: #{ex.message}" }
           break

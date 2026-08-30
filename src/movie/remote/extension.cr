@@ -11,6 +11,10 @@ module Movie::Remote
     include JSON::Serializable
   end
 
+  private record EmptyRemoteAskPayload do
+    include JSON::Serializable
+  end
+
   class RemoteAskResponseSenderRef < Movie::ActorRefBase
     ASK_FAILURE_TAG   = "__movie_remote_ask_failure__"
     ASK_CANCELLED_TAG = "__movie_remote_ask_cancelled__"
@@ -30,11 +34,11 @@ module Movie::Remote
     end
 
     def reply_failure(error : Exception) : Nil
-      payload = JSON.parse(
+      payload = JsonPayload.wrap(
         RemoteAskFailurePayload.new(
           error_class: error.class.name,
           message: error.message || ""
-        ).to_json
+        )
       )
       send_response(WireEnvelope.ask_response(
         target_path: path.try(&.to_s) || "",
@@ -48,7 +52,7 @@ module Movie::Remote
       send_response(WireEnvelope.ask_response(
         target_path: path.try(&.to_s) || "",
         message_type: ASK_CANCELLED_TAG,
-        payload: JSON::Any.new({} of String => JSON::Any),
+        payload: JsonPayload.wrap(EmptyRemoteAskPayload.new),
         correlation_id: @correlation_id
       ))
     end
@@ -298,7 +302,7 @@ module Movie::Remote
 
       # Deserialize the message
       begin
-        wrapper = MessageRegistry.deserialize(envelope.message_type, envelope.payload)
+        wrapper = MessageRegistry.deserialize(envelope.message_type, envelope.payload_data)
         deliver_typed_message(context, wrapper, remote_sender_for(envelope.sender_path, envelope.correlation_id, conn, envelope.kind.ask_request?))
       rescue ex
         Log.error { "Failed to deserialize message: #{ex.message}" }
@@ -356,7 +360,7 @@ module Movie::Remote
         return
       end
 
-      system_message = deserialize_system_message(envelope.message_type, envelope.payload, conn)
+      system_message = deserialize_system_message(envelope.message_type, envelope.payload_data, conn)
       context.ref.send_system(system_message)
     rescue ex : RemoteUnsupportedSystemMessageError
       Log.error { "Unsupported remote system message #{envelope.message_type}: #{ex.message}" }
@@ -364,7 +368,7 @@ module Movie::Remote
       Log.error(exception: ex) { "Failed to deliver remote system message #{envelope.message_type}" }
     end
 
-    private def deserialize_system_message(type : String, payload : JSON::Any, conn : InboundConnection?) : Movie::SystemMessage
+    private def deserialize_system_message(type : String, payload : JsonPayload, conn : InboundConnection?) : Movie::SystemMessage
       case type
       when "Movie::Stop"
         Movie::STOP
@@ -375,7 +379,7 @@ module Movie::Remote
       when "Movie::Terminated"
         Movie::Terminated.new(remote_system_ref_from_payload(payload, nil))
       when "Movie::Failed"
-        failed = RemoteFailedSystemPayload.from_json(payload.to_json)
+        failed = RemoteFailedSystemPayload.from_json(payload.json_source)
         cause = if failed.error_class.empty? && failed.message.empty?
                   nil
                 else
@@ -389,7 +393,7 @@ module Movie::Remote
       end
     end
 
-    private def remote_system_ref_from_payload(payload : JSON::Any, conn : InboundConnection?) : Movie::ActorRefBase
+    private def remote_system_ref_from_payload(payload : JsonPayload, conn : InboundConnection?) : Movie::ActorRefBase
       actor_path = payload["actor_path"]?.try(&.as_s)
       raise RemoteUnsupportedSystemMessageError.new("Remote system message is missing actor_path") unless actor_path
 

@@ -35,11 +35,12 @@ def stream_numbers(n : Int32, io : IO)
     source << Streams::OnComplete(Elem).new
   end
 
-  io << "{\"count\":#{count}}\n" if count == 0
+  io << "{\"count\":" << count << "}\n" if count == 0
 
   count.times do
     val = out.receive
-    io << {value: val}.to_json << "\n"
+    {value: val}.to_json(io)
+    io << '\n'
     io.flush
   end
 

@@ -1,9 +1,10 @@
 require "json"
+require "./json_payload"
 
 module Movie::Remote
   # Base class for deserializers to work around Crystal's generic type limitations.
   abstract class MessageDeserializer
-    abstract def deserialize(json : JSON::Any) : MessageWrapper
+    abstract def deserialize(payload : JsonPayload) : MessageWrapper
   end
 
   # Wrapper for deserialized messages.
@@ -31,8 +32,8 @@ module Movie::Remote
 
   # Typed deserializer for a specific message type.
   class TypedDeserializer(T) < MessageDeserializer
-    def deserialize(json : JSON::Any) : MessageWrapper
-      TypedMessageWrapper(T).new(T.from_json(json.to_json))
+    def deserialize(payload : JsonPayload) : MessageWrapper
+      TypedMessageWrapper(T).new(T.from_json(payload.json_source))
     end
   end
 
@@ -85,29 +86,32 @@ module Movie::Remote
       end
     end
 
-    # Serializes a message, returning {tag, json_payload}.
+    # Prepares a message for direct JSON serialization, returning
+    # {tag, payload_writer} without materializing an intermediate String/DOM.
     # The type must include JSON::Serializable.
-    def self.serialize(message : T) : {String, JSON::Any} forall T
+    def self.serialize(message : T) : {String, JsonPayload} forall T
       type_name = T.name
       tag = @@mutex.synchronize { @@type_to_tag[type_name]? } || type_name
-      json = JSON.parse(message.to_json)
-      {tag, json}
+      {tag, SerializableJsonPayload(T).new(message).as(JsonPayload)}
     end
 
-    def self.serialize(message : JSON::Serializable) : {String, JSON::Any}
+    def self.serialize(message : JSON::Serializable) : {String, JsonPayload}
       type_name = message.class.name
       tag = @@mutex.synchronize { @@type_to_tag[type_name]? } || type_name
-      json = JSON.parse(message.to_json)
-      {tag, json}
+      {tag, SerializableJsonPayload(JSON::Serializable).new(message).as(JsonPayload)}
     end
 
     # Deserializes a message from its tag and JSON payload.
     # Raises if the tag is not registered.
-    def self.deserialize(tag : String, json : JSON::Any) : MessageWrapper
+    def self.deserialize(tag : String, payload : JsonPayload) : MessageWrapper
       deserializer = @@mutex.synchronize { @@deserializers[tag]? }
       raise "No deserializer registered for tag: #{tag}" unless deserializer
 
-      deserializer.deserialize(json)
+      deserializer.deserialize(payload)
+    end
+
+    def self.deserialize(tag : String, payload : JSON::Any) : MessageWrapper
+      deserialize(tag, AnyJsonPayload.new(payload))
     end
 
     # Checks if a tag is registered.

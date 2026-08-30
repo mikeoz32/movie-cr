@@ -17,6 +17,7 @@ Mandatory workflow for every task lives in [development_workflow.md](development
 | P0 | [Epic 07 - Stream Blueprints, Boundedness, and TestKit](epics/epic-07-stream-blueprints-boundedness-and-testkit.md) | Establishes the typed, bounded stream core required before graph junctions and a Graph DSL. | Done |
 | P1 | [Epic 08 - Actor System Performance Benchmarks](epics/epic-08-actor-system-performance-benchmarks.md) | Establishes comparable local and remote end-to-end measurements before runtime performance tuning. | Completed (2026-08-30) |
 | P1 | [Epic 09 - Local Ask Hot-Path Optimization](epics/epic-09-local-ask-hot-path.md) | Removes the highest-impact actor lifecycle bottleneck identified by the end-to-end benchmark. | Completed (2026-08-30) |
+| P1 | [Epic 10 - IO-Native Serialization](epics/epic-10-io-native-serialization.md) | Writes remoting and machine-readable output directly to reusable IO buffers to minimize intermediate JSON allocations. | In progress |
 
 ## Planning Rules
 

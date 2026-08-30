@@ -9,16 +9,24 @@ module Movie::Remote
     include JSON::Serializable
   end
 
+  private record RemoteActorSystemPayload, actor_path : String do
+    include JSON::Serializable
+  end
+
+  private record EmptyRemoteSystemPayload do
+    include JSON::Serializable
+  end
+
   class RemoteUnsupportedSystemMessageError < Exception
   end
 
   module SystemMessageCodec
     extend self
 
-    def serialize(message : Movie::SystemMessage, path_registry : Movie::PathRegistry) : {String, JSON::Any}
+    def serialize(message : Movie::SystemMessage, path_registry : Movie::PathRegistry) : {String, JsonPayload}
       case message
       when Movie::Stop
-        {"Movie::Stop", JSON::Any.new({} of String => JSON::Any)}
+        {"Movie::Stop", JsonPayload.wrap(EmptyRemoteSystemPayload.new)}
       when Movie::Watch
         {"Movie::Watch", actor_payload(path_for!(message.actor, path_registry, "Movie::Watch"))}
       when Movie::Unwatch
@@ -32,7 +40,7 @@ module Movie::Remote
           error_class: cause.try(&.class.name) || "",
           message: cause.try(&.message) || ""
         )
-        {"Movie::Failed", JSON.parse(payload.to_json)}
+        {"Movie::Failed", JsonPayload.wrap(payload)}
       else
         raise RemoteUnsupportedSystemMessageError.new(
           "Remote system message #{message.class.name} is not supported"
@@ -40,8 +48,8 @@ module Movie::Remote
       end
     end
 
-    private def actor_payload(path : ActorPath) : JSON::Any
-      JSON::Any.new({"actor_path" => JSON::Any.new(path.to_s)})
+    private def actor_payload(path : ActorPath) : JsonPayload
+      JsonPayload.wrap(RemoteActorSystemPayload.new(path.to_s))
     end
 
     private def path_for!(actor : Movie::ActorRefBase, path_registry : Movie::PathRegistry, message_type : String) : ActorPath
@@ -175,12 +183,12 @@ module Movie::Remote
             begin
               case response.message_type
               when RemoteAskResponseSenderRef::ASK_FAILURE_TAG
-                failure = RemoteAskFailurePayload.from_json(response.payload.to_json)
+                failure = RemoteAskFailurePayload.from_json(response.payload_data.json_source)
                 promise.failure(RemoteAskError.new(failure.error_class, failure.message))
               when RemoteAskResponseSenderRef::ASK_CANCELLED_TAG
                 promise.cancel
               else
-                wrapper = MessageRegistry.deserialize(response.message_type, response.payload)
+                wrapper = MessageRegistry.deserialize(response.message_type, response.payload_data)
                 result = wrapper.unwrap(R)
                 promise.success(result)
               end

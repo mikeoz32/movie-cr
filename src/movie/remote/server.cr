@@ -133,6 +133,8 @@ module Movie::Remote
     @write_mutex : Mutex
     @reader_fiber : Fiber?
     @remote_address : Address?
+    @frame_encoder : FrameCodec::Encoder
+    @frame_decoder : FrameCodec::Decoder
 
     def initialize(
       @socket : TCPSocket,
@@ -141,6 +143,8 @@ module Movie::Remote
       @on_message : Proc(WireEnvelope, InboundConnection, Nil),
     )
       @write_mutex = Mutex.new
+      @frame_encoder = FrameCodec::Encoder.new
+      @frame_decoder = FrameCodec::Decoder.new
     end
 
     # Starts reading from the connection.
@@ -156,7 +160,7 @@ module Movie::Remote
 
       begin
         @write_mutex.synchronize do
-          FrameCodec.encode(envelope, @socket)
+          @frame_encoder.encode(envelope, @socket)
         end
         true
       rescue ex : IO::Error
@@ -197,7 +201,7 @@ module Movie::Remote
         break unless @connected
 
         envelope = begin
-          FrameCodec.decode(@socket)
+          @frame_decoder.decode(@socket)
         rescue ex : Exception
           Log.debug { "Read/protocol error: #{ex.message}" }
           break
@@ -226,8 +230,9 @@ module Movie::Remote
     end
 
     private def handle_handshake(envelope : WireEnvelope)
-      system_name = envelope.payload["system"]?.try(&.as_s)
-      address_str = envelope.payload["address"]?.try(&.as_s)
+      payload = envelope.payload_data
+      system_name = payload["system"]?.try(&.as_s)
+      address_str = payload["address"]?.try(&.as_s)
 
       if address_str
         @remote_address = Address.parse(address_str)
