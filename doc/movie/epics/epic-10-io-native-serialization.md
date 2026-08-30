@@ -4,7 +4,7 @@
 
 **Depends on:** Epic 08 and Epic 09.
 
-**Status:** In progress.
+**Status:** Completed (2026-08-30).
 
 **Done when:**
 
@@ -20,7 +20,7 @@
 
 ## Task 10.1: Replace intermediate remoting JSON values with direct IO writers
 
-**Status:** In progress.
+**Status:** Completed (2026-08-30).
 
 **Files**
 
@@ -79,12 +79,14 @@ The production serialization audit leaves two intentional no-argument `to_json` 
 
 ## Completion checklist
 
-- [ ] Failing test written first.
-- [ ] Failing test observed red.
-- [ ] Minimal implementation written.
-- [ ] Targeted verification green.
-- [ ] Broader verification green.
-- [ ] Formatting check green.
-- [ ] Docs/examples updated if needed.
-- [ ] Review requested.
-- [ ] Review feedback addressed.
+- [x] Failing test written first.
+- [x] Failing test observed red.
+- [x] Minimal implementation written.
+- [x] Targeted verification green.
+- [x] Broader verification green.
+- [x] Formatting check green.
+- [x] Docs/examples updated if needed.
+- [x] Review requested.
+- [x] Review feedback addressed.
+
+Final verification: the direct-write registry spec was observed failing when the legacy no-argument serializer was invoked, and the reusable encoder regression was observed failing after a serializer left the JSON builder mid-document. Both now pass. The focused registry, frame, integration, end-to-end, and benchmark-contract set passes with 47 examples; the full CI-flagged suite passes with 246 examples; all examples build; the opt-in release remoting benchmark passes with 14 examples; the stress suite passes with 10 examples; formatting is clean across `src`, `spec`, `examples`, and `benchmarks`; and the standalone release ActorSystem benchmark builds and completes the repeated comparison matrix. Initial Standards review found the poisoned reusable builder and initial Spec review requested complete numeric throughput evidence; both were fixed. Final Standards and Spec reviews have no remaining findings.
