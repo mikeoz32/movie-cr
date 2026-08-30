@@ -55,14 +55,14 @@ The one-write regression was observed failing with two writes and passed after t
 - Drain ready frames up to a frame-count or byte limit into one socket write.
 - Preserve FIFO order within each stripe and close/fail queued work on disconnect.
 
-## Task 13.3: Buffer inbound transport reads
+## Task 13.3: Validate inbound transport buffering
 
 **Status:** Pending.
 
 **Outcome**
 
-- Read bounded socket chunks into connection-local storage.
-- Decode all complete length-prefixed frames already available in the chunk.
+- Verify whether the runtime already reads bounded socket chunks into connection-local storage.
+- Avoid layering a redundant buffer over existing multi-frame read-ahead.
 - Preserve partial-header, partial-payload, maximum-frame, malformed-frame, and EOF behavior.
 
 ## Task 13.4: Select the next measured hot path
@@ -73,6 +73,26 @@ The one-write regression was observed failing with two writes and passed after t
 
 - Decompose post-decode path resolution, registry lookup, mailbox enqueue, and actor dispatch.
 - Record whether numeric target/type IDs, mailbox batching, or binary protocol v2 is the next dominant task.
+
+## Task 13.5: Remove canonical route parsing from delivery
+
+**Status:** Pending.
+
+**Outcome**
+
+- Resolve the exact registered actor path without rebuilding `ActorPath` state.
+- Preserve normalized local/remote aliases as a compatibility fallback.
+- Keep registration, rebinding, unregister, and clear indexes consistent.
+
+## Task 13.6: Reuse internal mailbox storage
+
+**Status:** Pending.
+
+**Outcome**
+
+- Remove per-message linked-node and reference-envelope allocations from normal mailbox delivery.
+- Preserve the public `Envelope`, `Queue`, and `QueueNode` APIs.
+- Retain system-message priority and the existing dispatch throughput limit.
 
 ## Completion checklist
 
