@@ -4,7 +4,7 @@
 
 **Depends on:** Epic 05.
 
-**Status:** In progress.
+**Status:** Done.
 
 **Done when:**
 
@@ -87,12 +87,14 @@
 
 ## Completion checklist
 
-- [ ] Failing test written first.
-- [ ] Failing test observed red.
-- [ ] Minimal implementation written.
-- [ ] Targeted verification green.
-- [ ] Broader verification green.
-- [ ] Formatting check green.
-- [ ] Docs/examples updated if needed.
-- [ ] Review requested.
-- [ ] Review feedback addressed.
+- [x] Failing test written first.
+- [x] Failing test observed red.
+- [x] Minimal implementation written.
+- [x] Targeted verification green.
+- [x] Broader verification green.
+- [x] Formatting check green.
+- [x] Docs/examples updated if needed.
+- [x] Review requested.
+- [x] Review feedback addressed.
+
+Final verification: the default and CI-flagged correctness suites pass with 234 examples; the combined stream suites pass with 42 examples; all six examples build; opt-in benchmark and stress suites pass with 14 and 10 examples respectively; final spec and standards reviews have no remaining findings.
