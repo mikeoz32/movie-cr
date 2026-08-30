@@ -11,8 +11,8 @@ module Movie::Remote
     MAX_RETAINED_BUFFER_CAPACITY = 1024 * 1024
     FRAME_PREFIX_SIZE            = sizeof(UInt32)
 
-    # Stateful encoder with a reusable JSON buffer. Callers must serialize
-    # access; Connection and InboundConnection already do so with write locks.
+    # Stateful encoder with a reusable JSON buffer. It is not thread-safe and
+    # must be owned by one caller (normally a connection's outbound writer).
     class Encoder
       def initialize(initial_capacity : Int32 = INITIAL_BUFFER_CAPACITY)
         @buffer = IO::Memory.new(initial_capacity)
@@ -20,6 +20,28 @@ module Movie::Remote
       end
 
       def encode(envelope : WireEnvelope, io : IO) : Nil
+        append(envelope, io)
+        io.flush
+      end
+
+      # Appends one complete length-prefixed frame without flushing the target.
+      # This lets a connection writer concatenate ready frames into one write.
+      def append(envelope : WireEnvelope, io : IO) : Nil
+        with_frame(envelope) { |frame| io.write(frame) }
+      end
+
+      # Yields a complete frame from the reusable encoder buffer. The slice is
+      # only valid for the duration of the block.
+      def with_frame(envelope : WireEnvelope, & : Bytes ->) : Nil
+        length = prepare_frame(envelope)
+        begin
+          yield @buffer.to_slice
+        ensure
+          reset_buffer if length > MAX_RETAINED_BUFFER_CAPACITY
+        end
+      end
+
+      private def prepare_frame(envelope : WireEnvelope) : Int32
         @buffer.clear
         @buffer.write_bytes(0_u32, IO::ByteFormat::BigEndian)
         begin
@@ -36,9 +58,7 @@ module Movie::Remote
         end
 
         IO::ByteFormat::BigEndian.encode(length.to_u32, @buffer.to_slice[0, FRAME_PREFIX_SIZE])
-        io.write(@buffer.to_slice)
-        io.flush
-        reset_buffer if length > MAX_RETAINED_BUFFER_CAPACITY
+        length
       end
 
       private def reset_buffer : Nil

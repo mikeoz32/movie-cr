@@ -1,6 +1,7 @@
 require "socket"
 require "./wire_envelope"
 require "./frame_codec"
+require "./outbound_writer"
 require "../path"
 
 module Movie::Remote
@@ -13,11 +14,10 @@ module Movie::Remote
     getter? closed : Bool = false
 
     @socket : TCPSocket?
-    @write_mutex : Mutex
+    @outbound_writer : OutboundWriter?
     @pending_asks : Hash(String, Channel(WireEnvelope))
     @pending_asks_mutex : Mutex
     @reader_fiber : Fiber?
-    @frame_encoder : FrameCodec::Encoder
     @frame_decoder : FrameCodec::Decoder
 
     def initialize(
@@ -26,10 +26,8 @@ module Movie::Remote
       @system : Movie::AbstractActorSystem,
       @on_message : Proc(WireEnvelope, Nil)? = nil,
     )
-      @write_mutex = Mutex.new
       @pending_asks = {} of String => Channel(WireEnvelope)
       @pending_asks_mutex = Mutex.new
-      @frame_encoder = FrameCodec::Encoder.new
       @frame_decoder = FrameCodec::Decoder.new
     end
 
@@ -47,9 +45,12 @@ module Movie::Remote
       end
 
       begin
-        @socket = TCPSocket.new(host, port)
-        @socket.not_nil!.tcp_nodelay = true
+        socket = TCPSocket.new(host, port)
+        socket.tcp_nodelay = true
+        @socket = socket
+        @outbound_writer = OutboundWriter.new(socket) { |error| handle_write_error(error) }
         @connected = true
+        @outbound_writer.not_nil!.start
         start_reader
         Log.info { "Connected to #{@address}" }
         true
@@ -62,19 +63,10 @@ module Movie::Remote
     # Sends an envelope to the remote system.
     def send(envelope : WireEnvelope) : Bool
       return false unless @connected
-      socket = @socket
-      return false unless socket
+      writer = @outbound_writer
+      return false unless writer
 
-      begin
-        @write_mutex.synchronize do
-          @frame_encoder.encode(envelope, socket)
-        end
-        true
-      rescue ex : IO::Error
-        Log.error { "Failed to send to #{@address}: #{ex.message}" }
-        handle_disconnect
-        false
-      end
+      writer.enqueue(envelope)
     end
 
     # Registers a pending ask request and returns the channel to wait on.
@@ -98,6 +90,7 @@ module Movie::Remote
       return if @closed
       @closed = true
       @connected = false
+      @outbound_writer.try &.close
 
       if socket = @socket
         socket.close rescue nil
@@ -171,6 +164,15 @@ module Movie::Remote
       return if @closed
       Log.info { "Disconnected from #{@address}" }
       close
+    end
+
+    private def handle_write_error(error : Exception) : Nil
+      if error.is_a?(IO::Error)
+        Log.error { "Failed to send to #{@address}: #{error.message}" }
+        handle_disconnect
+      else
+        Log.error(exception: error) { "Failed to encode outbound message to #{@address}" }
+      end
     end
   end
 end

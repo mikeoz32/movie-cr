@@ -31,6 +31,10 @@ Outgoing registered messages retain their `JSON::Serializable` value until frame
 
 Encoder/decoder buffers retain at most 1 MiB per connection. Connection-owned decoders also reuse their JSON pull parser, lexer token, object stack, string buffer, and a pool of at most 256 JSON keys. Larger frames up to the 16 MiB protocol limit use temporary storage and release oversized lexer storage so a single large message does not permanently multiply memory across all stripes.
 
+Each TCP connection owns one writer fiber and a bounded FIFO of at most 4,096 envelopes. A successful remote `tell` means the envelope was accepted into that queue; it is not a delivery acknowledgement. Producers return without performing socket IO while capacity is available and are backpressured when the queue is full. The writer drains up to 128 ready frames and emits chunks near 64 KiB without adding a timer delay, preserving the existing sequence of `[length][JSON]` frames and per-stripe FIFO order. Connection shutdown rejects new work, releases blocked producers, and discards queued envelopes that can no longer be delivered.
+
+Crystal TCP sockets already read ahead into a bounded 32 KiB input buffer. The frame decoder consumes multiple complete frames from that buffer before another socket read while retaining partial frame data in the socket buffer. Movie therefore does not add a second inbound transport buffer. Canonical registered actor paths use an exact lookup cache on delivery; alternate local/remote address forms retain the normalized parsing fallback.
+
 Parser reuse resets private state from Crystal's standard JSON lexer and pull parser. Movie currently bounds support to Crystal 1.19.1 through 1.21.x, whose layouts are verified by the minimum-version CI lane and the current development toolchain. Supporting a newer Crystal minor requires reviewing this reset contract before widening the version constraint.
 
 ## Starting Two Systems
@@ -66,6 +70,8 @@ remote << Ping.new(1)
 ```
 
 `RemoteActorRef#tell_from` can include sender path metadata when the sender is registered in the local `PathRegistry`. The receiving actor reads it through `context.sender`.
+
+Remote delivery remains experimental and has no acknowledgement or retry contract. In particular, an envelope accepted by the outbound queue may still be lost if later serialization or socket IO fails; those failures are logged and the connection is closed for IO errors.
 
 ## Remote Ask
 

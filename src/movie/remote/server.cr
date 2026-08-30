@@ -1,6 +1,7 @@
 require "socket"
 require "./wire_envelope"
 require "./frame_codec"
+require "./outbound_writer"
 require "./message_registry"
 require "../path"
 
@@ -131,10 +132,9 @@ module Movie::Remote
     getter? connected : Bool = true
 
     @socket : TCPSocket
-    @write_mutex : Mutex
+    @outbound_writer : OutboundWriter
     @reader_fiber : Fiber?
     @remote_address : Address?
-    @frame_encoder : FrameCodec::Encoder
     @frame_decoder : FrameCodec::Decoder
 
     def initialize(
@@ -143,13 +143,13 @@ module Movie::Remote
       @path_registry : Movie::PathRegistry,
       @on_message : Proc(WireEnvelope, InboundConnection, Nil),
     )
-      @write_mutex = Mutex.new
-      @frame_encoder = FrameCodec::Encoder.new
+      @outbound_writer = OutboundWriter.new(@socket) { |error| handle_write_error(error) }
       @frame_decoder = FrameCodec::Decoder.new(MessageRegistry.payload_decoder)
     end
 
     # Starts reading from the connection.
     def start
+      @outbound_writer.start
       @reader_fiber = spawn do
         reader_loop
       end
@@ -159,22 +159,14 @@ module Movie::Remote
     def send(envelope : WireEnvelope) : Bool
       return false unless @connected
 
-      begin
-        @write_mutex.synchronize do
-          @frame_encoder.encode(envelope, @socket)
-        end
-        true
-      rescue ex : IO::Error
-        Log.error { "Failed to send: #{ex.message}" }
-        close
-        false
-      end
+      @outbound_writer.enqueue(envelope)
     end
 
     # Closes the connection.
     def close
       return unless @connected
       @connected = false
+      @outbound_writer.close
       @socket.close rescue nil
       @server.connection_closed(self)
       Log.debug { "Inbound connection closed" }
@@ -184,6 +176,7 @@ module Movie::Remote
     def close_without_callback
       return unless @connected
       @connected = false
+      @outbound_writer.close
       @socket.close rescue nil
       Log.debug { "Inbound connection closed (no callback)" }
     end
@@ -230,6 +223,15 @@ module Movie::Remote
         handle_handshake(envelope)
       else
         @on_message.call(envelope, self)
+      end
+    end
+
+    private def handle_write_error(error : Exception) : Nil
+      if error.is_a?(IO::Error)
+        Log.error { "Failed to send: #{error.message}" }
+        close
+      else
+        Log.error(exception: error) { "Failed to encode outbound message" }
       end
     end
 
