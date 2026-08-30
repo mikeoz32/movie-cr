@@ -4,7 +4,7 @@
 
 **Depends on:** Epic 06.
 
-**Status:** In progress.
+**Status:** Done.
 
 **Done when:**
 
@@ -17,7 +17,7 @@
 
 ## Task 08.1: Add an end-to-end ActorSystem benchmark runner
 
-**Status:** In progress.
+**Status:** Done.
 
 **Files**
 
@@ -47,12 +47,16 @@
 
 ## Completion checklist
 
-- [ ] Failing test written first.
-- [ ] Failing test observed red.
-- [ ] Minimal implementation written.
-- [ ] Targeted verification green.
-- [ ] Broader verification green.
-- [ ] Formatting check green.
-- [ ] Docs/examples updated if needed.
-- [ ] Review requested.
-- [ ] Review feedback addressed.
+- [x] Failing test written first.
+- [x] Failing test observed red.
+- [x] Minimal implementation written.
+- [x] Targeted verification green.
+- [x] Broader verification green.
+- [x] Formatting check green.
+- [x] Docs/examples updated if needed.
+- [x] Review requested.
+- [x] Review feedback addressed.
+
+Final verification: the benchmark contract suite passes with 5 examples; the full CI-flagged suite passes with 239 examples; formatting is clean across `src`, `spec`, `examples`, and `benchmarks`; the standalone release runner builds and completes local, in-process, and two-process tell/ask workloads in human, CSV, and JSON Lines formats; the existing opt-in remote benchmark passes with 14 examples. Final Standards and Spec reviews have no remaining findings.
+
+A measurement-only diagnostic run on the 16-CPU development host used 10,000 messages per batch, 64-byte payloads, 8 producers, 8 actors, 64 asks in flight, 4 stripes, 2 warm-ups, and 5 measured runs. Median throughput was 896,372 local tell, 16,780 in-process remote tell, 41,479 two-process remote tell, 6,352 local ask, 10,672 in-process remote ask, and 15,920 two-process remote ask messages per second. Allocation rates were comparatively stable while throughput and tail latency were noisy. These values are evidence for follow-up profiling, not portable performance targets.

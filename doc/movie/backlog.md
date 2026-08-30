@@ -15,7 +15,7 @@ Mandatory workflow for every task lives in [development_workflow.md](development
 | P1 | [Epic 04 - Configuration API Consistency](epics/epic-04-configuration-api-consistency.md) | Removes ambiguous config behavior and normalizes public settings. | Completed (2026-08-30) |
 | P1 | [Epic 05 - Quality Gates and Documentation Accuracy](epics/epic-05-quality-gates-and-documentation.md) | Makes regressions harder to reintroduce and aligns docs with reality. | Completed (2026-08-30) |
 | P0 | [Epic 07 - Stream Blueprints, Boundedness, and TestKit](epics/epic-07-stream-blueprints-boundedness-and-testkit.md) | Establishes the typed, bounded stream core required before graph junctions and a Graph DSL. | Done |
-| P1 | [Epic 08 - Actor System Performance Benchmarks](epics/epic-08-actor-system-performance-benchmarks.md) | Establishes comparable local and remote end-to-end measurements before runtime performance tuning. | In progress |
+| P1 | [Epic 08 - Actor System Performance Benchmarks](epics/epic-08-actor-system-performance-benchmarks.md) | Establishes comparable local and remote end-to-end measurements before runtime performance tuning. | Completed (2026-08-30) |
 
 ## Planning Rules
 
