@@ -32,6 +32,37 @@ module Movie
       class StreamClosedError < Exception
       end
 
+      class BufferOverflowError < Exception
+      end
+
+      DEFAULT_BUFFER_SIZE = 16
+
+      enum OverflowStrategy
+        Backpressure
+        DropHead
+        DropTail
+        DropNew
+        DropBuffer
+        Fail
+      end
+
+      enum QueueOfferStatus
+        Enqueued
+        Dropped
+        QueueClosed
+        Failure
+      end
+
+      record QueueOfferResult, status : QueueOfferStatus, error : Exception? = nil do
+        ENQUEUED     = new(QueueOfferStatus::Enqueued)
+        DROPPED      = new(QueueOfferStatus::Dropped)
+        QUEUE_CLOSED = new(QueueOfferStatus::QueueClosed)
+
+        def self.failure(error : Exception) : self
+          new(QueueOfferStatus::Failure, error)
+        end
+      end
+
       # Owns active blueprint edges so ActorSystem shutdown also terminates
       # stream fibers and their materialized futures.
       class StreamRuntimeExtension < Extension
@@ -73,17 +104,27 @@ module Movie
         end
       end
 
-      # Runtime edge used by the reusable blueprint API. Task 07.2 replaces
-      # this rendezvous channel with configurable bounded queues.
+      # Bounded runtime edge used by the reusable blueprint API.
       class StageChannel(T)
-        @channel = Channel(StreamEvent(T)).new
+        getter capacity : Int32
+        getter overflow_strategy : OverflowStrategy
+
+        @buffer = Deque(T).new
+        @terminal : StreamEvent(T)? = nil
+        @terminal_delivered = false
+        @state_signal = Channel(Nil).new
         @cancel_signal = Channel(Nil).new
         @cancelled = false
-        @cancel_mutex = Mutex.new
+        @state_mutex = Mutex.new
         @runtime : StreamRuntimeExtension
         @registration_id : UInt64
 
-        def initialize(system : AbstractActorSystem)
+        def initialize(
+          system : AbstractActorSystem,
+          @capacity : Int32 = DEFAULT_BUFFER_SIZE,
+          @overflow_strategy : OverflowStrategy = OverflowStrategy::Backpressure,
+        )
+          BlueprintRuntime.validate_buffer_size(@capacity)
           raise StreamClosedError.new("actor system is shutting down") if system.shutting_down?
           @runtime = system.extensions.get_or_register(StreamRuntimeExtension) do
             StreamRuntimeExtension.new
@@ -92,33 +133,123 @@ module Movie
         end
 
         def push(value : T)
-          send_event(StreamElement(T).new(value))
+          result = offer(value)
+          case result.status
+          when QueueOfferStatus::Enqueued, QueueOfferStatus::Dropped
+            nil
+          when QueueOfferStatus::QueueClosed
+            raise StreamCancelledError.new("downstream cancelled the stream edge")
+          when QueueOfferStatus::Failure
+            raise result.error.not_nil!
+          end
+        end
+
+        def offer(value : T) : QueueOfferResult
+          loop do
+            result = nil.as(QueueOfferResult?)
+            state_signal = nil.as(Channel(Nil)?)
+
+            @state_mutex.synchronize do
+              if @cancelled || @terminal || @terminal_delivered
+                result = QueueOfferResult::QUEUE_CLOSED
+              elsif @buffer.size < @capacity
+                @buffer << value
+                notify_state_locked
+                result = QueueOfferResult::ENQUEUED
+              else
+                case @overflow_strategy
+                when OverflowStrategy::Backpressure
+                  state_signal = @state_signal
+                when OverflowStrategy::DropHead
+                  @buffer.shift
+                  @buffer << value
+                  result = QueueOfferResult::ENQUEUED
+                when OverflowStrategy::DropTail
+                  @buffer.pop
+                  @buffer << value
+                  result = QueueOfferResult::ENQUEUED
+                when OverflowStrategy::DropNew
+                  result = QueueOfferResult::DROPPED
+                when OverflowStrategy::DropBuffer
+                  @buffer.clear
+                  @buffer << value
+                  result = QueueOfferResult::ENQUEUED
+                when OverflowStrategy::Fail
+                  error = BufferOverflowError.new("stream buffer capacity #{@capacity} exceeded")
+                  @terminal = StreamFailed(T).new(error)
+                  notify_state_locked
+                  result = QueueOfferResult.failure(error)
+                end
+              end
+            end
+
+            return result.not_nil! if result
+
+            select
+            when state_signal.not_nil!.receive?
+            when @cancel_signal.receive?
+              return QueueOfferResult::QUEUE_CLOSED
+            end
+          end
         end
 
         def complete
-          send_terminal_event(StreamCompleted(T).new)
+          set_terminal(StreamCompleted(T).new)
         end
 
         def fail(error : Exception)
-          send_terminal_event(StreamFailed(T).new(error))
+          set_terminal(StreamFailed(T).new(error))
         end
 
         def receive : StreamEvent(T)
-          select
-          when event = @channel.receive
-            event
-          when @cancel_signal.receive?
-            raise StreamCancelledError.new("stream edge was cancelled")
+          loop do
+            event = nil.as(StreamEvent(T)?)
+            state_signal = nil.as(Channel(Nil)?)
+            cancelled = false
+            terminal = false
+
+            @state_mutex.synchronize do
+              if @cancelled || @terminal_delivered
+                cancelled = true
+              elsif @buffer.empty?
+                if pending_terminal = @terminal
+                  event = pending_terminal
+                  @terminal = nil
+                  @terminal_delivered = true
+                  terminal = true
+                else
+                  state_signal = @state_signal
+                end
+              else
+                event = StreamElement(T).new(@buffer.shift)
+                notify_state_locked
+              end
+            end
+
+            raise StreamCancelledError.new("stream edge was cancelled") if cancelled
+            if received = event
+              @runtime.unregister(@registration_id) if terminal
+              return received
+            end
+
+            select
+            when state_signal.not_nil!.receive?
+            when @cancel_signal.receive?
+              raise StreamCancelledError.new("stream edge was cancelled")
+            end
           end
         end
 
         def cancel
-          changed = @cancel_mutex.synchronize do
+          changed = @state_mutex.synchronize do
             if @cancelled
               false
             else
               @cancelled = true
+              @buffer.clear
+              @terminal = nil
               @cancel_signal.close
+              notify_state_locked
               true
             end
           end
@@ -130,21 +261,28 @@ module Movie
         end
 
         def cancelled? : Bool
-          @cancel_mutex.synchronize { @cancelled }
+          @state_mutex.synchronize { @cancelled || @terminal_delivered }
         end
 
-        private def send_event(event : StreamEvent(T))
-          select
-          when @channel.send(event)
-          when @cancel_signal.receive?
-            raise StreamCancelledError.new("downstream cancelled the stream edge")
+        private def set_terminal(event : StreamEvent(T))
+          cancelled = @state_mutex.synchronize do
+            if @cancelled
+              true
+            elsif @terminal || @terminal_delivered
+              false
+            else
+              @terminal = event
+              notify_state_locked
+              false
+            end
           end
+          raise StreamCancelledError.new("downstream cancelled the stream edge") if cancelled
         end
 
-        private def send_terminal_event(event : StreamEvent(T))
-          send_event(event)
-        ensure
-          @runtime.unregister(@registration_id)
+        private def notify_state_locked
+          previous_signal = @state_signal
+          @state_signal = Channel(Nil).new
+          previous_signal.close
         end
       end
 
@@ -158,15 +296,35 @@ module Movie
         end
 
         def <<(value : T)
+          result = offer(value)
+          case result.status
+          when QueueOfferStatus::Enqueued, QueueOfferStatus::Dropped
+            nil
+          when QueueOfferStatus::QueueClosed
+            raise StreamClosedError.new("manual source was cancelled downstream")
+          when QueueOfferStatus::Failure
+            raise result.error.not_nil!
+          end
+        end
+
+        def offer(value : T) : QueueOfferResult
           @send_mutex.synchronize do
-            ensure_active
-            begin
-              @outlet.push(value)
-            rescue StreamCancelledError
-              mark_terminal
-              raise StreamClosedError.new("manual source was cancelled downstream")
+            if terminal?
+              QueueOfferResult::QUEUE_CLOSED
+            else
+              result = @outlet.offer(value)
+              if result.status.in?(QueueOfferStatus::QueueClosed, QueueOfferStatus::Failure)
+                mark_terminal
+              end
+              result
             end
           end
+        rescue StreamCancelledError
+          mark_terminal
+          QueueOfferResult::QUEUE_CLOSED
+        rescue ex : Exception
+          mark_terminal
+          QueueOfferResult.failure(ex)
         end
 
         def complete
@@ -175,6 +333,7 @@ module Movie
             begin
               @outlet.complete
             rescue StreamCancelledError
+              mark_terminal
               # Downstream already selected a terminal outcome.
             end
           end
@@ -195,13 +354,6 @@ module Movie
           @state_mutex.synchronize { @terminal } || @outlet.cancelled?
         end
 
-        private def ensure_active
-          @state_mutex.synchronize do
-            raise StreamClosedError.new("manual source is already terminal") if @terminal
-          end
-          raise StreamClosedError.new("manual source was cancelled downstream") if @outlet.cancelled?
-        end
-
         private def mark_terminal : Bool
           @state_mutex.synchronize do
             return false if @terminal
@@ -214,6 +366,10 @@ module Movie
       record Materialization(Out, Mat), outlet : StageChannel(Out), value : Mat
 
       module BlueprintRuntime
+        def self.validate_buffer_size(buffer_size : Int32)
+          raise ArgumentError.new("buffer_size must be greater than zero") unless buffer_size > 0
+        end
+
         def self.execute(system : AbstractActorSystem, &block : -> Nil)
           system.dispatchers.default.execute { block.call }
         end
@@ -342,9 +498,14 @@ module Movie
       end
 
       module Sources
-        def self.manual(type : T.class) : Source(T, ManualSourceControl(T)) forall T
+        def self.manual(
+          type : T.class,
+          buffer_size : Int32 = DEFAULT_BUFFER_SIZE,
+          overflow_strategy : OverflowStrategy = OverflowStrategy::Backpressure,
+        ) : Source(T, ManualSourceControl(T)) forall T
+          BlueprintRuntime.validate_buffer_size(buffer_size)
           Source(T, ManualSourceControl(T)).new do |system|
-            outlet = StageChannel(T).new(system)
+            outlet = StageChannel(T).new(system, buffer_size, overflow_strategy)
             Materialization(T, ManualSourceControl(T)).new(outlet, ManualSourceControl(T).new(outlet))
           end
         end
@@ -354,10 +515,13 @@ module Movie
         def self.map(
           input_type : In.class,
           output_type : Out.class,
+          buffer_size : Int32 = DEFAULT_BUFFER_SIZE,
+          overflow_strategy : OverflowStrategy = OverflowStrategy::Backpressure,
           &transform : In -> Out
         ) : Flow(In, Out, NotUsed) forall In, Out
+          BlueprintRuntime.validate_buffer_size(buffer_size)
           Flow(In, Out, NotUsed).new do |system, inlet|
-            outlet = StageChannel(Out).new(system)
+            outlet = StageChannel(Out).new(system, buffer_size, overflow_strategy)
             BlueprintRuntime.execute(system) do
               begin
                 loop do
@@ -376,6 +540,9 @@ module Movie
                     begin
                       outlet.push(transformed)
                     rescue StreamCancelledError
+                      inlet.cancel
+                      break
+                    rescue BufferOverflowError
                       inlet.cancel
                       break
                     end

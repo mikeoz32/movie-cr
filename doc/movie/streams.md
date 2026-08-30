@@ -91,7 +91,22 @@ Blueprint types:
 
 `via` preserves the materialized value on its left. `via_mat` combines the two values explicitly. `to` keeps the sink materialized value, while `to_mat` combines source and sink values. Current factories are `Sources.manual`, `Flows.map`, `Sinks.collect`, and `Sinks.fold`.
 
-Failure is terminal in both directions: a failing flow reports the error downstream and cancels its inlet so a manual producer cannot remain blocked on an abandoned edge. Blueprint runtime edges are owned by the supplied `ActorSystem`; shutting that system down cancels unfinished materialized futures and releases blocked producers. The next Epic 07 task replaces the current rendezvous edges with configurable bounded queues and overflow policies.
+Failure is terminal in both directions: a failing flow reports the error downstream and cancels its inlet so a manual producer cannot remain blocked on an abandoned edge. Blueprint runtime edges are owned by the supplied `ActorSystem`; shutting that system down cancels unfinished materialized futures and releases blocked producers.
+
+### Bounded buffers and overflow
+
+Every blueprint edge has a positive, fixed capacity. `Sources.manual` and `Flows.map` accept `buffer_size` and `overflow_strategy`; the defaults are `16` and `OverflowStrategy::Backpressure`. Non-positive sizes raise `ArgumentError` when the blueprint is created.
+
+| Strategy | Behavior when full | Offered element result |
+| --- | --- | --- |
+| `Backpressure` | Wait for downstream space | `Enqueued` after space is available |
+| `DropHead` | Remove the oldest buffered element | `Enqueued` |
+| `DropTail` | Remove the newest buffered element | `Enqueued` |
+| `DropNew` | Discard the offered element | `Dropped` |
+| `DropBuffer` | Clear the buffer, then enqueue the offered element | `Enqueued` |
+| `Fail` | Close the queue with `BufferOverflowError` | `Failure` with the same error |
+
+`ManualSourceControl#offer` returns a `QueueOfferResult` with `Enqueued`, `Dropped`, `QueueClosed`, or `Failure` status. The compatibility `<<` method uses the same bounded queue, waits under `Backpressure`, tolerates configured drops, and raises for closed or failed queues. Completion and failure never overtake elements already accepted into the buffer.
 
 ## Legacy builder surface & materialization (OZW-65)
 - Single-subscription builders in MVP.

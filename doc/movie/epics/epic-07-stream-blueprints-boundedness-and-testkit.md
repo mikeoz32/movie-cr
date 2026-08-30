@@ -41,7 +41,7 @@
 
 ## Task 07.2: Enforce bounded runtime queues and overflow policies
 
-**Status:** Planned.
+**Status:** Done.
 
 **Files**
 
@@ -60,6 +60,7 @@
 
 - Write overflow-policy and blocked-producer specs first.
 - Run buffer, core, and existing stream specs.
+- Complete spec and standards review with no remaining findings.
 
 ## Task 07.3: Add a stream protocol TestKit
 
