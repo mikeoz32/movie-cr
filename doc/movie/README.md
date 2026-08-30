@@ -18,6 +18,7 @@
 - [Epic 05 - Quality gates and documentation accuracy](epics/epic-05-quality-gates-and-documentation.md)
 - [Epic 06 - Runtime review hardening](epics/epic-06-runtime-review-hardening.md)
 - [Epic 07 - Stream blueprints, boundedness, and TestKit](epics/epic-07-stream-blueprints-boundedness-and-testkit.md)
+- [Epic 08 - Actor system performance benchmarks](epics/epic-08-actor-system-performance-benchmarks.md)
 
 ## How To Use This Folder
 

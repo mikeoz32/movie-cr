@@ -50,11 +50,12 @@ crystal spec spec/movie -Dpreview_mt -Dexecution_context
 Benchmark and stress specs are opt-in and are not part of the default correctness suite:
 
 ```bash
-MOVIE_BENCH=1 crystal spec spec/movie/remote/benchmark_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_BENCH=1 crystal spec --release spec/movie/remote/benchmark_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_STRESS=1 crystal spec spec/movie/remote/stress_spec.cr -Dpreview_mt -Dexecution_context
+crystal build benchmarks/actor_system.cr --release -Dpreview_mt -Dexecution_context -o /tmp/movie-actor-system-benchmark
 ```
 
-Benchmark runs report measurements without host-dependent pass/fail thresholds. Compare results only across repeated runs on the same environment.
+Benchmark runs report measurements without host-dependent pass/fail thresholds. Compare results only across repeated runs on the same environment. ActorSystem throughput measurements must use receiver-side completion barriers; socket enqueue completion is not an end-to-end delivery measurement.
 
 When examples are touched, also run:
 

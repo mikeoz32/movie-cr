@@ -167,10 +167,39 @@ for file in examples/*.cr; do crystal build "$file" -Dpreview_mt -Dexecution_con
 Benchmarks and stress scenarios are intentionally opt-in:
 
 ```bash
-MOVIE_BENCH=1 crystal spec spec/movie/remote/benchmark_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_BENCH=1 crystal spec --release spec/movie/remote/benchmark_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_STRESS=1 crystal spec spec/movie/remote/stress_spec.cr -Dpreview_mt -Dexecution_context
 ```
 
 Benchmark output is measurement-only because absolute throughput and relative speedup depend on the host, Crystal version, and scheduler. Correctness remains enforced by the default and stress suites.
+
+### ActorSystem end-to-end benchmark
+
+The standalone ActorSystem runner compares the same serializable tell and ask workloads across local delivery, two actor systems connected in-process, and two separate processes over TCP loopback. Tell batches stop timing only after actor-side snapshot barriers confirm that every message was processed; remote results therefore include serialization, framing, TCP, routing, mailbox dispatch, and behavior execution rather than only socket writes.
+
+Build the runner in release mode:
+
+```bash
+crystal build benchmarks/actor_system.cr --release -Dpreview_mt -Dexecution_context \
+  -o /tmp/movie-actor-system-benchmark
+```
+
+Run a comparable topology matrix:
+
+```bash
+/tmp/movie-actor-system-benchmark \
+  --topology all \
+  --operation both \
+  --messages 100000 \
+  --payload-bytes 64 \
+  --producers 8 \
+  --actors 8 \
+  --in-flight 64 \
+  --stripes 4 \
+  --warmup 2 \
+  --runs 10
+```
+
+Use `--format csv` or `--format jsonl` for machine-readable output. Every row includes the Git revision, Crystal version, release flag, CPU count, workload dimensions, end-to-end throughput, client allocation and CPU deltas, ask latency percentiles, and separate server allocation/CPU deltas for two-process remoting. The two-process topology starts and gracefully stops a child server using the same benchmark executable.
 
 The documentation index and recovery history live under [doc/movie](doc/movie/README.md).
