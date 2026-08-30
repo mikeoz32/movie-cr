@@ -113,7 +113,7 @@ pipeline.completion.await
 system.shutdown
 ```
 
-See [the streams protocol](doc/movie/streams.md), [basic example](examples/streams_basic.cr), and [showcase](examples/streams_showcase.cr).
+See [the streams protocol](doc/movie/streams.md), [typed blueprint example](examples/streams_blueprints.cr), [legacy basic example](examples/streams_basic.cr), and [showcase](examples/streams_showcase.cr).
 
 ## Remoting
 

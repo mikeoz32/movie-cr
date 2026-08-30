@@ -152,6 +152,11 @@ The publisher supports `offer`, `send_next`, `send_complete`, and `send_error`. 
 	- Single-subscription only (mirrors MVP invariant).
 
 ## Runnable example
+- File: [examples/streams_blueprints.cr](../../examples/streams_blueprints.cr)
+- Run: `crystal run examples/streams_blueprints.cr`
+- Flow: a reusable bounded `Int32 -> String -> Int32` graph combines manual-source control with a collecting sink future and shuts down its external actor system.
+
+## Legacy runnable example
 - File: [examples/streams_basic.cr](../../examples/streams_basic.cr)
 - Run: `crystal run examples/streams_basic.cr -Dpreview_mt -Dexecution_context`
 - Flow: external system + manual source produces 1..5, then flows map `*2`, filter evens, take 3, collect to a channel, print results, await completion.
