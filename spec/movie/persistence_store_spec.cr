@@ -23,7 +23,11 @@ module Movie
           Movie::Persistence::SerializedEvent.new("Added", "a"),
           Movie::Persistence::SerializedEvent.new("Added", "b"),
         ]
-        context.ask(@store, Movie::Persistence::AppendEvents.new("stream-1", 0_i64, events), Int64).await(STORE_TIMEOUT)
+        context.ask(
+          @store,
+          Movie::Persistence::AppendEvents.new("stream-1", 0_i64, Movie::Persistence::OperationId.new("batch-1"), events),
+          Movie::Persistence::WriteResult
+        ).await(STORE_TIMEOUT)
         events = context.ask(
           @store,
           Movie::Persistence::LoadEvents.new("stream-1", 0_i64),
@@ -47,8 +51,14 @@ module Movie
       when StoreProbeStart
         context.ask(
           @store,
-          Movie::Persistence::SaveState.new("entity-1", 0_i64, "Name", "payload"),
-          Int64
+          Movie::Persistence::SaveState.new(
+            "entity-1",
+            0_i64,
+            Movie::Persistence::OperationId.new("save-1"),
+            "Name",
+            "payload"
+          ),
+          Movie::Persistence::WriteResult
         ).await(STORE_TIMEOUT)
         value = context.ask(
           @store,
@@ -85,15 +95,77 @@ module Movie
         spawn do
           sleep 50.milliseconds
           @active.sub(1)
-          Ask.reply_if_asked(sender, message.expected_revision + message.events.size)
+          result = Persistence::WriteResult.new(message.expected_revision + message.events.size, false)
+          Ask.reply_if_asked(sender, result)
         end
       end
       Behaviors(Persistence::ConnectionMessage).same
     end
   end
+
+  class DelayedEventStore < AbstractBehavior(Persistence::EventStoreMessage)
+    def initialize(@delegate : ActorRef(Persistence::EventStoreMessage), @delay : Time::Span)
+    end
+
+    def receive(message : Persistence::EventStoreMessage, context : ActorContext(Persistence::EventStoreMessage))
+      sender = context.sender
+      system = context.system
+      delay = @delay
+      delegate = @delegate
+      case message
+      when Persistence::AppendEvents
+        spawn do
+          sleep delay
+          begin
+            result = Movie::Ask.local(system, delegate, message, Persistence::WriteResult, 2.seconds).await(2.seconds)
+            Ask.reply_if_asked(sender, result)
+          rescue error
+            Ask.fail_if_asked(sender, error, Persistence::WriteResult)
+          end
+        end
+      end
+      Behaviors(Persistence::EventStoreMessage).same
+    end
+  end
 end
 
 describe "Movie persistence store actors" do
+  it "deduplicates a stable operation id after an ambiguous ask timeout" do
+    path = "/tmp/movie_timeout_dedup_#{UUID.random}.sqlite3"
+    system = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same)
+    pool = system.spawn(Movie::Persistence::ConnectionPool.behavior("sqlite3:#{path}", 1))
+    store = system.spawn(Movie::Persistence::EventStoreActor.new(pool))
+    delayed = system.spawn(Movie::DelayedEventStore.new(store, 50.milliseconds))
+    operation_id = Movie::Persistence::OperationId.new("timeout-retry")
+    event = Movie::Persistence::SerializedEvent.new("Added", "one")
+    write = Movie::Persistence::AppendEvents.new("timeout-stream", 0_i64, operation_id, [event])
+
+    expect_raises(Movie::FutureTimeout) do
+      system.ask(delayed, write, Movie::Persistence::WriteResult, 10.milliseconds).await(10.milliseconds)
+    end
+    sleep 100.milliseconds
+
+    retry_result = system.ask(
+      store,
+      Movie::Persistence::AppendEvents.new("timeout-stream", 1_i64, operation_id, [event]),
+      Movie::Persistence::WriteResult,
+      2.seconds
+    ).await(2.seconds)
+    retry_result.duplicate.should be_true
+    retry_result.revision.should eq(1_i64)
+
+    events = system.ask(
+      store,
+      Movie::Persistence::LoadEvents.new("timeout-stream"),
+      Array(Movie::Persistence::StoredEvent),
+      2.seconds
+    ).await(2.seconds)
+    events.size.should eq(1)
+  ensure
+    system.try &.shutdown
+    File.delete(path) if path && File.exists?(path)
+  end
+
   it "allows independent journal requests to use the connection pool concurrently" do
     system = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same)
     pool_behavior = Movie::ConcurrentPoolProbe.new
@@ -101,11 +173,21 @@ describe "Movie persistence store actors" do
     store = system.spawn(Movie::Persistence::EventStoreActor.new(pool))
     event = Movie::Persistence::SerializedEvent.new("Added", "payload")
 
-    first = system.ask(store, Movie::Persistence::AppendEvents.new("a", 0_i64, [event]), Int64, 1.second)
-    second = system.ask(store, Movie::Persistence::AppendEvents.new("b", 0_i64, [event]), Int64, 1.second)
+    first = system.ask(
+      store,
+      Movie::Persistence::AppendEvents.new("a", 0_i64, Movie::Persistence::OperationId.new("a-1"), [event]),
+      Movie::Persistence::WriteResult,
+      1.second
+    )
+    second = system.ask(
+      store,
+      Movie::Persistence::AppendEvents.new("b", 0_i64, Movie::Persistence::OperationId.new("b-1"), [event]),
+      Movie::Persistence::WriteResult,
+      1.second
+    )
 
-    first.await(1.second).should eq(1_i64)
-    second.await(1.second).should eq(1_i64)
+    first.await(1.second).revision.should eq(1_i64)
+    second.await(1.second).revision.should eq(1_i64)
     pool_behavior.max_active.get.should be >= 2
   ensure
     system.try &.shutdown
@@ -122,8 +204,13 @@ describe "Movie persistence store actors" do
     2.times do
       future = system.ask(
         store,
-        Movie::Persistence::AppendEvents.new("contended", 0_i64, [event]),
-        Int64,
+        Movie::Persistence::AppendEvents.new(
+          "contended",
+          0_i64,
+          Movie::Persistence::OperationId.random,
+          [event]
+        ),
+        Movie::Persistence::WriteResult,
         2.seconds
       )
       spawn do
@@ -252,15 +339,47 @@ describe "Movie persistence store actors" do
     events.map(&.manifest).should eq(["Added", "Added"])
     events.map(&.payload).should eq(["a", "b"])
 
+    retry_result = system.ask(
+      store,
+      Movie::Persistence::AppendEvents.new(
+        "stream-1",
+        2_i64,
+        Movie::Persistence::OperationId.new("batch-1"),
+        [
+          Movie::Persistence::SerializedEvent.new("Added", "a"),
+          Movie::Persistence::SerializedEvent.new("Added", "b"),
+        ]
+      ),
+      Movie::Persistence::WriteResult,
+      2.seconds
+    ).await(2.seconds)
+    retry_result.duplicate.should be_true
+    retry_result.revision.should eq(2_i64)
+
+    expect_raises(Movie::Persistence::OperationConflictError) do
+      system.ask(
+        store,
+        Movie::Persistence::AppendEvents.new(
+          "stream-1",
+          2_i64,
+          Movie::Persistence::OperationId.new("batch-1"),
+          [Movie::Persistence::SerializedEvent.new("Added", "different")]
+        ),
+        Movie::Persistence::WriteResult,
+        2.seconds
+      ).await(2.seconds)
+    end
+
     error = expect_raises(Movie::Persistence::ConcurrentWriteError) do
       system.ask(
         store,
         Movie::Persistence::AppendEvents.new(
           "stream-1",
           0_i64,
+          Movie::Persistence::OperationId.new("stale-write"),
           [Movie::Persistence::SerializedEvent.new("Added", "duplicate")]
         ),
-        Int64,
+        Movie::Persistence::WriteResult,
         2.seconds
       ).await(2.seconds)
     end
@@ -285,5 +404,20 @@ describe "Movie persistence store actors" do
     value.not_nil!.revision.should eq(1_i64)
     value.not_nil!.manifest.should eq("Name")
     value.not_nil!.payload.should eq("payload")
+
+    expect_raises(Movie::Persistence::ConcurrentWriteError) do
+      system.ask(
+        store,
+        Movie::Persistence::SaveState.new(
+          "new-entity",
+          5_i64,
+          Movie::Persistence::OperationId.new("invalid-create"),
+          "Name",
+          "payload"
+        ),
+        Movie::Persistence::WriteResult,
+        2.seconds
+      ).await(2.seconds)
+    end
   end
 end

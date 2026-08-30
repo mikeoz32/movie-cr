@@ -1,4 +1,5 @@
 require "json"
+require "digest/sha256"
 require "sqlite3"
 require "./extension_id"
 require "./system"
@@ -12,6 +13,14 @@ module Movie
     record Id, entity_type : String, entity_id : String do
       def persistence_id : String
         "#{@entity_type}:#{@entity_id}"
+      end
+    end
+
+    record EntityId(C), value : Id
+
+    record EntityType(C), name : String do
+      def id(entity_id : String) : EntityId(C)
+        EntityId(C).new(Id.new(@name, entity_id))
       end
     end
 
@@ -64,6 +73,17 @@ module Movie
     record StoredEvent, sequence_nr : Int64, manifest : String, payload : String
     record SnapshotRecord, sequence_nr : Int64, manifest : String, payload : String
     record StateRecord, revision : Int64, manifest : String, payload : String?, deleted : Bool
+    record WriteResult, revision : Int64, duplicate : Bool
+
+    record OperationId, value : String do
+      def initialize(@value : String)
+        raise ArgumentError.new("Persistence operation id cannot be empty") if @value.empty?
+      end
+
+      def self.random : self
+        new(UUID.random.to_s)
+      end
+    end
 
     class ConcurrentWriteError < Exception
       getter persistence_id : String
@@ -72,6 +92,15 @@ module Movie
 
       def initialize(@persistence_id : String, @expected_revision : Int64, @actual_revision : Int64)
         super("Concurrent persistence write for #{@persistence_id}: expected revision #{@expected_revision}, actual #{@actual_revision}")
+      end
+    end
+
+    class OperationConflictError < Exception
+      getter persistence_id : String
+      getter operation_id : OperationId
+
+      def initialize(@persistence_id : String, @operation_id : OperationId)
+        super("Persistence operation #{@operation_id.value} was reused with different content for #{@persistence_id}")
       end
     end
 
@@ -84,9 +113,15 @@ module Movie
     struct AppendEvents
       getter persistence_id : String
       getter expected_revision : Int64
+      getter operation_id : OperationId
       getter events : Array(SerializedEvent)
 
-      def initialize(@persistence_id : String, @expected_revision : Int64, @events : Array(SerializedEvent))
+      def initialize(
+        @persistence_id : String,
+        @expected_revision : Int64,
+        @operation_id : OperationId,
+        @events : Array(SerializedEvent),
+      )
       end
     end
 
@@ -123,10 +158,17 @@ module Movie
     struct SaveState
       getter persistence_id : String
       getter expected_revision : Int64
+      getter operation_id : OperationId
       getter manifest : String
       getter payload : String
 
-      def initialize(@persistence_id : String, @expected_revision : Int64, @manifest : String, @payload : String)
+      def initialize(
+        @persistence_id : String,
+        @expected_revision : Int64,
+        @operation_id : OperationId,
+        @manifest : String,
+        @payload : String,
+      )
       end
     end
 
@@ -140,8 +182,9 @@ module Movie
     struct DeleteState
       getter persistence_id : String
       getter expected_revision : Int64
+      getter operation_id : OperationId
 
-      def initialize(@persistence_id : String, @expected_revision : Int64)
+      def initialize(@persistence_id : String, @expected_revision : Int64, @operation_id : OperationId)
       end
     end
 
@@ -202,8 +245,12 @@ module Movie
 
       def close
         _, changed = @stopped.compare_and_set(false, true)
-        return unless changed
-        @jobs.close
+        if changed
+          begin
+            @jobs.close
+          rescue Channel::ClosedError
+          end
+        end
         @execution_context.wait
       end
 
@@ -227,6 +274,11 @@ module Movie
         rescue Channel::ClosedError
         rescue error
           @ready.try_failure(error)
+          @stopped.set(true)
+          begin
+            @jobs.close
+          rescue Channel::ClosedError
+          end
           drain_with_failure(error)
         ensure
           connection.try &.close
@@ -253,105 +305,56 @@ module Movie
       def receive(message, context)
         case message
         when DbExec
-          begin
+          respond(context.sender, Bool) do
             exec(message)
-            Movie::Ask.reply_if_asked(context.sender, true)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, Bool)
+            true
           end
         when DbExecLastId
-          begin
-            id = exec_last_id(message)
-            Movie::Ask.reply_if_asked(context.sender, id)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, Int64)
-          end
+          respond(context.sender, Int64) { exec_last_id(message) }
         when DbQueryString
-          begin
-            value = query_string(message)
-            Movie::Ask.reply_if_asked(context.sender, value)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, String?)
-          end
+          respond(context.sender, String?) { query_string(message) }
         when DbQueryStrings
-          begin
-            values = query_strings(message)
-            Movie::Ask.reply_if_asked(context.sender, values)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, Array(String))
-          end
+          respond(context.sender, Array(String)) { query_strings(message) }
         when EnsureEventStore
-          begin
+          respond(context.sender, Bool) do
             ensure_event_store
-            Movie::Ask.reply_if_asked(context.sender, true)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, Bool)
+            true
           end
         when EnsureStateStore
-          begin
+          respond(context.sender, Bool) do
             ensure_state_store
-            Movie::Ask.reply_if_asked(context.sender, true)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, Bool)
+            true
           end
         when AppendEvents
-          begin
-            revision = append_events(message)
-            Movie::Ask.reply_if_asked(context.sender, revision)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, Int64)
-          end
+          respond(context.sender, WriteResult) { append_events(message) }
         when LoadEvents
-          begin
-            events = load_events(message)
-            Movie::Ask.reply_if_asked(context.sender, events)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, Array(StoredEvent))
-          end
+          respond(context.sender, Array(StoredEvent)) { load_events(message) }
         when SaveSnapshot
-          begin
+          respond(context.sender, Bool) do
             save_snapshot(message)
-            Movie::Ask.reply_if_asked(context.sender, true)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, Bool)
+            true
           end
         when LoadSnapshot
-          begin
-            snapshot = load_snapshot(message)
-            Movie::Ask.reply_if_asked(context.sender, snapshot)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, SnapshotRecord?)
-          end
+          respond(context.sender, SnapshotRecord?) { load_snapshot(message) }
         when DeleteSnapshot
-          begin
+          respond(context.sender, Bool) do
             delete_snapshot(message)
-            Movie::Ask.reply_if_asked(context.sender, true)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, Bool)
+            true
           end
         when SaveState
-          begin
-            revision = save_state(message)
-            Movie::Ask.reply_if_asked(context.sender, revision)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, Int64)
-          end
+          respond(context.sender, WriteResult) { save_state(message) }
         when LoadState
-          begin
-            state = load_state(message)
-            Movie::Ask.reply_if_asked(context.sender, state)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, StateRecord?)
-          end
+          respond(context.sender, StateRecord?) { load_state(message) }
         when DeleteState
-          begin
-            revision = delete_state(message)
-            Movie::Ask.reply_if_asked(context.sender, revision)
-          rescue error
-            Movie::Ask.fail_if_asked(context.sender, error, Int64)
-          end
+          respond(context.sender, WriteResult) { delete_state(message) }
         end
         Movie::Behaviors(ConnectionMessage).same
+      end
+
+      private def respond(sender : Movie::ActorRefBase?, response_type : T.class, &operation : -> T) forall T
+        Movie::Ask.reply_if_asked(sender, operation.call)
+      rescue error
+        Movie::Ask.fail_if_asked(sender, error, response_type)
       end
 
       def on_signal(signal : SystemMessage)
@@ -430,6 +433,15 @@ module Movie
             revision INTEGER NOT NULL
           )
         SQL
+        conn.exec(<<-SQL)
+          CREATE TABLE IF NOT EXISTS journal_operation (
+            persistence_id TEXT NOT NULL,
+            operation_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            PRIMARY KEY (persistence_id, operation_id)
+          )
+        SQL
       end
 
       private def synchronize_event_stream_revisions(connection : DB::Connection)
@@ -461,6 +473,15 @@ module Movie
             payload TEXT,
             deleted INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          )
+        SQL
+        conn.exec(<<-SQL)
+          CREATE TABLE IF NOT EXISTS state_operation (
+            persistence_id TEXT NOT NULL,
+            operation_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            PRIMARY KEY (persistence_id, operation_id)
           )
         SQL
       end
@@ -522,13 +543,36 @@ module Movie
         columns
       end
 
-      private def append_events(message : AppendEvents) : Int64
+      private def append_events(message : AppendEvents) : WriteResult
         with_connection { |connection| append_events(connection, message) }
       end
 
-      private def append_events(connection : DB::Connection, message : AppendEvents) : Int64
+      private def append_events(connection : DB::Connection, message : AppendEvents) : WriteResult
+        fingerprint = event_fingerprint(message.events)
         result = connection.transaction do |transaction|
           conn = transaction.connection
+          operation = conn.exec(
+            "INSERT INTO journal_operation (persistence_id, operation_id, fingerprint, revision) " +
+            "VALUES (?, ?, ?, ?) ON CONFLICT(persistence_id, operation_id) DO NOTHING",
+            args: [
+              message.persistence_id,
+              message.operation_id.value,
+              fingerprint,
+              message.expected_revision + message.events.size,
+            ] of DB::Any
+          )
+          unless operation.rows_affected == 1
+            stored = conn.query_one(
+              "SELECT fingerprint, revision FROM journal_operation WHERE persistence_id = ? AND operation_id = ?",
+              args: [message.persistence_id, message.operation_id.value] of DB::Any,
+              as: {String, Int64}
+            )
+            unless stored[0] == fingerprint
+              raise OperationConflictError.new(message.persistence_id, message.operation_id)
+            end
+            next WriteResult.new(stored[1], true)
+          end
+
           conn.exec(
             "INSERT INTO event_stream (persistence_id, revision) VALUES (?, 0) ON CONFLICT(persistence_id) DO NOTHING",
             args: [message.persistence_id] of DB::Any
@@ -539,7 +583,7 @@ module Movie
             unless actual == message.expected_revision
               raise ConcurrentWriteError.new(message.persistence_id, message.expected_revision, actual)
             end
-            next actual
+            next WriteResult.new(actual, false)
           end
 
           next_revision = message.expected_revision + message.events.size
@@ -560,7 +604,7 @@ module Movie
               args: [message.persistence_id, sequence_nr, event.manifest, event.payload] of DB::Any
             )
           end
-          sequence_nr
+          WriteResult.new(sequence_nr, false)
         end
         result.not_nil!
       rescue error : SQLite3::Exception
@@ -569,6 +613,15 @@ module Movie
           raise ConcurrentWriteError.new(message.persistence_id, message.expected_revision, actual)
         end
         raise error
+      end
+
+      private def event_fingerprint(events : Array(SerializedEvent)) : String
+        Digest::SHA256.hexdigest do |digest|
+          events.each do |event|
+            digest << event.manifest.bytesize.to_s << ":" << event.manifest
+            digest << event.payload.bytesize.to_s << ":" << event.payload
+          end
+        end
       end
 
       private def event_revision(conn : DB::Connection, persistence_id : String) : Int64
@@ -625,23 +678,31 @@ module Movie
         end
       end
 
-      private def save_state(message : SaveState) : Int64
-        write_state(message.persistence_id, message.expected_revision, message.manifest, message.payload, false)
+      private def save_state(message : SaveState) : WriteResult
+        write_state(
+          message.persistence_id,
+          message.expected_revision,
+          message.operation_id,
+          message.manifest,
+          message.payload,
+          false
+        )
       end
 
-      private def delete_state(message : DeleteState) : Int64
-        write_state(message.persistence_id, message.expected_revision, "deleted", nil, true)
+      private def delete_state(message : DeleteState) : WriteResult
+        write_state(message.persistence_id, message.expected_revision, message.operation_id, "deleted", nil, true)
       end
 
       private def write_state(
         persistence_id : String,
         expected_revision : Int64,
+        operation_id : OperationId,
         manifest : String,
         payload : String?,
         deleted : Bool,
-      ) : Int64
+      ) : WriteResult
         with_connection do |connection|
-          write_state(connection, persistence_id, expected_revision, manifest, payload, deleted)
+          write_state(connection, persistence_id, expected_revision, operation_id, manifest, payload, deleted)
         end
       end
 
@@ -649,30 +710,75 @@ module Movie
         connection : DB::Connection,
         persistence_id : String,
         expected_revision : Int64,
+        operation_id : OperationId,
         manifest : String,
         payload : String?,
         deleted : Bool,
-      ) : Int64
+      ) : WriteResult
         revision = expected_revision + 1
-        result = connection.exec(
-          "INSERT INTO durable_state (persistence_id, revision, manifest, payload, deleted, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) " +
-          "ON CONFLICT(persistence_id) DO UPDATE SET revision = excluded.revision, " +
-          "manifest = excluded.manifest, payload = excluded.payload, deleted = excluded.deleted, " +
-          "updated_at = CURRENT_TIMESTAMP WHERE durable_state.revision = ?",
-          args: [persistence_id, revision, manifest, payload, deleted ? 1_i64 : 0_i64, expected_revision] of DB::Any
-        )
-        unless result.rows_affected == 1
-          actual = state_revision(connection, persistence_id)
-          raise ConcurrentWriteError.new(persistence_id, expected_revision, actual)
+        fingerprint = state_fingerprint(manifest, payload, deleted)
+        result = connection.transaction do |transaction|
+          conn = transaction.connection
+          operation = conn.exec(
+            "INSERT INTO state_operation (persistence_id, operation_id, fingerprint, revision) " +
+            "VALUES (?, ?, ?, ?) ON CONFLICT(persistence_id, operation_id) DO NOTHING",
+            args: [persistence_id, operation_id.value, fingerprint, revision] of DB::Any
+          )
+          unless operation.rows_affected == 1
+            stored = conn.query_one(
+              "SELECT fingerprint, revision FROM state_operation WHERE persistence_id = ? AND operation_id = ?",
+              args: [persistence_id, operation_id.value] of DB::Any,
+              as: {String, Int64}
+            )
+            unless stored[0] == fingerprint
+              raise OperationConflictError.new(persistence_id, operation_id)
+            end
+            next WriteResult.new(stored[1], true)
+          end
+
+          write = conn.exec(
+            "INSERT INTO durable_state (persistence_id, revision, manifest, payload, deleted, updated_at) " +
+            "SELECT ?, ?, ?, ?, ?, CURRENT_TIMESTAMP " +
+            "WHERE ? = 0 OR EXISTS (SELECT 1 FROM durable_state WHERE persistence_id = ?) " +
+            "ON CONFLICT(persistence_id) DO UPDATE SET revision = excluded.revision, " +
+            "manifest = excluded.manifest, payload = excluded.payload, deleted = excluded.deleted, " +
+            "updated_at = CURRENT_TIMESTAMP WHERE durable_state.revision = ?",
+            args: [
+              persistence_id,
+              revision,
+              manifest,
+              payload,
+              deleted ? 1_i64 : 0_i64,
+              expected_revision,
+              persistence_id,
+              expected_revision,
+            ] of DB::Any
+          )
+          unless write.rows_affected == 1
+            actual = state_revision(conn, persistence_id)
+            raise ConcurrentWriteError.new(persistence_id, expected_revision, actual)
+          end
+          WriteResult.new(revision, false)
         end
-        revision
+        result.not_nil!
       rescue error : SQLite3::Exception
         actual = state_revision(connection, persistence_id)
         if actual != expected_revision
           raise ConcurrentWriteError.new(persistence_id, expected_revision, actual)
         end
         raise error
+      end
+
+      private def state_fingerprint(manifest : String, payload : String?, deleted : Bool) : String
+        Digest::SHA256.hexdigest do |digest|
+          digest << manifest.bytesize.to_s << ":" << manifest
+          if value = payload
+            digest << value.bytesize.to_s << ":" << value
+          else
+            digest << "nil"
+          end
+          digest << (deleted ? "1" : "0")
+        end
       end
 
       private def state_revision(conn : DB::Connection, persistence_id : String) : Int64
@@ -787,16 +893,21 @@ module Movie
         @timeout : Time::Span,
       )
         @factories = {} of String => Factory
+        @mutex = Mutex.new
       end
 
       def register(key : String, factory : Factory)
-        raise "Entity factory already registered for #{key}" if @factories.has_key?(key)
-        @factories[key] = factory
+        @mutex.synchronize do
+          raise "Entity factory already registered for #{key}" if @factories.has_key?(key)
+          @factories[key] = factory
+        end
       end
 
       def resolve(persistence_id : Id) : Movie::ActorRefBase
-        spawn_proc = @factories[persistence_id.entity_type]? ||
-                     raise "Entity type not registered: #{persistence_id.entity_type}"
+        spawn_proc = @mutex.synchronize do
+          @factories[persistence_id.entity_type]? ||
+            raise "Entity type not registered: #{persistence_id.entity_type}"
+        end
         @system.ask(
           @registry,
           GetEntity.new(persistence_id, spawn_proc),
@@ -808,6 +919,38 @@ module Movie
 
     alias EventStoreMessage = AppendEvents | LoadEvents | SaveSnapshot | LoadSnapshot | DeleteSnapshot
     alias StateStoreMessage = SaveState | LoadState | DeleteState
+
+    private module StoreForwarder
+      def self.forward(
+        ctx : Movie::ActorContext(U),
+        pool : Movie::ActorRef(ConnectionMessage),
+        timeout : Time::Span,
+        message : M,
+        response_type : T.class,
+        &before : -> B
+      ) forall U, M, T, B
+        sender = ctx.sender
+        begin
+          before.call
+          future = ctx.ask(pool, message, response_type, timeout)
+        rescue error
+          Movie::Ask.fail_if_asked(sender, error, response_type)
+          return
+        end
+
+        future.on_complete do |result|
+          case result.status
+          when Movie::FutureStatus::Success
+            Movie::Ask.reply_if_asked(sender, result.value.as(T))
+          when Movie::FutureStatus::Failure
+            Movie::Ask.fail_if_asked(sender, result.error.not_nil!, response_type)
+          when Movie::FutureStatus::Cancelled
+            Movie::Ask.fail_if_asked(sender, Movie::FutureCancelled.new, response_type)
+          when Movie::FutureStatus::Pending
+          end
+        end
+      end
+    end
 
     # Actor that serializes access to the event journal.
     class EventStoreActor < Movie::AbstractBehavior(EventStoreMessage)
@@ -821,7 +964,7 @@ module Movie
       def receive(message, context)
         case message
         when AppendEvents
-          execute(context, message, Int64)
+          execute(context, message, WriteResult)
         when LoadEvents
           execute(context, message, Array(StoredEvent))
         when SaveSnapshot
@@ -835,25 +978,7 @@ module Movie
       end
 
       private def execute(ctx : Movie::ActorContext(U), message : M, response_type : T.class) forall U, M, T
-        begin
-          ensure_schema(ctx)
-        rescue error
-          Movie::Ask.fail_if_asked(ctx.sender, error, response_type)
-          return
-        end
-
-        sender = ctx.sender
-        ctx.ask(@pool, message, response_type, @timeout).on_complete do |result|
-          case result.status
-          when Movie::FutureStatus::Success
-            Movie::Ask.reply_if_asked(sender, result.value.as(T))
-          when Movie::FutureStatus::Failure
-            Movie::Ask.fail_if_asked(sender, result.error.not_nil!, response_type)
-          when Movie::FutureStatus::Cancelled
-            Movie::Ask.fail_if_asked(sender, Movie::FutureCancelled.new, response_type)
-          when Movie::FutureStatus::Pending
-          end
-        end
+        StoreForwarder.forward(ctx, @pool, @timeout, message, response_type) { ensure_schema(ctx) }
       end
 
       private def ensure_schema(ctx : Movie::ActorContext(U)) forall U
@@ -875,35 +1000,17 @@ module Movie
       def receive(message, context)
         case message
         when SaveState
-          execute(context, message, Int64)
+          execute(context, message, WriteResult)
         when LoadState
           execute(context, message, StateRecord?)
         when DeleteState
-          execute(context, message, Int64)
+          execute(context, message, WriteResult)
         end
         Movie::Behaviors(StateStoreMessage).same
       end
 
       private def execute(ctx : Movie::ActorContext(U), message : M, response_type : T.class) forall U, M, T
-        begin
-          ensure_schema(ctx)
-        rescue error
-          Movie::Ask.fail_if_asked(ctx.sender, error, response_type)
-          return
-        end
-
-        sender = ctx.sender
-        ctx.ask(@pool, message, response_type, @timeout).on_complete do |result|
-          case result.status
-          when Movie::FutureStatus::Success
-            Movie::Ask.reply_if_asked(sender, result.value.as(T))
-          when Movie::FutureStatus::Failure
-            Movie::Ask.fail_if_asked(sender, result.error.not_nil!, response_type)
-          when Movie::FutureStatus::Cancelled
-            Movie::Ask.fail_if_asked(sender, Movie::FutureCancelled.new, response_type)
-          when Movie::FutureStatus::Pending
-          end
-        end
+        StoreForwarder.forward(ctx, @pool, @timeout, message, response_type) { ensure_schema(ctx) }
       end
 
       private def ensure_schema(ctx : Movie::ActorContext(U)) forall U
@@ -921,9 +1028,11 @@ module Movie
         ctx : Movie::ActorContext(U),
         persistence_id : String,
         expected_revision : Int64,
+        operation_id : OperationId,
         events : Array(SerializedEvent),
-      ) : Int64 forall U
-        ctx.ask(@ref, AppendEvents.new(persistence_id, expected_revision, events), Int64, @timeout).await(@timeout)
+      ) : WriteResult forall U
+        message = AppendEvents.new(persistence_id, expected_revision, operation_id, events)
+        ctx.ask(@ref, message, WriteResult, @timeout).await(@timeout)
       end
 
       def read(ctx : Movie::ActorContext(U), persistence_id : String, after_sequence_nr : Int64 = 0_i64) : Array(StoredEvent) forall U
@@ -951,18 +1060,26 @@ module Movie
         ctx : Movie::ActorContext(U),
         persistence_id : String,
         expected_revision : Int64,
+        operation_id : OperationId,
         manifest : String,
         payload : String,
-      ) : Int64 forall U
-        ctx.ask(@ref, SaveState.new(persistence_id, expected_revision, manifest, payload), Int64, @timeout).await(@timeout)
+      ) : WriteResult forall U
+        message = SaveState.new(persistence_id, expected_revision, operation_id, manifest, payload)
+        ctx.ask(@ref, message, WriteResult, @timeout).await(@timeout)
       end
 
       def load(ctx : Movie::ActorContext(U), persistence_id : String) : StateRecord? forall U
         ctx.ask(@ref, LoadState.new(persistence_id), StateRecord?, @timeout).await(@timeout)
       end
 
-      def delete(ctx : Movie::ActorContext(U), persistence_id : String, expected_revision : Int64) : Int64 forall U
-        ctx.ask(@ref, DeleteState.new(persistence_id, expected_revision), Int64, @timeout).await(@timeout)
+      def delete(
+        ctx : Movie::ActorContext(U),
+        persistence_id : String,
+        expected_revision : Int64,
+        operation_id : OperationId,
+      ) : WriteResult forall U
+        message = DeleteState.new(persistence_id, expected_revision, operation_id)
+        ctx.ask(@ref, message, WriteResult, @timeout).await(@timeout)
       end
     end
   end
@@ -1002,10 +1119,15 @@ module Movie
 
   class EventEffect(E, S)
     getter events : Array(E)
+    getter operation_id : Persistence::OperationId?
     getter callbacks : Array(Proc(S, Nil))
     getter? stop
 
-    def initialize(@events : Array(E) = [] of E, @stop : Bool = false)
+    def initialize(
+      @events : Array(E) = [] of E,
+      @operation_id : Persistence::OperationId? = nil,
+      @stop : Bool = false,
+    )
       @callbacks = [] of Proc(S, Nil)
     end
 
@@ -1024,10 +1146,16 @@ module Movie
   class DurableEffect(S)
     getter action : DurableAction
     getter state : S?
+    getter operation_id : Persistence::OperationId?
     getter callbacks : Array(Proc(S, Nil))
     getter? stop
 
-    def initialize(@action : DurableAction, @state : S? = nil, @stop : Bool = false)
+    def initialize(
+      @action : DurableAction,
+      @state : S? = nil,
+      @operation_id : Persistence::OperationId? = nil,
+      @stop : Bool = false,
+    )
       @callbacks = [] of Proc(S, Nil)
     end
 
@@ -1048,9 +1176,10 @@ module Movie
 
     def receive(message : C, ctx : ActorContext(C))
       recover(ctx) unless @recovered
-      effect = handle_command(@state, message, ctx)
+      command_state = copy_state(@state)
+      effect = handle_command(command_state, message, ctx)
       previous_sequence_nr = @sequence_nr
-      next_state = @state
+      next_state = command_state
       effect.events.each do |event|
         next_state = apply_event(next_state, event)
       end
@@ -1060,9 +1189,21 @@ module Movie
           Movie::Persistence::SerializedEvent.new(event_manifest(event), serialize_event(event))
         end
         begin
-          @sequence_nr = @store.append(ctx, @persistence_id, @sequence_nr, serialized)
-          @state = next_state
-          save_snapshot_if_due(ctx, previous_sequence_nr)
+          result = @store.append(
+            ctx,
+            @persistence_id,
+            @sequence_nr,
+            effect.operation_id.not_nil!,
+            serialized
+          )
+          @sequence_nr = result.revision
+          if result.duplicate
+            reset_recovery_state
+            recover(ctx)
+          else
+            @state = next_state
+            save_snapshot_if_due(ctx, previous_sequence_nr)
+          end
         rescue error
           on_persist_failure(error)
           raise error
@@ -1084,12 +1225,15 @@ module Movie
     protected abstract def apply_event(state : S, event : E) : S
     protected abstract def handle_command(state : S, command : C, ctx : ActorContext(C)) : EventEffect(E, S)
 
-    protected def persist(event : E) : EventEffect(E, S)
-      EventEffect(E, S).new([event])
+    protected def persist(event : E, operation_id : Persistence::OperationId) : EventEffect(E, S)
+      EventEffect(E, S).new([event], operation_id)
     end
 
-    protected def persist_all(events : Enumerable(E)) : EventEffect(E, S)
-      EventEffect(E, S).new(events.to_a)
+    protected def persist_all(
+      events : Enumerable(E),
+      operation_id : Persistence::OperationId,
+    ) : EventEffect(E, S)
+      EventEffect(E, S).new(events.to_a, operation_id)
     end
 
     protected def none : EventEffect(E, S)
@@ -1136,9 +1280,14 @@ module Movie
       String.build { |json| event.to_json(json) }
     end
 
+    private def copy_state(state : S) : S
+      payload = String.build { |json| state.to_json(json) }
+      deserialize_snapshot(snapshot_manifest(state), payload)
+    end
+
     private def recover(ctx : ActorContext(C))
       return if @recovered
-      state = empty_state
+      state = copy_state(empty_state)
       sequence_nr = 0_i64
 
       if snapshot = @store.load_snapshot(ctx, @persistence_id)
@@ -1194,17 +1343,36 @@ module Movie
 
     def receive(message : C, ctx : ActorContext(C))
       recover(ctx) unless @loaded
-      effect = handle_command(@state, message, ctx)
+      effect = handle_command(copy_state(@state), message, ctx)
       begin
         case effect.action
         when DurableAction::Persist
           next_state = effect.state.not_nil!
           payload = String.build { |json| next_state.to_json(json) }
-          @revision = @store.save(ctx, @persistence_id, @revision, state_manifest(next_state), payload)
-          @state = next_state
+          result = @store.save(
+            ctx,
+            @persistence_id,
+            @revision,
+            effect.operation_id.not_nil!,
+            state_manifest(next_state),
+            payload
+          )
+          @revision = result.revision
+          if result.duplicate
+            reset_recovery_state
+            recover(ctx)
+          else
+            @state = next_state
+          end
         when DurableAction::Delete
-          @revision = @store.delete(ctx, @persistence_id, @revision)
-          @state = empty_state
+          result = @store.delete(ctx, @persistence_id, @revision, effect.operation_id.not_nil!)
+          @revision = result.revision
+          if result.duplicate
+            reset_recovery_state
+            recover(ctx)
+          else
+            @state = empty_state
+          end
         when DurableAction::None
         end
       rescue error
@@ -1226,12 +1394,12 @@ module Movie
     protected abstract def empty_state : S
     protected abstract def handle_command(state : S, command : C, ctx : ActorContext(C)) : DurableEffect(S)
 
-    protected def persist(state : S) : DurableEffect(S)
-      DurableEffect(S).new(DurableAction::Persist, state)
+    protected def persist(state : S, operation_id : Persistence::OperationId) : DurableEffect(S)
+      DurableEffect(S).new(DurableAction::Persist, state, operation_id)
     end
 
-    protected def delete : DurableEffect(S)
-      DurableEffect(S).new(DurableAction::Delete)
+    protected def delete(operation_id : Persistence::OperationId) : DurableEffect(S)
+      DurableEffect(S).new(DurableAction::Delete, operation_id: operation_id)
     end
 
     protected def none : DurableEffect(S)
@@ -1262,6 +1430,11 @@ module Movie
     protected def on_persistence_signal(signal : SystemMessage)
     end
 
+    private def copy_state(state : S) : S
+      payload = String.build { |json| state.to_json(json) }
+      deserialize_state(state_manifest(state), payload)
+    end
+
     private def recover(ctx : ActorContext(C))
       return if @loaded
       if stored = @store.load(ctx, @persistence_id)
@@ -1290,11 +1463,11 @@ module Movie
     end
   end
 
-  class EventSourcingExtension < Extension
+  abstract class PersistentEntityExtension(SM, S) < Extension
     def initialize(
       @system : AbstractActorSystem,
-      @store_ref : Movie::ActorRef(Persistence::EventStoreMessage),
-      @store : Persistence::EventStoreClient,
+      @store_ref : Movie::ActorRef(SM),
+      @store : S,
       @registry : Movie::ActorRef(Persistence::RegistryMessage),
       @timeout : Time::Span = 5.seconds,
     )
@@ -1306,61 +1479,43 @@ module Movie
       @store_ref.send_system(Movie::STOP)
     end
 
-    def register_entity(key : String, &factory : Persistence::Id, Persistence::EventStoreClient -> AbstractBehavior(T)) forall T
+    def register_entity(
+      entity_type : E.class,
+      message_type : C.class,
+      &factory : Persistence::Id, S -> AbstractBehavior(C)
+    ) : Persistence::EntityType(C) forall E, C
+      key = entity_type.name
       spawn = ->(ctx : Movie::ActorContext(Persistence::RegistryMessage), id : Persistence::Id) do
         behavior = factory.call(id, @store)
         ctx.spawn(behavior).as(Movie::ActorRefBase)
       end
       @entities.register(key, spawn)
+      Persistence::EntityType(C).new(key)
     end
 
-    def register_entity(type : T.class, &factory : Persistence::Id, Persistence::EventStoreClient -> AbstractBehavior(U)) forall T, U
-      register_entity(type.name, &factory)
-    end
-
-    def get_entity_ref(persistence_id : Persistence::Id) : Movie::ActorRefBase
-      @entities.resolve(persistence_id)
-    end
-
-    def get_entity_ref_as(type : T.class, persistence_id : Persistence::Id) : ActorRef(T) forall T
-      get_entity_ref(persistence_id).as(ActorRef(T))
+    def get_entity_ref(persistence_id : Persistence::EntityId(T)) : ActorRef(T) forall T
+      @entities.resolve(persistence_id.value).as(ActorRef(T))
     end
   end
 
-  class DurableStateExtension < Extension
-    def initialize(
-      @system : AbstractActorSystem,
-      @store_ref : Movie::ActorRef(Persistence::StateStoreMessage),
-      @store : Persistence::StateStoreClient,
-      @registry : Movie::ActorRef(Persistence::RegistryMessage),
-      @timeout : Time::Span = 5.seconds,
-    )
-      @entities = Persistence::EntityProvider.new(@system, @registry, @timeout)
-    end
-
+  class EventSourcingExtension < PersistentEntityExtension(
+    Persistence::EventStoreMessage,
+    Persistence::EventStoreClient,
+  )
+    # Keep a concrete virtual entrypoint so Extension#stop dispatch compiles for
+    # this specialization on every supported Crystal version.
     def stop
-      @registry.send_system(Movie::STOP)
-      @store_ref.send_system(Movie::STOP)
+      super
     end
+  end
 
-    def register_entity(key : String, &factory : Persistence::Id, Persistence::StateStoreClient -> AbstractBehavior(T)) forall T
-      spawn = ->(ctx : Movie::ActorContext(Persistence::RegistryMessage), id : Persistence::Id) do
-        behavior = factory.call(id, @store)
-        ctx.spawn(behavior).as(Movie::ActorRefBase)
-      end
-      @entities.register(key, spawn)
-    end
-
-    def register_entity(type : T.class, &factory : Persistence::Id, Persistence::StateStoreClient -> AbstractBehavior(U)) forall T, U
-      register_entity(type.name, &factory)
-    end
-
-    def get_entity_ref(persistence_id : Persistence::Id) : Movie::ActorRefBase
-      @entities.resolve(persistence_id)
-    end
-
-    def get_entity_ref_as(type : T.class, persistence_id : Persistence::Id) : ActorRef(T) forall T
-      get_entity_ref(persistence_id).as(ActorRef(T))
+  class DurableStateExtension < PersistentEntityExtension(
+    Persistence::StateStoreMessage,
+    Persistence::StateStoreClient,
+  )
+    # See EventSourcingExtension#stop.
+    def stop
+      super
     end
   end
 

@@ -4,7 +4,7 @@
 
 **Depends on:** Epic 14.
 
-**Status:** In progress.
+**Status:** Completed (2026-08-30).
 
 **Done when:**
 
@@ -18,64 +18,69 @@
 - public persistence contracts and maturity are documented,
 - targeted and full verification plus mandatory two-axis review are complete.
 
-## Task 15.1: Establish persistence failure regressions
+## Integrated delivery task
 
-**Status:** In progress.
+The user requested the complete persistence contract as one cohesive delivery. The sections below are acceptance milestones of that single task, not independently shippable tasks: effects depend on revisions, timeout safety depends on operation ids and recovery, and snapshots depend on the same journal schema.
+
+### Milestone 15.1: Establish persistence failure regressions
+
+**Status:** Complete.
 
 - Cover original database error propagation instead of timeout-only failure.
 - Cover entity eviction and re-resolution after termination.
 - Cover restart recovery for event-sourced and durable-state behaviors.
 
-## Task 15.2: Introduce typed effects
+### Milestone 15.2: Introduce typed effects
 
-**Status:** Pending.
+**Status:** Complete.
 
 - Replace `Array(Event)` and nullable-state command results with typed event and durable effects.
 - Support `persist`, `persist_all`, `delete`, `none`, `stop`, and post-persist callbacks.
+- Require a stable operation id for persisted commands and deduplicate retries atomically.
 - Prevent callbacks and in-memory mutation before a successful write.
 
-## Task 15.3: Add atomic per-entity journal revisions
+### Milestone 15.3: Add atomic per-entity journal revisions
 
-**Status:** Pending.
+**Status:** Complete.
 
 - Store `(persistence_id, sequence_nr)` as the journal identity.
 - Append all events from one command in a single transaction.
 - Reject stale expected revisions with a typed concurrency error.
 
-## Task 15.4: Make recovery restart-safe
+### Milestone 15.4: Make recovery restart-safe
 
-**Status:** Pending.
+**Status:** Complete.
 
 - Reset persistent state and recovery flags on restart.
 - Define recovery and persistence failure hooks.
 - Ensure failed commands do not partially update state or run post-persist callbacks.
 
-## Task 15.5: Repair entity lifecycle
+### Milestone 15.5: Repair entity lifecycle
 
-**Status:** Pending.
+**Status:** Complete.
 
 - Watch spawned entities, remove terminated references, and respawn on the next lookup.
 - Keep event-sourced and durable registries type-safe without duplicated factory logic.
 
-## Task 15.6: Add snapshots and schema evolution
+### Milestone 15.6: Add snapshots and schema evolution
 
-**Status:** Pending.
+**Status:** Complete.
 
 - Add event manifests and a typed upcast hook.
 - Add snapshot save/load/delete contracts and recovery from snapshot plus later events.
 - Keep snapshot policy explicit in the behavior API.
 
-## Task 15.7: Isolate SQLite blocking I/O
+### Milestone 15.7: Isolate SQLite blocking I/O
 
-**Status:** Pending.
+**Status:** Complete.
 
 - Execute each SQLite connection on a dedicated bounded blocking worker.
 - Preserve connection affinity, orderly shutdown, and original exception propagation.
 - Keep actor dispatcher threads free from native database calls.
 
-## Task 15.8: Document and verify the public contract
+### Milestone 15.8: Document and verify the public contract
 
-**Status:** Pending.
+**Status:** Complete.
 
 - Add a dedicated persistence guide and complete public example.
 - Update feature maturity and configuration documentation.
@@ -83,12 +88,24 @@
 
 ## Completion checklist
 
-- [ ] Failing test written first.
-- [ ] Failing test observed red.
-- [ ] Minimal implementation written.
-- [ ] Targeted verification green.
-- [ ] Broader verification green.
-- [ ] Formatting check green.
-- [ ] Docs/examples updated if needed.
-- [ ] Review requested.
-- [ ] Review feedback addressed.
+- [x] Failing test written first.
+- [x] Failing test observed red.
+- [x] Minimal implementation written.
+- [x] Targeted verification green.
+- [x] Broader verification green.
+- [x] Formatting check green.
+- [x] Docs/examples updated if needed.
+- [x] Review requested.
+- [x] Review feedback addressed.
+
+## Final verification
+
+- Persistence specs: 67 examples, 0 failures on the minimum supported Crystal 1.19.1.
+- Full Movie specs: 277 examples, 0 failures on Crystal 1.21 with execution contexts enabled.
+- Every example builds; the persistence example also recovers the expected counter value of 5.
+- Dependency, formatting, and whitespace checks pass.
+- The final Spec review has no findings, and the final Standards review has no hard findings.
+
+## Deferred maintainability notes
+
+Two non-blocking review observations are intentionally left for a later refactor: split `src/movie/persistence.cr` into smaller modules with narrower ownership, and consider executable storage requests so a new operation does not need matching dispatch edits across several layers. Neither changes the completed persistence contract or its correctness guarantees.

@@ -19,8 +19,12 @@ end
 
 struct AddToCounter
   getter amount : Int32
+  getter operation_id : Movie::Persistence::OperationId
 
-  def initialize(@amount : Int32)
+  def initialize(
+    @amount : Int32,
+    @operation_id : Movie::Persistence::OperationId = Movie::Persistence::OperationId.random,
+  )
   end
 end
 
@@ -49,7 +53,7 @@ class PersistentCounter < Movie::EventSourcedBehavior(PersistentCounterCommand, 
   ) : Movie::EventEffect(CounterAdded, PersistentCounterState)
     case command
     when AddToCounter
-      persist(CounterAdded.new(command.amount))
+      persist(CounterAdded.new(command.amount), command.operation_id)
     when ReadCounter
       none.then_run { |current| command.reply_to << current.value }
     else
@@ -80,14 +84,11 @@ config = Movie::Config.builder
 
 system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, config)
 events = Movie::EventSourcing.get(system)
-events.register_entity(PersistentCounter) do |id, store|
+counter_type = events.register_entity(PersistentCounter, PersistentCounterCommand) do |id, store|
   PersistentCounter.new(id.persistence_id, store)
 end
 
-counter = events.get_entity_ref_as(
-  PersistentCounterCommand,
-  Movie::Persistence.id(PersistentCounter, "example")
-)
+counter = events.get_entity_ref(counter_type.id("example"))
 counter << AddToCounter.new(2)
 counter << AddToCounter.new(3)
 

@@ -13,8 +13,9 @@ module Movie
 
   struct SetName
     getter name : String
+    getter operation_id : Persistence::OperationId
 
-    def initialize(@name : String)
+    def initialize(@name : String, @operation_id : Persistence::OperationId = Persistence::OperationId.random)
     end
   end
 
@@ -26,6 +27,10 @@ module Movie
   end
 
   struct DeleteName
+    getter operation_id : Persistence::OperationId
+
+    def initialize(@operation_id : Persistence::OperationId = Persistence::OperationId.random)
+    end
   end
 
   alias NameCommand = SetName | GetName | DeleteName
@@ -38,11 +43,11 @@ module Movie
     def handle_command(state : NameState, command : NameCommand, ctx : ActorContext(NameCommand)) : DurableEffect(NameState)
       case command
       when SetName
-        persist(NameState.new(command.name))
+        persist(NameState.new(command.name), command.operation_id)
       when GetName
         none.then_run { |current| command.reply_to << current.name }
       when DeleteName
-        delete
+        delete(command.operation_id)
       else
         none
       end
@@ -70,11 +75,11 @@ describe Movie::DurableState do
     system = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same, config)
     ext = Movie::DurableState.get(system)
 
-    ext.register_entity(Movie::NameBehavior) do |pid, store|
+    name_type = ext.register_entity(Movie::NameBehavior, Movie::NameCommand) do |pid, store|
       Movie::NameBehavior.new(pid.persistence_id, store)
     end
 
-    name_ref = ext.get_entity_ref_as(Movie::NameCommand, Movie::Persistence.id(Movie::NameBehavior, "name-1"))
+    name_ref = ext.get_entity_ref(name_type.id("name-1"))
 
     name_ref << Movie::SetName.new("alice")
 
@@ -90,10 +95,11 @@ describe Movie::DurableState do
       Movie::Persistence::SaveState.new(
         "Movie::NameBehavior:name-1",
         1_i64,
+        Movie::Persistence::OperationId.new("external-name-update"),
         "name-v0",
         Movie::NameState.new("bob").to_json
       ),
-      Int64,
+      Movie::Persistence::WriteResult,
       2.seconds
     ).await(2.seconds)
 
@@ -126,10 +132,11 @@ describe Movie::DurableState do
         Movie::Persistence::SaveState.new(
           "Movie::NameBehavior:name-1",
           2_i64,
+          Movie::Persistence::OperationId.new("stale-state-update"),
           "name-v0",
           Movie::NameState.new("stale").to_json
         ),
-        Int64,
+        Movie::Persistence::WriteResult,
         2.seconds
       ).await(2.seconds)
     end
@@ -137,11 +144,11 @@ describe Movie::DurableState do
 
     system2 = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same, config)
     ext2 = Movie::DurableState.get(system2)
-    ext2.register_entity(Movie::NameBehavior) do |pid, store|
+    name_type2 = ext2.register_entity(Movie::NameBehavior, Movie::NameCommand) do |pid, store|
       Movie::NameBehavior.new(pid.persistence_id, store)
     end
 
-    name_ref2 = ext2.get_entity_ref_as(Movie::NameCommand, Movie::Persistence.id(Movie::NameBehavior, "name-1"))
+    name_ref2 = ext2.get_entity_ref(name_type2.id("name-1"))
 
     promise2 = Movie::Promise(String).new
     receiver2 = system2.spawn(Movie::StringReceiver.new(promise2))
