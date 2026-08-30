@@ -52,7 +52,7 @@ The existing actor-dispatch global mutex/hash pair measured roughly 15-28 millio
 
 ### Result
 
-Each inbound connection now owns the only 32 KiB socket-read buffer and a reusable 128-envelope array. The reader blocks for the first frame, then decodes only complete frames already retained in that buffer before delivering the ready batch. It never waits to enlarge a batch. Repeated synthetic decoded-delivery runs rose from about 40-63k to 136-184k msg/s while dispatch activations fell from roughly 35-61k to 1.9-2.0k. Partial frames, malformed payload recovery, FIFO delivery, and single-message latency retain their previous behavior.
+Each inbound connection now owns the only 32 KiB socket-read buffer and a reusable 128-envelope array. The reader blocks for the first frame, then decodes only complete frames already retained in that buffer before delivering the ready batch. It never waits to enlarge a batch. Repeated synthetic decoded-delivery runs rose from about 40-63k to 136-184k msg/s while dispatch activations fell from roughly 35-61k to 1.9-2.0k. A later protocol error is deferred until every valid envelope already accumulated ahead of it has been delivered, so batching preserves the previous valid-prefix behavior. Partial frames, malformed payload recovery, FIFO delivery, and single-message latency retain their previous behavior.
 
 ## Task 14.4: Re-run end-to-end comparisons
 
@@ -74,5 +74,5 @@ Repeated standard two-process medians rose from Epic 13's 48.5-50.6k to 170.1-17
 - [x] Broader verification green.
 - [x] Formatting check green.
 - [x] Docs/examples updated if needed.
-- [ ] Review requested.
+- [x] Review requested.
 - [ ] Review feedback addressed.

@@ -52,4 +52,50 @@ module Movie::Remote
       @size = @source.read(@buffer)
     end
   end
+
+  # Decodes one blocking frame followed by only the complete frames already
+  # retained by the connection reader. The returned array is reused and is
+  # valid until the next call.
+  class InboundFrameBatchDecoder
+    DEFAULT_BATCH_SIZE = 128
+
+    def initialize(
+      source : IO,
+      payload_decoder : JsonPayloadDecoder? = nil,
+      @batch_size : Int32 = DEFAULT_BATCH_SIZE,
+      buffer_size : Int32 = InboundFrameReader::DEFAULT_BUFFER_SIZE,
+    )
+      raise ArgumentError.new("batch_size must be positive") if @batch_size <= 0
+
+      @reader = InboundFrameReader.new(source, buffer_size)
+      @decoder = FrameCodec::Decoder.new(payload_decoder)
+      @batch = Array(WireEnvelope).new(@batch_size)
+      @pending_error = nil.as(Exception?)
+    end
+
+    def next_batch : Array(WireEnvelope)?
+      if error = @pending_error
+        @pending_error = nil
+        @batch.clear
+        raise error
+      end
+
+      @batch.clear
+      loop do
+        envelope = begin
+          @decoder.decode(@reader)
+        rescue ex : Exception
+          raise ex if @batch.empty?
+          @pending_error = ex
+          break
+        end
+
+        break unless envelope
+        @batch << envelope
+        break if @batch.size >= @batch_size || !@reader.complete_frame_buffered?
+      end
+
+      @batch.empty? ? nil : @batch
+    end
+  end
 end

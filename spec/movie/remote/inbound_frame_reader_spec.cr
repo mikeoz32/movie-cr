@@ -53,3 +53,63 @@ describe Movie::Remote::InboundFrameReader do
     reader.complete_frame_buffered?.should be_false
   end
 end
+
+describe Movie::Remote::InboundFrameBatchDecoder do
+  it "drains complete ready frames in FIFO order without another source read" do
+    frames = IO::Memory.new
+    encoder = Movie::Remote::FrameCodec::Encoder.new
+    3.times do |index|
+      encoder.encode(
+        Movie::Remote::WireEnvelope.user_message(
+          "movie://sys/user/target-#{index}",
+          "Unknown",
+          JSON::Any.new({} of String => JSON::Any)
+        ),
+        frames
+      )
+    end
+    source = InboundFrameChunkSource.new(frames.to_slice)
+    decoder = Movie::Remote::InboundFrameBatchDecoder.new(source)
+
+    batch = decoder.next_batch.not_nil!
+
+    batch.map(&.target_path).should eq((0...3).map { |index| "movie://sys/user/target-#{index}" })
+    source.reads.should eq(1)
+  end
+
+  it "returns one low-traffic frame without reading again to fill the batch" do
+    frame = Movie::Remote::FrameCodec.encode_to_bytes(Movie::Remote::WireEnvelope.heartbeat)
+    source = InboundFrameChunkSource.new(frame)
+    decoder = Movie::Remote::InboundFrameBatchDecoder.new(source)
+
+    decoder.next_batch.not_nil!.size.should eq(1)
+
+    source.reads.should eq(1)
+  end
+
+  it "bounds a ready batch and reuses the buffered remainder" do
+    frames = IO::Memory.new
+    encoder = Movie::Remote::FrameCodec::Encoder.new
+    150.times { encoder.encode(Movie::Remote::WireEnvelope.heartbeat, frames) }
+    source = InboundFrameChunkSource.new(frames.to_slice)
+    decoder = Movie::Remote::InboundFrameBatchDecoder.new(source, batch_size: 128)
+
+    decoder.next_batch.not_nil!.size.should eq(128)
+    decoder.next_batch.not_nil!.size.should eq(22)
+
+    source.reads.should eq(1)
+  end
+
+  it "returns valid ready frames before surfacing a later protocol error" do
+    frames = IO::Memory.new
+    Movie::Remote::FrameCodec::Encoder.new.encode(Movie::Remote::WireEnvelope.heartbeat, frames)
+    frames.write_bytes(0_u32, IO::ByteFormat::BigEndian)
+    source = InboundFrameChunkSource.new(frames.to_slice)
+    decoder = Movie::Remote::InboundFrameBatchDecoder.new(source)
+
+    decoder.next_batch.not_nil!.size.should eq(1)
+    expect_raises(Movie::Remote::MalformedFrameError) { decoder.next_batch }
+
+    source.reads.should eq(1)
+  end
+end

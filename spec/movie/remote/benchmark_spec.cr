@@ -13,6 +13,14 @@ module RemoteBenchmarkMeasurements
     yield
     (GC.stats.total_bytes - before) / iterations.to_f
   end
+
+  def rate_with_checksum(iterations : Int32, & : -> Int32) : {Float64, Int64}
+    checksum = 0_i64
+    elapsed = Time.measure do
+      iterations.times { checksum &+= yield }
+    end
+    {iterations / elapsed.total_seconds, checksum}
+  end
 end
 
 # Benchmark message types
@@ -259,25 +267,16 @@ if BENCH_ENABLED
         end
         isolated_contexts.each(&.wait)
 
-        context_checksum = 0_i64
-        context_elapsed = Time.measure do
-          iterations.times do
-            context_checksum &+= system.context(actor_id).not_nil!.ref.id
-          end
+        context_rate, context_checksum = RemoteBenchmarkMeasurements.rate_with_checksum(iterations) do
+          system.context(actor_id).not_nil!.ref.id
         end
 
-        path_checksum = 0_i64
-        path_elapsed = Time.measure do
-          iterations.times do
-            path_checksum &+= system.path_registry.resolve(target_path).not_nil!
-          end
+        path_rate, path_checksum = RemoteBenchmarkMeasurements.rate_with_checksum(iterations) do
+          system.path_registry.resolve(target_path).not_nil!
         end
 
-        registry_checksum = 0_i64
-        registry_elapsed = Time.measure do
-          iterations.times do
-            registry_checksum &+= 1 if Movie::Remote::MessageRegistry.registered?(BenchmarkMessage.name)
-          end
+        registry_rate, registry_checksum = RemoteBenchmarkMeasurements.rate_with_checksum(iterations) do
+          Movie::Remote::MessageRegistry.registered?(BenchmarkMessage.name) ? 1 : 0
         end
 
         context_checksum.should be > 0_i64
@@ -285,9 +284,9 @@ if BENCH_ENABLED
         registry_checksum.should be > 0_i64
         puts "\n  Receiver locks: actor-dispatch marker pair #{(iterations / dispatch_elapsed.total_seconds).round(0)} ops/s"
         puts "  Receiver locks: actor-dispatch marker pair, #{worker_count} workers #{(iterations / contended_elapsed.total_seconds).round(0)} ops/s"
-        puts "  Receiver locks: actor-context lookup #{(iterations / context_elapsed.total_seconds).round(0)} ops/s"
-        puts "  Receiver locks: exact-path lookup #{(iterations / path_elapsed.total_seconds).round(0)} ops/s"
-        puts "  Receiver locks: message-registry lookup #{(iterations / registry_elapsed.total_seconds).round(0)} ops/s"
+        puts "  Receiver locks: actor-context lookup #{context_rate.round(0)} ops/s"
+        puts "  Receiver locks: exact-path lookup #{path_rate.round(0)} ops/s"
+        puts "  Receiver locks: message-registry lookup #{registry_rate.round(0)} ops/s"
       ensure
         system.try &.shutdown
       end
