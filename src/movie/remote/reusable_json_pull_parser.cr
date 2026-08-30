@@ -25,7 +25,7 @@ module Movie::Remote::FrameCodec
 
     def release_excess(discard_buffer : Bool) : Nil
       @buffer = IO::Memory.new if discard_buffer
-      @string_pool = StringPool.new if @string_pool.size > MAX_RETAINED_KEYS
+      @string_pool = StringPool.new if discard_buffer || @string_pool.size > MAX_RETAINED_KEYS
       if discard_buffer
         @token.string_value = ""
         @token.raw_value = ""
@@ -51,6 +51,10 @@ module Movie::Remote::FrameCodec
 
     def release_excess(discard_buffer : Bool) : Nil
       @lexer.as(ReusableJsonLexer).release_excess(discard_buffer)
+      if discard_buffer
+        @string_value = ""
+        @raw_value = ""
+      end
     end
 
     private def reset_state : self
