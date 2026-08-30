@@ -24,6 +24,19 @@ record LargeMessage, id : Int64, items : Array(String), metadata : Hash(String, 
   include JSON::Serializable
 end
 
+class BenchmarkPipelineBehavior < Movie::AbstractBehavior(BenchmarkMessage)
+  @processed = 0
+
+  def initialize(@batch_size : Int32, @completed : Channel(Nil))
+  end
+
+  def receive(message : BenchmarkMessage, context : Movie::ActorContext(BenchmarkMessage))
+    @processed += 1
+    @completed.send(nil) if @processed % @batch_size == 0
+    Movie::Behaviors(BenchmarkMessage).same
+  end
+end
+
 if BENCH_ENABLED
   describe "Movie Remote Benchmarks" do
     describe "MessageRegistry serialization" do
@@ -269,6 +282,83 @@ if BENCH_ENABLED
         puts "  Payload allocations: typed value #{typed_bytes.round(1)} B/msg, registry wrappers #{wrapped_bytes.round(1)} B/msg"
         puts "  Parser input allocations: reusable IO #{pipeline_bytes.round(1)} B/msg, copied String #{string_input_bytes.round(1)} B/msg"
       end
+
+      it "benchmarks decode, routing, and actor-processed delivery stages" do
+        iterations = 100_000
+        Movie::Remote::MessageRegistry.register(BenchmarkMessage)
+        completed = Channel(Nil).new(1)
+        system = Movie::ActorSystem(BenchmarkMessage).new(
+          Movie::Behaviors(BenchmarkMessage).same,
+          name: "pipeline-bench"
+        )
+        target = system.spawn(
+          BenchmarkPipelineBehavior.new(iterations, completed),
+          name: "target"
+        )
+        system.publish_remoting_address(Movie::Address.remote("pipeline-bench", "127.0.0.1", 9123))
+        path = target.path.not_nil!.to_s
+        message = BenchmarkMessage.new(id: 1_i64, data: "x" * 64, timestamp: 1_i64)
+
+        local_started = Time.instant
+        iterations.times { target << message }
+        local_enqueue_elapsed = Time.instant - local_started
+        completed.receive
+        local_completion_elapsed = Time.instant - local_started
+
+        tag, payload = Movie::Remote::MessageRegistry.prepare(
+          message
+        )
+        frame = Movie::Remote::FrameCodec.encode_to_bytes(
+          Movie::Remote::WireEnvelope.user_message(path, tag, payload)
+        )
+        input = IO::Memory.new(frame.size * iterations)
+        iterations.times { input.write(frame) }
+
+        decode_checksum = 0_i64
+        input.rewind
+        decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
+        decode_elapsed = Time.measure do
+          iterations.times { decode_checksum &+= decoder.decode(input).not_nil!.timestamp }
+        end
+
+        route_checksum = 0_i64
+        input.rewind
+        decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
+        route_elapsed = Time.measure do
+          iterations.times do
+            envelope = decoder.decode(input).not_nil!
+            actor_id = system.path_registry.resolve(envelope.target_path).not_nil!
+            context = system.context(actor_id).not_nil!
+            wrapper = Movie::Remote::MessageRegistry.deserialize(envelope.message_type, envelope.payload_data)
+            route_checksum &+= context.ref.id + wrapper.unwrap(BenchmarkMessage).id
+          end
+        end
+
+        input.rewind
+        decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
+        delivery_started = Time.instant
+        iterations.times do
+          envelope = decoder.decode(input).not_nil!
+          actor_id = system.path_registry.resolve(envelope.target_path).not_nil!
+          context = system.context(actor_id).not_nil!
+          wrapper = Movie::Remote::MessageRegistry.deserialize(envelope.message_type, envelope.payload_data)
+          wrapper.deliver_to(context, nil)
+        end
+        delivery_enqueue_elapsed = Time.instant - delivery_started
+        completed.receive
+        delivery_completion_elapsed = Time.instant - delivery_started
+
+        decode_checksum.should be > 0_i64
+        route_checksum.should be > 0_i64
+        puts "\n  Inbound stages: decode #{(iterations / decode_elapsed.total_seconds).round(0)} msg/s"
+        puts "  Inbound stages: + route/registry #{(iterations / route_elapsed.total_seconds).round(0)} msg/s"
+        puts "  Local mailbox: enqueue loop #{(iterations / local_enqueue_elapsed.total_seconds).round(0)} msg/s"
+        puts "  Local mailbox: actor completion #{(iterations / local_completion_elapsed.total_seconds).round(0)} msg/s"
+        puts "  Inbound stages: delivery enqueue loop #{(iterations / delivery_enqueue_elapsed.total_seconds).round(0)} msg/s"
+        puts "  Inbound stages: actor completion #{(iterations / delivery_completion_elapsed.total_seconds).round(0)} msg/s"
+      ensure
+        system.try &.shutdown
+      end
     end
 
     describe "ActorPath parsing" do
@@ -342,6 +432,38 @@ if BENCH_ENABLED
 
         ops_per_sec = lookup_iterations / lookup_elapsed.total_seconds
         puts "  Path lookup: #{ops_per_sec.round(0)} ops/sec"
+
+        canonical_paths = paths.map(&.to_s)
+        canonical_checksum = 0_i64
+        canonical_bytes = RemoteBenchmarkMeasurements.allocated_bytes_per_iteration(lookup_iterations) do
+          lookup_iterations.times do |i|
+            canonical_checksum &+= registry.resolve(canonical_paths[i % 1000]).not_nil!
+          end
+        end
+        canonical_elapsed = Time.measure do
+          lookup_iterations.times do |i|
+            canonical_checksum &+= registry.resolve(canonical_paths[i % 1000]).not_nil!
+          end
+        end
+        canonical_checksum.should be > 0_i64
+        puts "  Canonical string lookup: #{(lookup_iterations / canonical_elapsed.total_seconds).round(0)} ops/sec, #{canonical_bytes.round(1)} B/op"
+
+        remote_aliases = paths.map do |path|
+          "movie.tcp://bench-system@127.0.0.1:9123/#{path.elements.join("/")}"
+        end
+        alias_checksum = 0_i64
+        alias_bytes = RemoteBenchmarkMeasurements.allocated_bytes_per_iteration(lookup_iterations) do
+          lookup_iterations.times do |i|
+            alias_checksum &+= registry.resolve(remote_aliases[i % 1000]).not_nil!
+          end
+        end
+        alias_elapsed = Time.measure do
+          lookup_iterations.times do |i|
+            alias_checksum &+= registry.resolve(remote_aliases[i % 1000]).not_nil!
+          end
+        end
+        alias_checksum.should be > 0_i64
+        puts "  Normalized alias lookup: #{(lookup_iterations / alias_elapsed.total_seconds).round(0)} ops/sec, #{alias_bytes.round(1)} B/op"
       end
     end
 

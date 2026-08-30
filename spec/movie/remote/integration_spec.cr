@@ -194,6 +194,29 @@ describe "Movie Remote Integration" do
       found_path = registry.path_for(actor)
       found_path.should eq(path)
     end
+
+    it "resolves the exact registered path string before normalized parsing" do
+      registry = Movie::PathRegistry.new
+      address = Movie::Address.local("exact-path-system")
+      system = Movie::ActorSystem(String).new(
+        Movie::Behaviors(String).same,
+        name: "exact-path-registry"
+      )
+      actor = system.spawn(Movie::Behaviors(String).same)
+      path = Movie::ActorPath.new(address, ["user", "", "exact-target"])
+
+      registry.register(actor, path)
+      registry.resolve(path.to_s).should eq(actor.id)
+
+      registry.clear
+      registry.resolve(path.to_s).should be_nil
+
+      registry.register(actor, path)
+      registry.unregister(actor)
+      registry.resolve(path.to_s).should be_nil
+    ensure
+      system.try &.shutdown
+    end
   end
 
   describe "MessageRegistry roundtrip" do

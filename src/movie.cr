@@ -426,11 +426,13 @@ module Movie
   # Uses normalized keys (system:path) to allow lookups regardless of protocol/host/port.
   class PathRegistry
     @path_to_id : Hash(String, Int32)
+    @canonical_path_to_id : Hash(String, Int32)
     @id_to_path : Hash(Int32, ActorPath)
     @mutex : Mutex
 
     def initialize
       @path_to_id = {} of String => Int32
+      @canonical_path_to_id = {} of String => Int32
       @id_to_path = {} of Int32 => ActorPath
       @mutex = Mutex.new
     end
@@ -453,14 +455,20 @@ module Movie
     def register(ref : ActorRefBase, path : ActorPath)
       @mutex.synchronize do
         key = normalize_key(path)
+        canonical_path = path.to_s
         if existing_id = @path_to_id[key]?
           raise ArgumentError.new("Actor path #{path} is already registered by actor #{existing_id}") unless existing_id == ref.id
         end
         if old_path = @id_to_path[ref.id]?
           old_key = normalize_key(old_path)
+          old_canonical_path = old_path.to_s
           @path_to_id.delete(old_key) if old_key != key && @path_to_id[old_key]? == ref.id
+          if old_canonical_path != canonical_path && @canonical_path_to_id[old_canonical_path]? == ref.id
+            @canonical_path_to_id.delete(old_canonical_path)
+          end
         end
         @path_to_id[key] = ref.id
+        @canonical_path_to_id[canonical_path] = ref.id
         @id_to_path[ref.id] = path
       end
     end
@@ -470,6 +478,8 @@ module Movie
         if path = @id_to_path.delete(ref.id)
           key = normalize_key(path)
           @path_to_id.delete(key) if @path_to_id[key]? == ref.id
+          canonical_path = path.to_s
+          @canonical_path_to_id.delete(canonical_path) if @canonical_path_to_id[canonical_path]? == ref.id
         end
       end
     end
@@ -479,6 +489,8 @@ module Movie
         if path = @id_to_path.delete(id)
           key = normalize_key(path)
           @path_to_id.delete(key) if @path_to_id[key]? == id
+          canonical_path = path.to_s
+          @canonical_path_to_id.delete(canonical_path) if @canonical_path_to_id[canonical_path]? == id
         end
       end
     end
@@ -491,7 +503,7 @@ module Movie
 
     def resolve(path_str : String) : Int32?
       @mutex.synchronize do
-        @path_to_id[normalize_key(path_str)]?
+        @canonical_path_to_id[path_str]? || @path_to_id[normalize_key(path_str)]?
       end
     end
 
@@ -522,6 +534,7 @@ module Movie
     def clear
       @mutex.synchronize do
         @path_to_id.clear
+        @canonical_path_to_id.clear
         @id_to_path.clear
       end
     end
