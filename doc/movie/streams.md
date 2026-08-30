@@ -108,6 +108,25 @@ Every blueprint edge has a positive, fixed capacity. `Sources.manual` and `Flows
 
 `ManualSourceControl#offer` returns a `QueueOfferResult` with `Enqueued`, `Dropped`, `QueueClosed`, or `Failure` status. The compatibility `<<` method uses the same bounded queue, waits under `Backpressure`, tolerates configured drops, and raises for closed or failed queues. Completion and failure never overtake elements already accepted into the buffer.
 
+### Stream TestKit
+
+`TestSources.probe(T)` and `TestSinks.probe(T)` are reusable blueprints for protocol-level specs. Materializing them returns independent `TestPublisherProbe(T)` and `TestSubscriberProbe(T)` controls:
+
+```crystal
+graph = Streams::TestSources.probe(Int32, buffer_size: 1)
+  .via(Streams::Flows.map(Int32, String) { |value| "value=#{value}" })
+  .to_mat(Streams::TestSinks.probe(String)) { |publisher, subscriber| {publisher, subscriber} }
+
+publisher, subscriber = graph.run(system)
+publisher.send_next(7)
+subscriber.expect_no_message(25.milliseconds)
+subscriber.request(1).expect_next("value=7")
+publisher.send_complete
+subscriber.expect_complete
+```
+
+The publisher supports `offer`, `send_next`, `send_complete`, and `send_error`. `offer` is the low-level blocking queue primitive; assertion-style `send_next` has a one-second default timeout (overridable per source or call) and cancels the source if backpressure exceeds it. The subscriber supports explicit `request(n)` plus `expect_next`, `expect_complete`, `expect_error`, and `expect_no_message`. Every assertion has a bounded timeout and reports what it awaited and what it received. Terminal signals are consumed once, reject later demand, and actor-system shutdown releases probes blocked on demand or an unconsumed assertion event.
+
 ## Legacy builder surface & materialization (OZW-65)
 - Single-subscription builders in MVP.
 - Sources: `Streams::Typed.manual(T)` is the currently implemented source builder. Array, single, and tick sources are future work.

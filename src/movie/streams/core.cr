@@ -350,6 +350,11 @@ module Movie
           end
         end
 
+        def cancel : Nil
+          mark_terminal
+          @outlet.cancel
+        end
+
         def terminal? : Bool
           @state_mutex.synchronize { @terminal } || @outlet.cancelled?
         end

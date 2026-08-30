@@ -1323,6 +1323,7 @@ end
 
 # Typed stream blueprints use ActorSystem extensions for runtime ownership.
 require "./movie/streams/core"
+require "./movie/streams/testkit"
 
 # Require executor after base extension types are defined
 require "./movie/executor"

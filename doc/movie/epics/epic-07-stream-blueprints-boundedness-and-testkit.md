@@ -64,7 +64,7 @@
 
 ## Task 07.3: Add a stream protocol TestKit
 
-**Status:** Planned.
+**Status:** Done.
 
 **Files**
 
@@ -83,6 +83,7 @@
 
 - Write probe behavior specs first.
 - Use the TestKit to verify a type-changing bounded pipeline.
+- Complete spec and standards review with no remaining findings.
 
 ## Completion checklist
 
