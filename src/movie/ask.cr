@@ -124,91 +124,6 @@ module Movie
       response_ref.future
     end
 
-    # Shared state between the ask caller and the listener behavior.
-    # Holds the promise and an optional timer handle for cancellation.
-    class AskState(T)
-      getter promise : Promise(T)
-      @timer_handle : Atomic(TimerHandle?)
-      @timer_cancelled : Atomic(Bool)
-      @listener : Atomic(ActorRefBase?)
-      @listener_stop_requested : Atomic(Bool)
-      @unwatch_requested : Atomic(Bool)
-      @target : ActorRefBase
-
-      def initialize(@promise : Promise(T), @target : ActorRefBase)
-        @timer_handle = Atomic(TimerHandle?).new(nil)
-        @timer_cancelled = Atomic(Bool).new(false)
-        @listener = Atomic(ActorRefBase?).new(nil)
-        @listener_stop_requested = Atomic(Bool).new(false)
-        @unwatch_requested = Atomic(Bool).new(false)
-      end
-
-      def timer_handle=(handle : TimerHandle)
-        @timer_handle.set(handle)
-        handle.cancel if @timer_cancelled.get
-      end
-
-      def cancel_timer
-        @timer_cancelled.set(true)
-        @timer_handle.get.try &.cancel
-      end
-
-      def listener=(listener : ActorRefBase)
-        @listener.set(listener)
-        if @listener_stop_requested.get
-          unwatch_target
-          listener.send_system(STOP)
-        end
-      end
-
-      def stop_listener
-        @listener_stop_requested.set(true)
-        unwatch_target
-        @listener.get.try &.send_system(STOP)
-      end
-
-      def unwatch_target : Nil
-        listener = @listener.get
-        return unless listener
-        _, should_unwatch = @unwatch_requested.compare_and_set(false, true)
-        return unless should_unwatch
-        @target.send_system(Unwatch.new(listener).as(SystemMessage))
-      end
-    end
-
-    class ListenerBehavior(T) < AbstractBehavior(Response(T))
-      def initialize(@state : AskState(T), @target : ActorRefBase)
-      end
-
-      def receive(message : Response(T), context : ActorContext(Response(T)))
-        @state.cancel_timer
-        case message
-        when Success(T)
-          @state.promise.try_success(message.value)
-        when Failure(T)
-          @state.promise.try_failure(message.error)
-        when Cancelled(T)
-          @state.promise.try_cancel
-        end
-        @state.stop_listener
-        Behaviors(Response(T)).same
-      end
-
-      def on_signal(signal : SystemMessage)
-        case signal
-        when Terminated
-          terminated = signal.as(Terminated)
-          if terminated.actor == @target && @state.promise.future.pending?
-            @state.cancel_timer
-            @state.promise.try_failure(TargetTerminated.new(@target))
-            @state.stop_listener
-          end
-        when PostStop
-          @state.unwatch_target
-        end
-      end
-    end
-
     def self.success(sender : ActorRefBase?, value : T) forall T
       reply(sender, Success(T).new(value))
     end
@@ -221,21 +136,17 @@ module Movie
       reply(sender, Cancelled(T).new)
     end
 
-    # Best-effort reply that only responds when the sender is an ask listener.
+    # Best-effort reply that only responds when the sender is an ask endpoint.
     def self.reply_if_asked(sender : ActorRefBase?, value : T) forall T
-      return unless sender
-      return unless sender.as?(ActorRef(Response(T))) || sender.as?(LocalResponseRef(T)) || sender.as?(::Movie::Remote::RemoteAskResponseSenderRef)
-      reply(sender, Success(T).new(value))
+      reply(sender, Success(T).new(value), warn_unsupported: false)
     end
 
-    # Best-effort failure reply that only responds when the sender is an ask listener.
+    # Best-effort failure reply that only responds when the sender is an ask endpoint.
     def self.fail_if_asked(sender : ActorRefBase?, error : Exception, response_type : T.class) forall T
-      return unless sender
-      return unless sender.as?(ActorRef(Response(T))) || sender.as?(LocalResponseRef(T)) || sender.as?(::Movie::Remote::RemoteAskResponseSenderRef)
-      reply(sender, Failure(T).new(error))
+      reply(sender, Failure(T).new(error), warn_unsupported: false)
     end
 
-    private def self.reply(sender : ActorRefBase?, response : Response(T)) forall T
+    private def self.reply(sender : ActorRefBase?, response : Response(T), warn_unsupported : Bool = true) forall T
       return unless sender
       if ref = sender.as?(ActorRef(Response(T)))
         ref.tell_from(nil, response)
@@ -254,8 +165,8 @@ module Movie
         when Cancelled(T)
           ref.reply_cancelled
         end
-      else
-        Log.for("Movie::Ask").warn { "Ask reply dropped: sender #{sender.id} is not ActorRef(Response(#{T}))" }
+      elsif warn_unsupported
+        Log.for("Movie::Ask").warn { "Ask reply dropped: sender #{sender.id} is not an ask response endpoint for #{T}" }
       end
     end
   end

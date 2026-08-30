@@ -596,7 +596,7 @@ describe "Movie runtime hardening" do
     system.shutdown
   end
 
-  it "stops ask listeners after the target terminates" do
+  it "fails a pending ask after the target terminates" do
     system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
     target = system.spawn(SilentProbe.new)
     future = system.ask(target, :request, Nil, 1.second)
@@ -633,17 +633,24 @@ describe "Movie runtime hardening" do
   it "supports failed and cancelled local ask responses" do
     system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
     target = system.spawn(RefAskProbe.new)
+    baseline_watchers = system.context(target.id).as(Movie::ActorContext(Symbol)).watcher_count
 
     failure = target.ask(:failure, String, 1.second)
     expect_raises(Exception, "ask failed") { failure.await(1.second) }
+    hardening_eventually(1.second) do
+      system.context(target.id).as(Movie::ActorContext(Symbol)).watcher_count == baseline_watchers
+    end.should be_true
 
     cancelled = target.ask(:cancel, String, 1.second)
     expect_raises(Movie::FutureCancelled) { cancelled.await(1.second) }
+    hardening_eventually(1.second) do
+      system.context(target.id).as(Movie::ActorContext(Symbol)).watcher_count == baseline_watchers
+    end.should be_true
 
     system.shutdown
   end
 
-  it "unwatches local ask listeners after timeout" do
+  it "unwatches a local ask response ref after timeout" do
     system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
     target = system.spawn(SilentProbe.new)
     baseline_watchers = system.context(target.id).as(Movie::ActorContext(Symbol)).watcher_count

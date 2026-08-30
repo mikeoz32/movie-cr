@@ -7,7 +7,7 @@ Movie is a lightweight typed actor framework for Crystal. It provides actor life
 | Area | Status | Notes |
 |---|---|---|
 | Typed actors and lifecycle | Stable core | Hierarchical actors, mailbox isolation, watching, restart/stop/resume supervision, and orderly shutdown. |
-| Futures, ask, scheduler | Stable public API | Thread-safe terminal futures, local ask listeners, and cancellable one-shot timers. |
+| Futures, ask, scheduler | Stable public API | Thread-safe terminal futures, lightweight local ask response refs, and cancellable one-shot timers. |
 | Executor | Advanced API | Bounded worker pool; task timeout does not cancel the task body. |
 | Persistence | Optional, usable | SQLite event journal and durable state helpers; require the persistence entrypoint explicitly. |
 | Typed streams | MVP | Manual sources, transform stages, fold/collect sinks, cancellation, backpressure, and broadcast fan-out. |
