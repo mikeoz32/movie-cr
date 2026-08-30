@@ -6,8 +6,10 @@ module Movie::Remote
   # A JSON value that can write itself directly to a builder.
   #
   # Outbound payloads retain the original serializable value instead of
-  # materializing a String and parsing it into a JSON DOM. Decoded payloads
-  # retain one raw JSON value and only build JSON::Any for dynamic access.
+  # materializing a String and parsing it into a JSON DOM. Connection-owned
+  # decoders retain registered payloads as typed wrappers; unknown and
+  # payload-before-type envelopes retain raw JSON. Both forms build JSON::Any
+  # only for dynamic access.
   abstract class JsonPayload
     abstract def to_json(json : JSON::Builder) : Nil
     abstract def json_source : String | IO

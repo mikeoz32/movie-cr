@@ -11,8 +11,9 @@ module Movie::Remote
   end
 
   # WireEnvelope is the envelope used for serializing messages over the wire.
-  # It preserves decoded payloads as raw JSON and writes outbound serializable
-  # values directly to JSON::Builder.
+  # Connection-owned decoders can retain registered payloads as typed wrappers;
+  # stateless, unknown, and payload-before-type decoding retains raw JSON. All
+  # outbound serializable values write directly to JSON::Builder.
   struct WireEnvelope
     # The kind of message being sent.
     enum Kind
