@@ -211,37 +211,7 @@ module Movie
     end
 
     def ask(target : ActorRef(M), message : M, response_type : T.class = Nil, timeout : Time::Span? = nil) : Future(T) forall M, T
-      state = Movie::Ask::AskState(T).new(Promise(T).new, target.as(ActorRefBase))
-
-      listener_behavior = Behaviors(Movie::Ask::Response(T)).setup do |_listener_context|
-        Movie::Ask::ListenerBehavior(T).new(state, target.as(ActorRefBase))
-      end
-
-      listener = spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
-      listener_ref = listener.as(ActorRef(Movie::Ask::Response(T)))
-      state.listener = listener_ref.as(ActorRefBase)
-      listener_context = @system.context(listener.id).as(ActorContext(Movie::Ask::Response(T)))
-      listener_context.watch(target)
-
-      begin
-        target.tell_from(listener_ref.as(ActorRefBase), message)
-      rescue ex : Exception
-        state.promise.try_failure(Movie::Ask::TargetTerminated.new(target.as(ActorRefBase)))
-        state.stop_listener
-        return state.promise.future
-      end
-
-      if timeout
-        timer_handle = @system.scheduler.schedule_once(timeout) do
-          if state.promise.future.pending?
-            state.promise.try_failure(FutureTimeout.new)
-            state.stop_listener
-          end
-        end
-        state.timer_handle = timer_handle
-      end
-
-      state.promise.future
+      Movie::Ask.local(@system, target, message, response_type, timeout)
     end
 
     def register_watcher(actor : ActorRefBase) : Bool

@@ -12,7 +12,6 @@ require "./movie/extension_id"
 require "./movie/system"
 require "./movie/future"
 require "./movie/scheduler"
-require "./movie/ask"
 require "./movie/pipe"
 require "./movie/streams_typed"
 
@@ -125,35 +124,7 @@ module Movie
     end
 
     def ask(message : T, response_type : R.class = Nil, timeout : Time::Span? = nil) : Future(R) forall R
-      state = Movie::Ask::AskState(R).new(Promise(R).new, self.as(ActorRefBase))
-      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
-        Movie::Ask::ListenerBehavior(R).new(state, self.as(ActorRefBase))
-      end
-
-      listener = @system.spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
-      listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
-      state.listener = listener_ref.as(ActorRefBase)
-      listener_context = @system.context(listener.id).as(ActorContext(Movie::Ask::Response(R)))
-      listener_context.watch(self)
-      begin
-        tell_from(listener_ref.as(ActorRefBase), message)
-      rescue ex : Exception
-        state.promise.try_failure(Movie::Ask::TargetTerminated.new(self.as(ActorRefBase)))
-        state.stop_listener
-        return state.promise.future
-      end
-
-      if timeout
-        timer_handle = @system.scheduler.schedule_once(timeout) do
-          if state.promise.future.pending?
-            state.promise.try_failure(FutureTimeout.new)
-            state.stop_listener
-          end
-        end
-        state.timer_handle = timer_handle
-      end
-
-      state.promise.future
+      Movie::Ask.local(@system, self, message, response_type, timeout)
     end
   end
 
@@ -1158,72 +1129,12 @@ module Movie
 
     def ask(message : T, response_type : R.class = Nil, timeout : Time::Span? = nil) : Future(R) forall R
       root = @root || raise "System not initialized"
-      state = Movie::Ask::AskState(R).new(Promise(R).new, root.as(ActorRefBase))
-
-      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
-        Movie::Ask::ListenerBehavior(R).new(state, root.as(ActorRefBase))
-      end
-
-      listener = spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
-      listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
-      state.listener = listener_ref.as(ActorRefBase)
-      listener_context = context(listener.id).as(ActorContext(Movie::Ask::Response(R)))
-      listener_context.watch(root)
-
-      begin
-        root.tell_from(listener_ref.as(ActorRefBase), message)
-      rescue ex : Exception
-        state.promise.try_failure(Movie::Ask::TargetTerminated.new(root.as(ActorRefBase)))
-        state.stop_listener
-        return state.promise.future
-      end
-
-      if timeout
-        timer_handle = scheduler.schedule_once(timeout) do
-          if state.promise.future.pending?
-            state.promise.try_failure(FutureTimeout.new)
-            state.stop_listener
-          end
-        end
-        state.timer_handle = timer_handle
-      end
-
-      state.promise.future
+      Movie::Ask.local(self, root, message, response_type, timeout)
     end
 
     # Ask a specific actor and receive a response, similar to ActorContext#ask.
     def ask(target : ActorRef(M), message : M, response_type : R.class = Nil, timeout : Time::Span? = nil) : Future(R) forall M, R
-      state = Movie::Ask::AskState(R).new(Promise(R).new, target.as(ActorRefBase))
-
-      listener_behavior = Behaviors(Movie::Ask::Response(R)).setup do |_listener_context|
-        Movie::Ask::ListenerBehavior(R).new(state, target.as(ActorRefBase))
-      end
-
-      listener = spawn(listener_behavior, RestartStrategy::STOP, SupervisionConfig.default)
-      listener_ref = listener.as(ActorRef(Movie::Ask::Response(R)))
-      state.listener = listener_ref.as(ActorRefBase)
-      listener_context = context(listener.id).as(ActorContext(Movie::Ask::Response(R)))
-      listener_context.watch(target)
-
-      begin
-        target.tell_from(listener_ref.as(ActorRefBase), message)
-      rescue ex : Exception
-        state.promise.try_failure(Movie::Ask::TargetTerminated.new(target.as(ActorRefBase)))
-        state.stop_listener
-        return state.promise.future
-      end
-
-      if timeout
-        timer_handle = scheduler.schedule_once(timeout) do
-          if state.promise.future.pending?
-            state.promise.try_failure(FutureTimeout.new)
-            state.stop_listener
-          end
-        end
-        state.timer_handle = timer_handle
-      end
-
-      state.promise.future
+      Movie::Ask.local(self, target, message, response_type, timeout)
     end
 
     def shutdown(timeout : Time::Span = 5.seconds) : Nil
@@ -1320,6 +1231,9 @@ module Movie
     end
   end
 end
+
+# Ask response refs inherit from the base actor reference types above.
+require "./movie/ask"
 
 # Typed stream blueprints use ActorSystem extensions for runtime ownership.
 require "./movie/streams/core"

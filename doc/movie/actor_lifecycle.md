@@ -277,8 +277,8 @@ Sender                   ActorRef              Context              Mailbox     
 ### Envelope senders & ask/ack pattern
 
 - Every user message travels inside an `Envelope` that now carries an optional `sender : ActorRefBase?`. While a behavior handles a message it can retrieve the sender via `context.sender`.
-- Reply helpers: `Movie::Ask.success(context.sender, value)` and `Movie::Ask.failure(context.sender, error, ResponseType)` ship values/errors back to the temporary listener tied to the original `ask` call.
-- `ActorContext#ask(target, message, response_type : T.class = Nil, timeout : Time::Span? = nil)` materializes a temporary listener actor, sends `message` with that listener as the envelope sender, and returns a `Future(T)` that completes when the target replies. Default `response_type` is `Nil`, so simple ACKs look like:
+- Reply helpers: `Movie::Ask.success(context.sender, value)`, `Movie::Ask.failure(context.sender, error, ResponseType)`, and `Movie::Ask.cancel(context.sender, ResponseType)` complete the original `ask` with a value, error, or cancellation.
+- `ActorRef#ask`, `ActorContext#ask`, and `ActorSystem#ask` create an unregistered one-shot response ref, send the message with that ref as the envelope sender, and return a `Future(T)`. The response ref has no actor context or mailbox and does not consume an actor-system ID. Default `response_type` is `Nil`, so simple ACKs look like:
 
 ```crystal
 future = context.ask(order_actor, :reserve_stock)
@@ -307,7 +307,7 @@ class PaymentActor < Movie::AbstractBehavior(Symbol)
 end
 ```
 
-- If the target terminates before replying, the future fails with `Movie::Ask::TargetTerminated`. Optional timeouts passed to `ask` force `FutureTimeout` and stop the temporary listener.
+- The one-shot response ref watches the target until the first terminal outcome, then cancels its timer and unregisters the watch. If the target terminates before replying, the future fails with `Movie::Ask::TargetTerminated`; an optional ask timeout completes it with `FutureTimeout`. Concurrent reply, timeout, and termination paths are resolved by the future's single-completion guarantee.
 
 ### Async primitives: futures, scheduler, and executor
 

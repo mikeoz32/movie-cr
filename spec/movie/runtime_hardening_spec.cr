@@ -179,7 +179,14 @@ end
 
 private class RefAskProbe < Movie::AbstractBehavior(Symbol)
   def receive(message, context)
-    Movie::Ask.success(context.sender, "reply") if message == :request
+    case message
+    when :request
+      Movie::Ask.success(context.sender, "reply")
+    when :failure
+      Movie::Ask.failure(context.sender, Exception.new("ask failed"), String)
+    when :cancel
+      Movie::Ask.cancel(context.sender, String)
+    end
     Movie::Behaviors(Symbol).same
   end
 end
@@ -609,6 +616,30 @@ describe "Movie runtime hardening" do
     hardening_eventually(1.second) do
       system.context(target.id).as(Movie::ActorContext(Symbol)).watcher_count == baseline_watchers
     end.should be_true
+    system.shutdown
+  end
+
+  it "does not register a temporary actor for a local ask" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    target = system.spawn(RefAskProbe.new, name: "ask-target")
+
+    target.ask(:request, String, 1.second).await(1.second).should eq("reply")
+    marker = system.spawn(SilentProbe.new, name: "ask-marker")
+
+    marker.id.should eq(target.id + 1)
+    system.shutdown
+  end
+
+  it "supports failed and cancelled local ask responses" do
+    system = Movie::ActorSystem(Symbol).new(Movie::Behaviors(Symbol).same)
+    target = system.spawn(RefAskProbe.new)
+
+    failure = target.ask(:failure, String, 1.second)
+    expect_raises(Exception, "ask failed") { failure.await(1.second) }
+
+    cancelled = target.ask(:cancel, String, 1.second)
+    expect_raises(Movie::FutureCancelled) { cancelled.await(1.second) }
+
     system.shutdown
   end
 

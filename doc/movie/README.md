@@ -19,6 +19,7 @@
 - [Epic 06 - Runtime review hardening](epics/epic-06-runtime-review-hardening.md)
 - [Epic 07 - Stream blueprints, boundedness, and TestKit](epics/epic-07-stream-blueprints-boundedness-and-testkit.md)
 - [Epic 08 - Actor system performance benchmarks](epics/epic-08-actor-system-performance-benchmarks.md)
+- [Epic 09 - Local ask hot-path optimization](epics/epic-09-local-ask-hot-path.md)
 
 ## How To Use This Folder
 
