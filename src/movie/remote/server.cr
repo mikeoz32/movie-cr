@@ -1,6 +1,7 @@
 require "socket"
 require "./wire_envelope"
 require "./frame_codec"
+require "./inbound_frame_reader"
 require "./outbound_writer"
 require "./message_registry"
 require "../path"
@@ -129,6 +130,8 @@ module Movie::Remote
   class InboundConnection
     Log = ::Log.for(self)
 
+    MAX_INBOUND_BATCH = 128
+
     getter? connected : Bool = true
 
     @socket : TCPSocket
@@ -136,6 +139,8 @@ module Movie::Remote
     @reader_fiber : Fiber?
     @remote_address : Address?
     @frame_decoder : FrameCodec::Decoder
+    @frame_reader : InboundFrameReader
+    @inbound_batch : Array(WireEnvelope)
 
     def initialize(
       @socket : TCPSocket,
@@ -143,8 +148,11 @@ module Movie::Remote
       @path_registry : Movie::PathRegistry,
       @on_message : Proc(WireEnvelope, InboundConnection, Nil),
     )
+      @socket.read_buffering = false
       @outbound_writer = OutboundWriter.new(@socket) { |error| handle_write_error(error) }
       @frame_decoder = FrameCodec::Decoder.new(MessageRegistry.payload_decoder)
+      @frame_reader = InboundFrameReader.new(@socket)
+      @inbound_batch = Array(WireEnvelope).new(MAX_INBOUND_BATCH)
     end
 
     # Starts reading from the connection.
@@ -194,8 +202,9 @@ module Movie::Remote
       loop do
         break unless @connected
 
+        @inbound_batch.clear
         envelope = begin
-          @frame_decoder.decode(@socket)
+          @frame_decoder.decode(@frame_reader)
         rescue ex : MalformedMessagePayloadError
           Log.error { ex.message }
           next
@@ -205,9 +214,20 @@ module Movie::Remote
         end
 
         break if envelope.nil?
+        @inbound_batch << envelope
+
+        while @inbound_batch.size < MAX_INBOUND_BATCH && @frame_reader.complete_frame_buffered?
+          begin
+            ready_envelope = @frame_decoder.decode(@frame_reader)
+            break unless ready_envelope
+            @inbound_batch << ready_envelope
+          rescue ex : MalformedMessagePayloadError
+            Log.error { ex.message }
+          end
+        end
 
         begin
-          handle_incoming(envelope)
+          @inbound_batch.each { |ready_envelope| handle_incoming(ready_envelope) }
         rescue ex : Exception
           Log.error(exception: ex) { "Protocol error from #{@socket.remote_address}" }
           break

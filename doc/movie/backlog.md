@@ -21,6 +21,7 @@ Mandatory workflow for every task lives in [development_workflow.md](development
 | P1 | [Epic 11 - Inbound Remoting Hot-Path Optimization](epics/epic-11-inbound-remoting-hot-path.md) | Removes the remaining payload rebuild and second JSON parse from registered inbound messages. | Completed (2026-08-30) |
 | P1 | [Epic 12 - Inbound Envelope Allocation Reduction](epics/epic-12-inbound-envelope-allocation.md) | Measures and removes the next dominant parser/input or decoded-wrapper allocation boundary. | Completed (2026-08-30) |
 | P0 | [Epic 13 - Batched Remoting Transport](epics/epic-13-batched-remoting-transport.md) | Removes synchronous per-message socket IO and measures the remaining receiver path before cluster work. | Completed (2026-08-30) |
+| P0 | [Epic 14 - Receiver Handoff Contention](epics/epic-14-receiver-handoff-contention.md) | Measures and removes receiver-side lock and scheduling amplification before changing the wire codec. | In progress |
 
 ## Planning Rules
 

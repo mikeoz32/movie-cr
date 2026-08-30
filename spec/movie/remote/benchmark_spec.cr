@@ -37,6 +37,31 @@ class BenchmarkPipelineBehavior < Movie::AbstractBehavior(BenchmarkMessage)
   end
 end
 
+class BenchmarkDispatchCountingSystem(T) < Movie::ActorSystem(T)
+  getter dispatch_count = Atomic(Int64).new(0_i64)
+
+  def self.build(main_behavior : Movie::AbstractBehavior(T), name : String) : self
+    registry = Movie::ActorRegistry.new
+    system = allocate
+    system.initialize(
+      main_behavior,
+      registry,
+      Movie::RestartStrategy::RESTART,
+      Movie::SupervisionConfig.default,
+      name,
+      Movie::Config.empty
+    )
+    registry.start
+    system.bootstrap_main
+    system
+  end
+
+  def actor_dispatch_enter : Nil
+    @dispatch_count.add(1_i64)
+    super
+  end
+end
+
 if BENCH_ENABLED
   describe "Movie Remote Benchmarks" do
     describe "MessageRegistry serialization" do
@@ -194,6 +219,79 @@ if BENCH_ENABLED
     end
 
     describe "Inbound registered-message pipeline" do
+      it "benchmarks receiver synchronization primitives" do
+        iterations = 1_000_000
+        system = Movie::ActorSystem(String).new(
+          Movie::Behaviors(String).same,
+          name: "receiver-lock-bench"
+        )
+        target = system.spawn(Movie::Behaviors(String).same, name: "target")
+        actor_id = target.id
+        target_path = target.path.not_nil!.to_s
+        Movie::Remote::MessageRegistry.register(BenchmarkMessage)
+
+        dispatch_elapsed = Time.measure do
+          iterations.times do
+            system.actor_dispatch_enter
+            system.actor_dispatch_leave
+          end
+        end
+
+        worker_count = 8
+        ready = Channel(Nil).new(worker_count)
+        start = Channel(Nil).new(worker_count)
+        done = Channel(Nil).new(worker_count)
+        isolated_contexts = Array(Fiber::ExecutionContext::Isolated).new(worker_count) do |worker|
+          Fiber::ExecutionContext::Isolated.new("receiver-lock-bench-#{worker}") do
+            ready.send(nil)
+            start.receive
+            (iterations // worker_count).times do
+              system.actor_dispatch_enter
+              system.actor_dispatch_leave
+            end
+            done.send(nil)
+          end
+        end
+        worker_count.times { ready.receive }
+        contended_elapsed = Time.measure do
+          worker_count.times { start.send(nil) }
+          worker_count.times { done.receive }
+        end
+        isolated_contexts.each(&.wait)
+
+        context_checksum = 0_i64
+        context_elapsed = Time.measure do
+          iterations.times do
+            context_checksum &+= system.context(actor_id).not_nil!.ref.id
+          end
+        end
+
+        path_checksum = 0_i64
+        path_elapsed = Time.measure do
+          iterations.times do
+            path_checksum &+= system.path_registry.resolve(target_path).not_nil!
+          end
+        end
+
+        registry_checksum = 0_i64
+        registry_elapsed = Time.measure do
+          iterations.times do
+            registry_checksum &+= 1 if Movie::Remote::MessageRegistry.registered?(BenchmarkMessage.name)
+          end
+        end
+
+        context_checksum.should be > 0_i64
+        path_checksum.should be > 0_i64
+        registry_checksum.should be > 0_i64
+        puts "\n  Receiver locks: actor-dispatch marker pair #{(iterations / dispatch_elapsed.total_seconds).round(0)} ops/s"
+        puts "  Receiver locks: actor-dispatch marker pair, #{worker_count} workers #{(iterations / contended_elapsed.total_seconds).round(0)} ops/s"
+        puts "  Receiver locks: actor-context lookup #{(iterations / context_elapsed.total_seconds).round(0)} ops/s"
+        puts "  Receiver locks: exact-path lookup #{(iterations / path_elapsed.total_seconds).round(0)} ops/s"
+        puts "  Receiver locks: message-registry lookup #{(iterations / registry_elapsed.total_seconds).round(0)} ops/s"
+      ensure
+        system.try &.shutdown
+      end
+
       it "reports decode and typed-deserialization allocations separately" do
         Movie::Remote::MessageRegistry.register(BenchmarkMessage)
         message = BenchmarkMessage.new(id: 1_i64, data: "x" * 64, timestamp: 1_i64)
@@ -287,7 +385,7 @@ if BENCH_ENABLED
         iterations = 100_000
         Movie::Remote::MessageRegistry.register(BenchmarkMessage)
         completed = Channel(Nil).new(1)
-        system = Movie::ActorSystem(BenchmarkMessage).new(
+        system = BenchmarkDispatchCountingSystem(BenchmarkMessage).build(
           Movie::Behaviors(BenchmarkMessage).same,
           name: "pipeline-bench"
         )
@@ -299,11 +397,13 @@ if BENCH_ENABLED
         path = target.path.not_nil!.to_s
         message = BenchmarkMessage.new(id: 1_i64, data: "x" * 64, timestamp: 1_i64)
 
+        local_dispatch_before = system.dispatch_count.get
         local_started = Time.instant
         iterations.times { target << message }
         local_enqueue_elapsed = Time.instant - local_started
         completed.receive
         local_completion_elapsed = Time.instant - local_started
+        local_dispatches = system.dispatch_count.get - local_dispatch_before
 
         tag, payload = Movie::Remote::MessageRegistry.prepare(
           message
@@ -336,6 +436,7 @@ if BENCH_ENABLED
 
         input.rewind
         decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
+        delivery_dispatch_before = system.dispatch_count.get
         delivery_started = Time.instant
         iterations.times do
           envelope = decoder.decode(input).not_nil!
@@ -347,6 +448,31 @@ if BENCH_ENABLED
         delivery_enqueue_elapsed = Time.instant - delivery_started
         completed.receive
         delivery_completion_elapsed = Time.instant - delivery_started
+        delivery_dispatches = system.dispatch_count.get - delivery_dispatch_before
+
+        input.rewind
+        decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
+        buffered_dispatch_before = system.dispatch_count.get
+        buffered_started = Time.instant
+        delivered = 0
+        batch = Array(Movie::Remote::WireEnvelope).new(128)
+        while delivered < iterations
+          batch.clear
+          {128, iterations - delivered}.min.times do
+            batch << decoder.decode(input).not_nil!
+          end
+          batch.each do |envelope|
+            actor_id = system.path_registry.resolve(envelope.target_path).not_nil!
+            context = system.context(actor_id).not_nil!
+            wrapper = Movie::Remote::MessageRegistry.deserialize(envelope.message_type, envelope.payload_data)
+            wrapper.deliver_to(context, nil)
+          end
+          delivered += batch.size
+        end
+        buffered_enqueue_elapsed = Time.instant - buffered_started
+        completed.receive
+        buffered_completion_elapsed = Time.instant - buffered_started
+        buffered_dispatches = system.dispatch_count.get - buffered_dispatch_before
 
         decode_checksum.should be > 0_i64
         route_checksum.should be > 0_i64
@@ -354,8 +480,13 @@ if BENCH_ENABLED
         puts "  Inbound stages: + route/registry #{(iterations / route_elapsed.total_seconds).round(0)} msg/s"
         puts "  Local mailbox: enqueue loop #{(iterations / local_enqueue_elapsed.total_seconds).round(0)} msg/s"
         puts "  Local mailbox: actor completion #{(iterations / local_completion_elapsed.total_seconds).round(0)} msg/s"
+        puts "  Local mailbox: #{local_dispatches} dispatches, #{(iterations / local_dispatches.to_f).round(1)} msg/dispatch"
         puts "  Inbound stages: delivery enqueue loop #{(iterations / delivery_enqueue_elapsed.total_seconds).round(0)} msg/s"
         puts "  Inbound stages: actor completion #{(iterations / delivery_completion_elapsed.total_seconds).round(0)} msg/s"
+        puts "  Inbound stages: #{delivery_dispatches} dispatches, #{(iterations / delivery_dispatches.to_f).round(1)} msg/dispatch"
+        puts "  Buffered inbound: delivery enqueue loop #{(iterations / buffered_enqueue_elapsed.total_seconds).round(0)} msg/s"
+        puts "  Buffered inbound: actor completion #{(iterations / buffered_completion_elapsed.total_seconds).round(0)} msg/s"
+        puts "  Buffered inbound: #{buffered_dispatches} dispatches, #{(iterations / buffered_dispatches.to_f).round(1)} msg/dispatch"
       ensure
         system.try &.shutdown
       end
