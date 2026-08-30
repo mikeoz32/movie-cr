@@ -25,20 +25,26 @@ module Movie
     end
   end
 
-  alias NameCommand = SetName | GetName
+  struct DeleteName
+  end
+
+  alias NameCommand = SetName | GetName | DeleteName
 
   class NameBehavior < DurableStateBehavior(NameCommand, NameState)
     def empty_state : NameState
       NameState.new("")
     end
 
-    def handle_command(state : NameState, command : NameCommand, ctx : ActorContext(NameCommand)) : NameState?
+    def handle_command(state : NameState, command : NameCommand, ctx : ActorContext(NameCommand)) : DurableEffect(NameState)
       case command
       when SetName
-        NameState.new(command.name)
+        persist(NameState.new(command.name))
       when GetName
-        command.reply_to << state.name
-        nil
+        none.then_run { |current| command.reply_to << current.name }
+      when DeleteName
+        delete
+      else
+        none
       end
     end
   end
@@ -78,6 +84,57 @@ describe Movie::DurableState do
     value = promise.future.await(2.seconds)
     value.should eq("alice")
 
+    database = Movie::Database.get(system)
+    system.ask(
+      database.pool,
+      Movie::Persistence::SaveState.new(
+        "Movie::NameBehavior:name-1",
+        1_i64,
+        "name-v0",
+        Movie::NameState.new("bob").to_json
+      ),
+      Int64,
+      2.seconds
+    ).await(2.seconds)
+
+    name_ref.send_system(Movie::Restart.new(nil))
+    sleep 50.milliseconds
+    restarted_promise = Movie::Promise(String).new
+    restarted_receiver = system.spawn(Movie::StringReceiver.new(restarted_promise))
+    name_ref << Movie::GetName.new(restarted_receiver)
+    restarted_promise.future.await(2.seconds).should eq("bob")
+
+    name_ref << Movie::DeleteName.new
+    deleted_promise = Movie::Promise(String).new
+    deleted_receiver = system.spawn(Movie::StringReceiver.new(deleted_promise))
+    name_ref << Movie::GetName.new(deleted_receiver)
+    deleted_promise.future.await(2.seconds).should eq("")
+
+    tombstone = system.ask(
+      database.pool,
+      Movie::Persistence::LoadState.new("Movie::NameBehavior:name-1"),
+      Movie::Persistence::StateRecord?,
+      2.seconds
+    ).await(2.seconds)
+    tombstone.should_not be_nil
+    tombstone.not_nil!.revision.should eq(3_i64)
+    tombstone.not_nil!.deleted.should be_true
+
+    stale = expect_raises(Movie::Persistence::ConcurrentWriteError) do
+      system.ask(
+        database.pool,
+        Movie::Persistence::SaveState.new(
+          "Movie::NameBehavior:name-1",
+          2_i64,
+          "name-v0",
+          Movie::NameState.new("stale").to_json
+        ),
+        Int64,
+        2.seconds
+      ).await(2.seconds)
+    end
+    stale.actual_revision.should eq(3_i64)
+
     system2 = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same, config)
     ext2 = Movie::DurableState.get(system2)
     ext2.register_entity(Movie::NameBehavior) do |pid, store|
@@ -90,6 +147,6 @@ describe Movie::DurableState do
     receiver2 = system2.spawn(Movie::StringReceiver.new(promise2))
     name_ref2 << Movie::GetName.new(receiver2)
     value2 = promise2.future.await(2.seconds)
-    value2.should eq("alice")
+    value2.should eq("")
   end
 end

@@ -9,7 +9,7 @@ Movie is a lightweight typed actor framework for Crystal. It provides actor life
 | Typed actors and lifecycle | Stable core | Hierarchical actors, mailbox isolation, watching, restart/stop/resume supervision, and orderly shutdown. |
 | Futures, ask, scheduler | Stable public API | Thread-safe terminal futures, lightweight local ask response refs, and cancellable one-shot timers. |
 | Executor | Advanced API | Bounded worker pool; task timeout does not cancel the task body. |
-| Persistence | Optional, usable | SQLite event journal and durable state helpers; require the persistence entrypoint explicitly. |
+| Persistence | Beta, single-node | Typed effects, atomic revisions, restart recovery, snapshots, schema upcasting, and isolated SQLite I/O; not a distributed journal. |
 | Typed streams | MVP | Manual sources, transform stages, fold/collect sinks, cancellation, backpressure, and broadcast fan-out. |
 | Remoting | Experimental MVP | Typed TCP delivery and remote ask, without production transport guarantees. |
 
@@ -83,6 +83,8 @@ require "movie/persistence"
 config = Movie::Config.builder
   .set("persistence.db-path", "data/movie.sqlite3")
   .set("persistence.pool-size", 1)
+  .set("persistence.io-queue-capacity", 256)
+  .set_duration("persistence.operation-timeout", 5.seconds)
   .build
 
 system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, config)
@@ -90,7 +92,9 @@ event_sourcing = Movie::EventSourcing.get(system)
 durable_state = Movie::DurableState.get(system)
 ```
 
-`EventSourcedBehavior` replays JSON events and appends new events. `DurableStateBehavior` loads and replaces a JSON state snapshot. Entity factories must be registered with the corresponding extension before resolving entity references.
+`EventSourcedBehavior` and `DurableStateBehavior` use typed effects, optimistic revisions, restart-safe recovery, and post-persist callbacks. Event batches are atomic; deletes retain revision tombstones; optional snapshots bound replay. SQLite work runs on dedicated isolated connection threads rather than actor dispatchers. See the [persistence guide](doc/movie/persistence.md) for the complete API and its single-node limits.
+
+Run the complete event-sourcing example with `crystal run examples/persistence_example.cr -Dpreview_mt -Dexecution_context`.
 
 ## Typed streams
 

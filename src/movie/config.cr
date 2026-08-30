@@ -872,24 +872,26 @@ module Movie
   #   remoting.stripe-count          - Connection pool stripe count
   #
   module ActorSystemConfig
-    NAME                       = "name"
-    ROOT_RESTART_STRATEGY      = "root.restart-strategy"
-    SUPERVISION_STRATEGY       = "supervision.strategy"
-    SUPERVISION_SCOPE          = "supervision.scope"
-    SUPERVISION_MAX_RESTARTS   = "supervision.max-restarts"
-    SUPERVISION_WITHIN         = "supervision.within"
-    SUPERVISION_BACKOFF_MIN    = "supervision.backoff.min"
-    SUPERVISION_BACKOFF_MAX    = "supervision.backoff.max"
-    SUPERVISION_BACKOFF_FACTOR = "supervision.backoff.factor"
-    SUPERVISION_BACKOFF_JITTER = "supervision.backoff.jitter"
-    REMOTING_ENABLED           = "remoting.enabled"
-    REMOTING_HOST              = "remoting.host"
-    REMOTING_PORT              = "remoting.port"
-    REMOTING_STRIPE_COUNT      = "remoting.stripe-count"
-    EXECUTOR_POOL_SIZE         = "executor.pool-size"
-    EXECUTOR_QUEUE_CAPACITY    = "executor.queue-capacity"
-    PERSISTENCE_DB_PATH        = "persistence.db-path"
-    PERSISTENCE_POOL_SIZE      = "persistence.pool-size"
+    NAME                          = "name"
+    ROOT_RESTART_STRATEGY         = "root.restart-strategy"
+    SUPERVISION_STRATEGY          = "supervision.strategy"
+    SUPERVISION_SCOPE             = "supervision.scope"
+    SUPERVISION_MAX_RESTARTS      = "supervision.max-restarts"
+    SUPERVISION_WITHIN            = "supervision.within"
+    SUPERVISION_BACKOFF_MIN       = "supervision.backoff.min"
+    SUPERVISION_BACKOFF_MAX       = "supervision.backoff.max"
+    SUPERVISION_BACKOFF_FACTOR    = "supervision.backoff.factor"
+    SUPERVISION_BACKOFF_JITTER    = "supervision.backoff.jitter"
+    REMOTING_ENABLED              = "remoting.enabled"
+    REMOTING_HOST                 = "remoting.host"
+    REMOTING_PORT                 = "remoting.port"
+    REMOTING_STRIPE_COUNT         = "remoting.stripe-count"
+    EXECUTOR_POOL_SIZE            = "executor.pool-size"
+    EXECUTOR_QUEUE_CAPACITY       = "executor.queue-capacity"
+    PERSISTENCE_DB_PATH           = "persistence.db-path"
+    PERSISTENCE_POOL_SIZE         = "persistence.pool-size"
+    PERSISTENCE_IO_QUEUE_CAPACITY = "persistence.io-queue-capacity"
+    PERSISTENCE_OPERATION_TIMEOUT = "persistence.operation-timeout"
 
     # Returns the default configuration for an ActorSystem.
     def self.default : Config
@@ -921,6 +923,8 @@ module Movie
         # Persistence defaults
         .set(PERSISTENCE_DB_PATH, "data/movie_persistence.sqlite3")
         .set(PERSISTENCE_POOL_SIZE, 1)
+        .set(PERSISTENCE_IO_QUEUE_CAPACITY, 256)
+        .set_duration(PERSISTENCE_OPERATION_TIMEOUT, 5.seconds)
 
         .build
     end

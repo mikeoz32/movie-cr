@@ -48,6 +48,8 @@ config = file.with_env_overrides
 | `executor.queue-capacity` | Int | `128` | Number of queued executor tasks. |
 | `persistence.db-path` | String | `data/movie_persistence.sqlite3` | SQLite database path; missing parent directories are created on startup. |
 | `persistence.pool-size` | Int | `1` | SQLite connection actor count; values below one are clamped to one. |
+| `persistence.io-queue-capacity` | Int | `256` | Bounded pending jobs per isolated SQLite connection worker. |
+| `persistence.operation-timeout` | Duration | `5s` | Ask timeout for journal and durable-state operations; timeout does not cancel SQLite work already running. |
 
 The old `movie.persistence.db_path` and `movie.persistence.pool_size` shapes are not aliases. Movie is still pre-1.0, and configuration now has one canonical naming scheme.
 
@@ -64,6 +66,8 @@ The default prefix is `MOVIE`. Canonical environment names use `__` between dott
 | `MOVIE_REMOTING__STRIPE_COUNT` | `remoting.stripe-count` |
 | `MOVIE_EXECUTOR__QUEUE_CAPACITY` | `executor.queue-capacity` |
 | `MOVIE_PERSISTENCE__DB_PATH` | `persistence.db-path` |
+| `MOVIE_PERSISTENCE__IO_QUEUE_CAPACITY` | `persistence.io-queue-capacity` |
+| `MOVIE_PERSISTENCE__OPERATION_TIMEOUT` | `persistence.operation-timeout` |
 
 Legacy single-underscore names remain accepted for simple paths where every underscore means a dot, such as `MOVIE_REMOTING_PORT` -> `remoting.port`. Use the canonical double-underscore form whenever a path segment contains a hyphen.
 

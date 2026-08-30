@@ -536,6 +536,8 @@ describe Movie::ActorSystemConfig do
     config.get_int("executor.queue-capacity").should eq(128)
     config.get_string("persistence.db-path").should eq("data/movie_persistence.sqlite3")
     config.get_int("persistence.pool-size").should eq(1)
+    config.get_int("persistence.io-queue-capacity").should eq(256)
+    config.get_duration("persistence.operation-timeout").should eq(5.seconds)
     config.has_path?("movie.persistence.db_path").should be_false
   end
 

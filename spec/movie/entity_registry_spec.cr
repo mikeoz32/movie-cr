@@ -30,6 +30,30 @@ module Movie
 end
 
 describe Movie::Persistence::EntityRegistry do
+  it "evicts a stopped entity and resolves a fresh actor" do
+    system = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same)
+    registry = system.spawn(Movie::Persistence::EntityRegistry.new)
+
+    spawn_proc = ->(ctx : Movie::ActorContext(Movie::Persistence::RegistryMessage), id : Movie::Persistence::Id) do
+      ctx.spawn(Movie::PathActor.new, name: Movie::Persistence.entity_name(id)).as(Movie::ActorRefBase)
+    end
+
+    pid = Movie::Persistence::Id.new("Test", "restartable")
+    first = system.ask(registry, Movie::Persistence::GetEntity.new(pid, spawn_proc), Movie::ActorRefBase, 1.second).await(1.second)
+    first.send_system(Movie::STOP)
+
+    deadline = Time.instant + 1.second
+    while system.context(first.id) && Time.instant < deadline
+      sleep 5.milliseconds
+    end
+    system.context(first.id).should be_nil
+
+    second = system.ask(registry, Movie::Persistence::GetEntity.new(pid, spawn_proc), Movie::ActorRefBase, 1.second).await(1.second)
+    second.id.should_not eq(first.id)
+  ensure
+    system.try &.shutdown
+  end
+
   it "spawns entities once and keeps them as children" do
     system = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same)
     registry = system.spawn(Movie::Persistence::EntityRegistry.new)

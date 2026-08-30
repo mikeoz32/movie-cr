@@ -4,6 +4,7 @@
 
 - [Actor lifecycle architecture](actor_lifecycle.md)
 - [Configuration schema and semantics](configuration.md)
+- [Persistence API and recovery](persistence.md)
 - [Streams protocol and DSL notes](streams.md)
 - [Remoting MVP and protocol limits](remoting.md)
 - [Development workflow](development_workflow.md)
@@ -25,6 +26,7 @@
 - [Epic 12 - Inbound envelope allocation reduction](epics/epic-12-inbound-envelope-allocation.md)
 - [Epic 13 - Batched remoting transport](epics/epic-13-batched-remoting-transport.md)
 - [Epic 14 - Receiver handoff contention](epics/epic-14-receiver-handoff-contention.md)
+- [Epic 15 - Persistence contract and recovery](epics/epic-15-persistence-contract-and-recovery.md)
 
 ## How To Use This Folder
 

@@ -75,7 +75,7 @@ The release comparison used the unchanged Epic 09 matrix twice: 10,000 messages,
 
 Local workloads are included for completeness even though this change does not target them and their allocation profile stayed effectively unchanged. Five of six throughput workloads improved; two-process tell measured lower. Host-level throughput and tail latency remain too noisy to treat that single workload as a regression without profiler evidence. Allocation reductions were consistent in every measured remote run.
 
-The production serialization audit leaves two intentional no-argument `to_json` calls in persistence. Event journal and durable-state store interfaces require a materialized `String` for SQLite text binding, so direct streaming cannot remove that final value without changing the storage contract.
+Epic 15 later changed persistence to call `to_json(io)` through `String.build`. SQLite text binding still requires one materialized `String`, but persistence no longer builds an additional intermediate JSON value.
 
 ## Completion checklist
 
