@@ -1,6 +1,8 @@
 require "json"
 
 module Movie::Remote
+  alias JsonPayloadDecoder = Proc(String, JSON::PullParser, JsonPayload)
+
   # A JSON value that can write itself directly to a builder.
   #
   # Outbound payloads retain the original serializable value instead of

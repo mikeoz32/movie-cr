@@ -5,6 +5,7 @@ module Movie::Remote
   # Base class for deserializers to work around Crystal's generic type limitations.
   abstract class MessageDeserializer
     abstract def deserialize(payload : JsonPayload) : MessageWrapper
+    abstract def deserialize(pull : JSON::PullParser) : MessageWrapper
   end
 
   # Wrapper for deserialized messages.
@@ -30,16 +31,53 @@ module Movie::Remote
     end
   end
 
+  # Holds a registered message that was decoded directly while parsing its
+  # wire envelope. Normal delivery consumes the wrapper without parsing JSON a
+  # second time; dynamic payload access can still serialize it on demand.
+  private class DecodedMessagePayload < JsonPayload
+    getter tag : String
+    getter wrapper : MessageWrapper
+
+    def initialize(@tag : String, @wrapper : MessageWrapper)
+    end
+
+    def to_json(json : JSON::Builder) : Nil
+      @wrapper.value.to_json(json)
+    end
+
+    def json_source : String | IO
+      io = IO::Memory.new
+      @wrapper.value.to_json(io)
+      io.rewind
+    end
+  end
+
   # Typed deserializer for a specific message type.
   class TypedDeserializer(T) < MessageDeserializer
     def deserialize(payload : JsonPayload) : MessageWrapper
       TypedMessageWrapper(T).new(T.from_json(payload.json_source))
+    end
+
+    def deserialize(pull : JSON::PullParser) : MessageWrapper
+      TypedMessageWrapper(T).new(T.new(pull))
+    end
+  end
+
+  class MalformedMessagePayloadError < Exception
+    getter message_type : String
+
+    def initialize(@message_type : String, cause : Exception)
+      super("Malformed payload for #{message_type}: #{cause.message}", cause)
     end
   end
 
   # MessageRegistry manages serialization and deserialization of message types.
   # Message types must be registered before they can be sent over the wire.
   class MessageRegistry
+    PAYLOAD_DECODER = ->(tag : String, pull : JSON::PullParser) do
+      MessageRegistry.decode_payload(tag, pull).as(JsonPayload)
+    end
+
     @@deserializers = {} of String => MessageDeserializer
     @@type_to_tag = {} of String => String
     @@tag_to_type = {} of String => String
@@ -112,9 +150,33 @@ module Movie::Remote
       {tag, payload.to_any}
     end
 
+    # Returns the reusable callback injected into connection-owned frame
+    # decoders. Public/stateless FrameCodec decoding does not use the registry.
+    def self.payload_decoder : JsonPayloadDecoder
+      PAYLOAD_DECODER
+    end
+
+    # Consumes a registered payload directly from the envelope pull parser.
+    # Unknown tags retain the raw/lazy compatibility path.
+    def self.decode_payload(tag : String, pull : JSON::PullParser) : JsonPayload
+      deserializer = @@mutex.synchronize { @@deserializers[tag]? }
+      return RawJsonPayload.new(pull.read_raw) unless deserializer
+
+      begin
+        DecodedMessagePayload.new(tag, deserializer.deserialize(pull))
+      rescue ex
+        raise MalformedMessagePayloadError.new(tag, ex)
+      end
+    end
+
     # Deserializes a message from its tag and JSON payload.
     # Raises if the tag is not registered.
     def self.deserialize(tag : String, payload : JsonPayload) : MessageWrapper
+      if decoded = payload.as?(DecodedMessagePayload)
+        raise ArgumentError.new("Decoded payload tag #{decoded.tag} does not match #{tag}") unless decoded.tag == tag
+        return decoded.wrapper
+      end
+
       deserializer = @@mutex.synchronize { @@deserializers[tag]? }
       raise "No deserializer registered for tag: #{tag}" unless deserializer
 

@@ -1,6 +1,7 @@
 require "socket"
 require "./wire_envelope"
 require "./frame_codec"
+require "./message_registry"
 require "../path"
 
 module Movie::Remote
@@ -144,7 +145,7 @@ module Movie::Remote
     )
       @write_mutex = Mutex.new
       @frame_encoder = FrameCodec::Encoder.new
-      @frame_decoder = FrameCodec::Decoder.new
+      @frame_decoder = FrameCodec::Decoder.new(MessageRegistry.payload_decoder)
     end
 
     # Starts reading from the connection.
@@ -202,6 +203,9 @@ module Movie::Remote
 
         envelope = begin
           @frame_decoder.decode(@socket)
+        rescue ex : MalformedMessagePayloadError
+          Log.error { ex.message }
+          next
         rescue ex : Exception
           Log.debug { "Read/protocol error: #{ex.message}" }
           break

@@ -130,6 +130,52 @@ describe "Movie Remote E2E" do
     end
   end
 
+  it "keeps an inbound connection open after a malformed registered payload" do
+    Movie::Remote::MessageRegistry.register(RemoteDeliveryMessage)
+
+    deliveries = Channel(RemoteDeliveryMessage).new(1)
+    server_system = nil.as(Movie::ActorSystem(String)?)
+    socket = nil.as(TCPSocket?)
+
+    begin
+      server_system = Movie::ActorSystem(String).new(
+        Movie::Behaviors(String).same,
+        name: "malformed-payload-server"
+      )
+      server_remote = server_system.enable_remoting("127.0.0.1", 0)
+      server_system.spawn(RemoteDeliveryProbe.new(deliveries), name: "probe")
+      target_path = Movie::ActorPath.new(
+        Movie::Address.remote(server_system.name, "127.0.0.1", server_remote.local_port),
+        ["user", "probe"]
+      )
+      socket = TCPSocket.new("127.0.0.1", server_remote.local_port)
+
+      Movie::Remote::FrameCodec.encode(
+        Movie::Remote::WireEnvelope.user_message(
+          target_path.to_s,
+          "RemoteDeliveryMessage",
+          JSON.parse(%({"unexpected":true}))
+        ),
+        socket
+      )
+      tag, payload = Movie::Remote::MessageRegistry.prepare(RemoteDeliveryMessage.new("after malformed"))
+      Movie::Remote::FrameCodec.encode(
+        Movie::Remote::WireEnvelope.user_message(target_path.to_s, tag, payload),
+        socket
+      )
+
+      select
+      when message = deliveries.receive
+        message.body.should eq("after malformed")
+      when timeout(1.second)
+        fail "expected the valid frame after a malformed payload to be delivered"
+      end
+    ensure
+      socket.try &.close
+      server_system.try &.shutdown(1.second)
+    end
+  end
+
   it "preserves sender path metadata for remote user messages" do
     Movie::Remote::MessageRegistry.register(RemoteDeliveryMessage)
 

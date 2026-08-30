@@ -47,7 +47,7 @@ module Movie::Remote
       @payload_data = JsonPayload.wrap(payload)
     end
 
-    def initialize(pull : JSON::PullParser)
+    def initialize(pull : JSON::PullParser, payload_decoder : JsonPayloadDecoder? = nil)
       kind = nil.as(Kind?)
       correlation_id = nil.as(String?)
       sender_path = nil.as(String?)
@@ -69,7 +69,15 @@ module Movie::Remote
         when "message_type"
           message_type = pull.read_string
         when "payload"
-          payload_data = RawJsonPayload.new(pull.read_raw)
+          payload_data = if decoder = payload_decoder
+                           if type = message_type
+                             decoder.call(type, pull)
+                           else
+                             RawJsonPayload.new(pull.read_raw)
+                           end
+                         else
+                           RawJsonPayload.new(pull.read_raw)
+                         end
         when "timestamp"
           timestamp = pull.read_int
         else

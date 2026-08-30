@@ -4,6 +4,17 @@ require "benchmark"
 
 BENCH_ENABLED = ENV["MOVIE_BENCH"]? == "1"
 
+module RemoteBenchmarkMeasurements
+  extend self
+
+  def allocated_bytes_per_iteration(iterations : Int32, & : ->) : Float64
+    GC.collect
+    before = GC.stats.total_bytes
+    yield
+    (GC.stats.total_bytes - before) / iterations.to_f
+  end
+end
+
 # Benchmark message types
 record BenchmarkMessage, id : Int64, data : String, timestamp : Int64 do
   include JSON::Serializable
@@ -166,6 +177,57 @@ if BENCH_ENABLED
 
         ops_per_sec = iterations / elapsed.total_seconds
         puts "\n  Frame roundtrip: #{ops_per_sec.round(0)} ops/sec (#{iterations} iterations in #{elapsed.total_milliseconds.round(2)}ms)"
+      end
+    end
+
+    describe "Inbound registered-message pipeline" do
+      it "reports decode and typed-deserialization allocations separately" do
+        Movie::Remote::MessageRegistry.register(BenchmarkMessage)
+        message = BenchmarkMessage.new(id: 1_i64, data: "x" * 64, timestamp: 1_i64)
+        tag, payload = Movie::Remote::MessageRegistry.prepare(message)
+        frame = Movie::Remote::FrameCodec.encode_to_bytes(
+          Movie::Remote::WireEnvelope.user_message(
+            "movie://bench/user/target",
+            tag,
+            payload
+          )
+        )
+        iterations = 10_000
+
+        input = IO::Memory.new(frame, writable: false)
+        decoder = Movie::Remote::FrameCodec::Decoder.new
+        decode_checksum = 0_i64
+        decode_bytes = RemoteBenchmarkMeasurements.allocated_bytes_per_iteration(iterations) do
+          iterations.times do
+            input.rewind
+            decode_checksum &+= decoder.decode(input).not_nil!.timestamp
+          end
+        end
+
+        decoded_payload = Movie::Remote::FrameCodec.decode_from_bytes(frame).not_nil!.payload_data
+        deserialize_checksum = 0_i64
+        deserialize_bytes = RemoteBenchmarkMeasurements.allocated_bytes_per_iteration(iterations) do
+          iterations.times do
+            restored = Movie::Remote::MessageRegistry.deserialize(tag, decoded_payload).unwrap(BenchmarkMessage)
+            deserialize_checksum &+= restored.id
+          end
+        end
+
+        pipeline_input = IO::Memory.new(frame, writable: false)
+        pipeline_decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
+        pipeline_checksum = 0_i64
+        pipeline_bytes = RemoteBenchmarkMeasurements.allocated_bytes_per_iteration(iterations) do
+          iterations.times do
+            pipeline_input.rewind
+            envelope = pipeline_decoder.decode(pipeline_input).not_nil!
+            restored = Movie::Remote::MessageRegistry.deserialize(tag, envelope.payload_data).unwrap(BenchmarkMessage)
+            pipeline_checksum &+= restored.id
+          end
+        end
+
+        decode_checksum.should be > 0_i64
+        {deserialize_checksum, pipeline_checksum}.should eq({iterations.to_i64, iterations.to_i64})
+        puts "\n  Inbound allocations: raw decode #{decode_bytes.round(1)} B/msg, second deserialize #{deserialize_bytes.round(1)} B/msg, direct combined #{pipeline_bytes.round(1)} B/msg"
       end
     end
 

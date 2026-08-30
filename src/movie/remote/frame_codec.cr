@@ -71,7 +71,7 @@ module Movie::Remote
 
     # Stateful decoder that retains the largest observed frame buffer.
     class Decoder
-      def initialize
+      def initialize(@payload_decoder : JsonPayloadDecoder? = nil)
         @buffer = Bytes.new(INITIAL_BUFFER_CAPACITY)
         @reader = BufferReader.new
       end
@@ -102,7 +102,7 @@ module Movie::Remote
                   @buffer[0, frame_size]
                 end
         io.read_fully(frame)
-        WireEnvelope.from_json(@reader.reset(frame))
+        WireEnvelope.new(JSON::PullParser.new(@reader.reset(frame)), @payload_decoder)
       rescue IO::EOFError
         nil
       end

@@ -11,6 +11,14 @@ record FrameDirectWriteMessage, value : String do
   end
 end
 
+record PullParserOnlyFrameMessage, value : String do
+  include JSON::Serializable
+
+  def self.from_json(source : String | IO)
+    raise "materialized payload parse must not be used"
+  end
+end
+
 struct ThrowingFramePayload
   def to_json(json : JSON::Builder) : Nil
     json.object do
@@ -90,6 +98,7 @@ describe Movie::Remote::FrameCodec do
         Movie::Remote::FrameCodec.encode_to_bytes(envelope)
       ).not_nil!
 
+      decoded.payload_data.should be_a(Movie::Remote::RawJsonPayload)
       decoded.payload["value"].as_s.should eq("direct")
     end
 
@@ -123,6 +132,58 @@ describe Movie::Remote::FrameCodec do
       Movie::Remote::FrameCodec.decode(io).not_nil!.kind.should eq(
         Movie::Remote::WireEnvelope::Kind::HEARTBEAT
       )
+    end
+
+    it "decodes registered payloads directly from the envelope pull parser" do
+      Movie::Remote::MessageRegistry.clear
+      Movie::Remote::MessageRegistry.register(PullParserOnlyFrameMessage)
+      tag, payload = Movie::Remote::MessageRegistry.prepare(PullParserOnlyFrameMessage.new("direct"))
+      frame = Movie::Remote::FrameCodec.encode_to_bytes(
+        Movie::Remote::WireEnvelope.user_message("movie://sys/user/direct", tag, payload)
+      )
+      decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
+
+      envelope = decoder.decode(IO::Memory.new(frame, writable: false)).not_nil!
+      restored = Movie::Remote::MessageRegistry.deserialize(tag, envelope.payload_data)
+
+      restored.unwrap(PullParserOnlyFrameMessage).value.should eq("direct")
+    ensure
+      Movie::Remote::MessageRegistry.clear
+    end
+
+    it "keeps unknown payload tags on the raw compatibility path" do
+      payload = JSON.parse(%({"value":"raw"}))
+      frame = Movie::Remote::FrameCodec.encode_to_bytes(
+        Movie::Remote::WireEnvelope.user_message("movie://sys/user/unknown", "UnknownPayload", payload)
+      )
+      decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
+
+      envelope = decoder.decode(IO::Memory.new(frame, writable: false)).not_nil!
+
+      envelope.payload_data.should be_a(Movie::Remote::RawJsonPayload)
+      envelope.payload["value"].as_s.should eq("raw")
+    end
+
+    it "recovers the direct payload decoder after a malformed registered message" do
+      Movie::Remote::MessageRegistry.clear
+      Movie::Remote::MessageRegistry.register(PullParserOnlyFrameMessage)
+      io = IO::Memory.new
+      Movie::Remote::FrameCodec.encode(
+        Movie::Remote::WireEnvelope.user_message(
+          "movie://sys/user/invalid",
+          "PullParserOnlyFrameMessage",
+          JSON.parse(%({"unexpected":true}))
+        ),
+        io
+      )
+      Movie::Remote::FrameCodec.encode(Movie::Remote::WireEnvelope.heartbeat, io)
+      io.rewind
+      decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
+
+      expect_raises(Movie::Remote::MalformedMessagePayloadError) { decoder.decode(io) }
+      decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::HEARTBEAT)
+    ensure
+      Movie::Remote::MessageRegistry.clear
     end
   end
 
