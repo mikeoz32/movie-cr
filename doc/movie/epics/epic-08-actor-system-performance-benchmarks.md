@@ -23,6 +23,9 @@
 
 - Add: `benchmarks/actor_system.cr`
 - Add: `benchmarks/support/actor_system_benchmark.cr`
+- Add: `benchmarks/support/actor_system_benchmark/types.cr`
+- Add: `benchmarks/support/actor_system_benchmark/runner.cr`
+- Add: `benchmarks/support/actor_system_benchmark/reporter.cr`
 - Add: `spec/movie/actor_system_benchmark_spec.cr`
 - Modify: `README.md`
 - Modify: `doc/movie/development_workflow.md`
