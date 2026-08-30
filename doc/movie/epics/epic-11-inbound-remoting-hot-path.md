@@ -4,7 +4,7 @@
 
 **Depends on:** Epic 10.
 
-**Status:** In progress.
+**Status:** Completed (2026-08-30).
 
 **Done when:**
 
@@ -18,7 +18,7 @@
 
 ## Task 11.1: Decode registered inbound payloads directly into typed messages
 
-**Status:** In progress.
+**Status:** Completed (2026-08-30).
 
 **Files**
 
@@ -72,12 +72,14 @@ The per-run allocation ranges were stable and changed only on the server/combine
 
 ## Completion checklist
 
-- [ ] Failing test written first.
-- [ ] Failing test observed red.
-- [ ] Minimal implementation written.
-- [ ] Targeted verification green.
-- [ ] Broader verification green.
-- [ ] Formatting check green.
-- [ ] Docs/examples updated if needed.
-- [ ] Review requested.
-- [ ] Review feedback addressed.
+- [x] Failing test written first.
+- [x] Failing test observed red.
+- [x] Minimal implementation written.
+- [x] Targeted verification green.
+- [x] Broader verification green.
+- [x] Formatting check green.
+- [x] Docs/examples updated if needed.
+- [x] Review requested.
+- [x] Review feedback addressed.
+
+Final verification: the direct pull-parser regression was observed failing because `MessageRegistry.payload_decoder` did not exist, then passed after registered payload decoding was injected into inbound connection decoders. Focused registry, frame, integration, and end-to-end verification passes with 44 examples; the final frame and end-to-end review-fix set passes with 23 examples; the full CI-flagged suite passes with 250 examples; all examples build; the opt-in release remoting benchmark passes with 15 examples; the stress suite passes with 10 examples; formatting is clean across `src`, `spec`, `examples`, and `benchmarks`; and the standalone release ActorSystem benchmark completes two unchanged five-run comparison matrices. Initial Standards findings about stale raw-payload documentation and duplicated fallback logic were fixed, as were follow-up source comments. The initial Spec field-order concern was withdrawn after the existing fallback isolation was confirmed and a reordered malformed-then-valid same-connection E2E regression was added. Final Standards and Spec reviews have no remaining findings.
