@@ -27,7 +27,7 @@ if BENCH_ENABLED
 
         elapsed = Time.measure do
           iterations.times do
-            tag, json = Movie::Remote::MessageRegistry.serialize(msg)
+            tag, payload = Movie::Remote::MessageRegistry.prepare(msg)
           end
         end
 
@@ -38,7 +38,7 @@ if BENCH_ENABLED
       it "benchmarks small message deserialization" do
         Movie::Remote::MessageRegistry.register(BenchmarkMessage)
         msg = BenchmarkMessage.new(id: 1_i64, data: "hello", timestamp: Time.utc.to_unix_ms)
-        tag, payload = Movie::Remote::MessageRegistry.serialize(msg)
+        tag, payload = Movie::Remote::MessageRegistry.prepare(msg)
         envelope = Movie::Remote::WireEnvelope.user_message("movie://bench/user/target", tag, payload)
         decoded_payload = Movie::Remote::FrameCodec.decode_from_bytes(
           Movie::Remote::FrameCodec.encode_to_bytes(envelope)
@@ -63,7 +63,7 @@ if BENCH_ENABLED
 
         elapsed = Time.measure do
           iterations.times do
-            tag, json = Movie::Remote::MessageRegistry.serialize(msg)
+            tag, payload = Movie::Remote::MessageRegistry.prepare(msg)
           end
         end
 
@@ -81,7 +81,7 @@ if BENCH_ENABLED
 
         elapsed = Time.measure do
           iterations.times do
-            tag, payload = Movie::Remote::MessageRegistry.serialize(msg)
+            tag, payload = Movie::Remote::MessageRegistry.prepare(msg)
             envelope = Movie::Remote::WireEnvelope.user_message("movie://bench/user/target", tag, payload)
             io.clear
             encoder.encode(envelope, io)

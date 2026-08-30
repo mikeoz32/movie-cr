@@ -86,19 +86,30 @@ module Movie::Remote
       end
     end
 
-    # Prepares a message for direct JSON serialization, returning
-    # {tag, payload_writer} without materializing an intermediate String/DOM.
-    # The type must include JSON::Serializable.
-    def self.serialize(message : T) : {String, JsonPayload} forall T
+    # Prepares a message for direct wire serialization without materializing
+    # an intermediate String or JSON DOM.
+    def self.prepare(message : T) : {String, JsonPayload} forall T
       type_name = T.name
       tag = @@mutex.synchronize { @@type_to_tag[type_name]? } || type_name
       {tag, SerializableJsonPayload(T).new(message).as(JsonPayload)}
     end
 
-    def self.serialize(message : JSON::Serializable) : {String, JsonPayload}
+    def self.prepare(message : JSON::Serializable) : {String, JsonPayload}
       type_name = message.class.name
       tag = @@mutex.synchronize { @@type_to_tag[type_name]? } || type_name
       {tag, SerializableJsonPayload(JSON::Serializable).new(message).as(JsonPayload)}
+    end
+
+    # Compatibility API for callers that explicitly require a JSON DOM.
+    # Remoting hot paths use .prepare and never materialize this value.
+    def self.serialize(message : T) : {String, JSON::Any} forall T
+      tag, payload = prepare(message)
+      {tag, payload.to_any}
+    end
+
+    def self.serialize(message : JSON::Serializable) : {String, JSON::Any}
+      tag, payload = prepare(message)
+      {tag, payload.to_any}
     end
 
     # Deserializes a message from its tag and JSON payload.

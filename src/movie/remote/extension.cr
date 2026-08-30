@@ -24,7 +24,7 @@ module Movie::Remote
     end
 
     def reply_success(value : JSON::Serializable) : Nil
-      tag, payload = MessageRegistry.serialize(value)
+      tag, payload = MessageRegistry.prepare(value)
       send_response(WireEnvelope.ask_response(
         target_path: path.try(&.to_s) || "",
         message_type: tag,

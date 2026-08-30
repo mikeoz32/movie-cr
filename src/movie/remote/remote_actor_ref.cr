@@ -105,7 +105,7 @@ module Movie::Remote
                           nil
                         end
 
-      tag, payload = MessageRegistry.serialize(message)
+      tag, payload = MessageRegistry.prepare(message)
 
       envelope = WireEnvelope.user_message(
         target_path: @target_path.to_s,
@@ -122,7 +122,7 @@ module Movie::Remote
 
     # Sends a message without ordering guarantee (uses round-robin for load balancing).
     def tell_unordered(message : T)
-      tag, payload = MessageRegistry.serialize(message)
+      tag, payload = MessageRegistry.prepare(message)
 
       envelope = WireEnvelope.user_message(
         target_path: @target_path.to_s,
@@ -157,7 +157,7 @@ module Movie::Remote
       correlation_id = UUID.random.to_s
       promise = Movie::Promise(R).new
 
-      tag, payload = MessageRegistry.serialize(message)
+      tag, payload = MessageRegistry.prepare(message)
 
       envelope = WireEnvelope.ask_request(
         target_path: @target_path.to_s,

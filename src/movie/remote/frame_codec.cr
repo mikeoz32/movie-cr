@@ -19,7 +19,12 @@ module Movie::Remote
 
       def encode(envelope : WireEnvelope, io : IO) : Nil
         @buffer.clear
-        @json.document { envelope.to_json(@json) }
+        begin
+          @json.document { envelope.to_json(@json) }
+        rescue ex
+          reset_buffer
+          raise ex
+        end
         length = @buffer.bytesize
 
         if length > MAX_FRAME_SIZE

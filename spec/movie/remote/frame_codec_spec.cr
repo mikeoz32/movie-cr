@@ -11,6 +11,15 @@ record FrameDirectWriteMessage, value : String do
   end
 end
 
+struct ThrowingFramePayload
+  def to_json(json : JSON::Builder) : Nil
+    json.object do
+      json.field("started", true)
+      raise "serializer failed"
+    end
+  end
+end
+
 describe Movie::Remote::FrameCodec do
   describe ".encode and .decode" do
     it "encodes and decodes a user message" do
@@ -70,7 +79,7 @@ describe Movie::Remote::FrameCodec do
     end
 
     it "writes a serializable payload directly through the frame encoder" do
-      tag, payload = Movie::Remote::MessageRegistry.serialize(FrameDirectWriteMessage.new("direct"))
+      tag, payload = Movie::Remote::MessageRegistry.prepare(FrameDirectWriteMessage.new("direct"))
       envelope = Movie::Remote::WireEnvelope.user_message(
         target_path: "movie://sys/user/direct",
         message_type: tag,
@@ -95,6 +104,25 @@ describe Movie::Remote::FrameCodec do
 
       decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::HEARTBEAT)
       decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::HEARTBEAT)
+    end
+
+    it "recovers a reusable encoder after payload serialization fails" do
+      encoder = Movie::Remote::FrameCodec::Encoder.new
+      io = IO::Memory.new
+      failing = Movie::Remote::WireEnvelope.user_message(
+        target_path: "movie://sys/user/failing",
+        message_type: "ThrowingFramePayload",
+        payload: ThrowingFramePayload.new
+      )
+
+      expect_raises(Exception, "serializer failed") { encoder.encode(failing, io) }
+
+      io.clear
+      encoder.encode(Movie::Remote::WireEnvelope.heartbeat, io)
+      io.rewind
+      Movie::Remote::FrameCodec.decode(io).not_nil!.kind.should eq(
+        Movie::Remote::WireEnvelope::Kind::HEARTBEAT
+      )
     end
   end
 
