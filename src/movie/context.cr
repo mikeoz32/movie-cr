@@ -237,7 +237,7 @@ module Movie
     def deliver(message : T, sender : ActorRefBase?)
       raise "Mailbox not initialized" unless @mailbox
       mbox = @mailbox.as(Mailbox(T))
-      mbox << Envelope(T).new(message.as(T), sender || @system.dead_letters)
+      mbox.enqueue(message.as(T), sender || @system.dead_letters)
     end
 
     # Delivers a deserialized wire value without requiring the wire wrapper to
@@ -258,10 +258,14 @@ module Movie
     def send_system_message(message : SystemMessage)
       raise "Mailbox not initialized" unless @mailbox
       mbox = @mailbox.as(Mailbox(T))
-      mbox.send_system(Envelope(SystemMessage).new(message, @ref))
+      mbox.enqueue_system(message, @ref)
     end
 
     def on_message(message : Envelope(T))
+      on_message(MailboxEnvelope(T).new(message.message, message.sender))
+    end
+
+    def on_message(message : MailboxEnvelope(T))
       if @state == State::STOPPING || @state == State::STOPPED || @state == State::FAILED || @state == State::TERMINATED || @state == State::RESTARTING
         log.warn { "Dropping message #{message.message.inspect} from #{message.sender} in state #{@state}" }
         return
@@ -285,6 +289,10 @@ module Movie
     end
 
     def on_system_message(message : Envelope(SystemMessage))
+      on_system_message(MailboxEnvelope(SystemMessage).new(message.message, message.sender))
+    end
+
+    def on_system_message(message : MailboxEnvelope(SystemMessage))
       case message.message
       when PRE_START
         handle_pre_start

@@ -1,9 +1,40 @@
+require "deque"
+
 module Movie
   class Envelope(T)
     getter message : T
     getter sender : ActorRefBase?
 
     def initialize(@message : T, @sender : ActorRefBase?)
+    end
+  end
+
+  # :nodoc:
+  struct MailboxEnvelope(T)
+    getter message : T
+    getter sender : ActorRefBase?
+
+    def initialize(@message : T, @sender : ActorRefBase?)
+    end
+  end
+
+  # :nodoc:
+  class MailboxQueue(T)
+    def initialize
+      @items = Deque(T).new
+      @mutex = Mutex.new
+    end
+
+    def size : Int32
+      @mutex.synchronize { @items.size }
+    end
+
+    def enqueue(value : T) : Nil
+      @mutex.synchronize { @items << value }
+    end
+
+    def dequeue : T?
+      @mutex.synchronize { @items.shift? }
     end
   end
 
@@ -14,8 +45,8 @@ module Movie
     @processing = false
 
     def initialize(@dispatcher : Dispatcher, @context : ActorContext(T))
-      @inbox = Queue(Envelope(T)).new
-      @system = Queue(Envelope(SystemMessage)).new
+      @inbox = MailboxQueue(MailboxEnvelope(T)).new
+      @system = MailboxQueue(MailboxEnvelope(SystemMessage)).new
       @mutex = Mutex.new
     end
 
@@ -57,12 +88,20 @@ module Movie
     end
 
     def send(message : Envelope(T))
-      @inbox.enqueue(message)
+      enqueue(message.message, message.sender)
+    end
+
+    def enqueue(message : T, sender : ActorRefBase?)
+      @inbox.enqueue(MailboxEnvelope(T).new(message, sender))
       schedule_dispatch
     end
 
     def send_system(message : Envelope(SystemMessage))
-      @system.enqueue(message)
+      enqueue_system(message.message, message.sender)
+    end
+
+    def enqueue_system(message : SystemMessage, sender : ActorRefBase?)
+      @system.enqueue(MailboxEnvelope(SystemMessage).new(message, sender))
       schedule_dispatch
     end
 
@@ -71,7 +110,7 @@ module Movie
     end
 
     def purge_inbox
-      @inbox = Queue(Envelope(T)).new
+      @inbox = MailboxQueue(MailboxEnvelope(T)).new
     end
 
     def wake

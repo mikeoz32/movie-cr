@@ -2574,23 +2574,23 @@ ActorSystem (Root)
 
 ## Data Structures
 
-### Queue Implementation
+### Mailbox Queue Implementation
 
-The framework uses a custom lock-free queue implementation for mailboxes.
+Mailboxes use an internal mutex-protected reusable deque. The general-purpose
+`Movie::Queue` and `QueueNode` APIs remain available for compatibility, but the
+mailbox hot path does not allocate one linked node per message.
 
 **Queue Structure:**
 
 ```
-QueueNode(T) → QueueNode(T) → QueueNode(T) → nil
-    ↑                             ↑
-  @first                        @last
+Deque(T): [MailboxEnvelope, MailboxEnvelope, MailboxEnvelope, ...]
 ```
 
 **Operations:**
 
-- **Enqueue**: O(1) - Append to tail with mutex
-- **Dequeue**: O(1) - Remove from head with mutex
-- **Size Tracking**: Maintained atomically
+- **Enqueue**: Amortized O(1) - Append to the reusable deque with its mutex
+- **Dequeue**: O(1) - Remove from the head with the same mutex
+- **Storage**: Capacity is reused instead of allocating a linked node per message
 
 **Thread Safety:**
 
@@ -2608,6 +2608,10 @@ class Envelope(T)
   @sender : ActorRefBase # Reference to sender
 end
 ```
+
+The public reference-type `Envelope(T)` remains source-compatible. Internal
+mailbox delivery stores the same fields in a value-type `MailboxEnvelope(T)` so
+normal actor sends do not allocate an envelope object.
 
 **Purpose:**
 - Sender identification for request-response patterns
@@ -2683,13 +2687,13 @@ Message Arrives → Mailbox.send() → Check @scheduled
 
 2. **Queue**:
    - Mutex per queue instance
-   - Atomic size counter
+   - Mailbox deque size is read under the queue mutex
    - Safe enqueue/dequeue
 
 3. **Mailbox**:
    - Scheduled flag prevents duplicate dispatch
    - Separate system and user message queues
-   - Lock-free scheduling decision
+   - Mutex-protected scheduling decision
 
 4. **ID Generator**:
    - Atomic(Int32) for unique IDs
