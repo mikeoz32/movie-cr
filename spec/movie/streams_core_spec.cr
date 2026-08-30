@@ -6,6 +6,14 @@ alias BlueprintStreams = Movie::Streams::Typed
 private BLUEPRINT_STREAM_SYSTEM = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same)
 Spec.after_suite { BLUEPRINT_STREAM_SYSTEM.shutdown }
 
+private def blueprint_eventually(timeout_span : Time::Span = 1.second, &condition : -> Bool)
+  deadline = Time.instant + timeout_span
+  until condition.call
+    fail("condition was not satisfied within #{timeout_span}") if Time.instant >= deadline
+    sleep 1.millisecond
+  end
+end
+
 describe "typed stream blueprints" do
   it "changes element types and combines source and sink materialized values" do
     system = BLUEPRINT_STREAM_SYSTEM
@@ -175,5 +183,193 @@ describe "typed stream blueprints" do
     expect_raises(BlueprintStreams::StreamClosedError) { control << 1 }
   ensure
     system.try &.shutdown
+  end
+
+  it "propagates an idle downstream sink failure to the manual source" do
+    transformed = Atomic(Int32).new(0)
+    flow = BlueprintStreams::Flows.map(Int32, Int32) do |value|
+      transformed.add(1)
+      value
+    end
+    sink = BlueprintStreams::Sinks.fold(Int32, 0) do |_sum, _value|
+      raise "fold failed"
+    end
+    graph = BlueprintStreams::Sources.manual(Int32)
+      .via(flow)
+      .to_mat(sink) { |control, result| {control, result} }
+    control, result = graph.run(BLUEPRINT_STREAM_SYSTEM)
+
+    control << 1
+    expect_raises(Exception, "fold failed") { result.await(1.second) }
+
+    blueprint_eventually(100.milliseconds) { control.terminal? }
+    control.offer(2).status.should eq(BlueprintStreams::QueueOfferStatus::QueueClosed)
+    transformed.get.should eq(1)
+  end
+
+  it "does not dequeue buffered input after downstream cancellation" do
+    inlet = BlueprintStreams::StageChannel(Int32).new(BLUEPRINT_STREAM_SYSTEM, capacity: 1)
+    downstream = BlueprintStreams::StageChannel(String).new(BLUEPRINT_STREAM_SYSTEM, capacity: 1)
+    inlet.offer(7)
+    downstream.cancel
+
+    expect_raises(BlueprintStreams::StreamCancelledError, "downstream cancelled the stream") do
+      inlet.receive(until_cancelled_by: downstream)
+    end
+  ensure
+    inlet.try &.cancel
+    downstream.try &.cancel
+  end
+
+  it "rolls back source and flow edges when a flow materializer raises" do
+    edges = [] of BlueprintStreams::StageChannel(Int32)
+    created = Channel(BlueprintStreams::StageChannel(Int32)).new(2)
+    source = BlueprintStreams::Source(Int32, BlueprintStreams::NotUsed).new do |system|
+      outlet = BlueprintStreams::StageChannel(Int32).new(system)
+      created.send(outlet)
+      BlueprintStreams::Materialization(Int32, BlueprintStreams::NotUsed).new(
+        outlet,
+        BlueprintStreams::NotUsed::INSTANCE
+      )
+    end
+    failing_flow = BlueprintStreams::Flow(Int32, Int32, BlueprintStreams::NotUsed).new do |system, _inlet|
+      outlet = BlueprintStreams::StageChannel(Int32).new(system)
+      created.send(outlet)
+      raise "flow materialization failed"
+      BlueprintStreams::Materialization(Int32, BlueprintStreams::NotUsed).new(
+        outlet,
+        BlueprintStreams::NotUsed::INSTANCE
+      )
+    end
+    graph = source.via(failing_flow).to(BlueprintStreams::Sinks.collect(Int32))
+
+    expect_raises(Exception, "flow materialization failed") { graph.run(BLUEPRINT_STREAM_SYSTEM) }
+    edges = [created.receive, created.receive]
+    edges.map(&.cancelled?).should eq([true, true])
+  ensure
+    edges.try { |items| items.each { |edge| edge.cancel } }
+  end
+
+  it "rolls back source and sink edges when a sink materializer raises" do
+    edges = [] of BlueprintStreams::StageChannel(Int32)
+    created = Channel(BlueprintStreams::StageChannel(Int32)).new(2)
+    source = BlueprintStreams::Source(Int32, BlueprintStreams::NotUsed).new do |system|
+      outlet = BlueprintStreams::StageChannel(Int32).new(system)
+      created.send(outlet)
+      BlueprintStreams::Materialization(Int32, BlueprintStreams::NotUsed).new(
+        outlet,
+        BlueprintStreams::NotUsed::INSTANCE
+      )
+    end
+    failing_sink = BlueprintStreams::Sink(Int32, BlueprintStreams::NotUsed).new do |system, _inlet|
+      created.send(BlueprintStreams::StageChannel(Int32).new(system))
+      raise "sink materialization failed"
+      BlueprintStreams::NotUsed::INSTANCE
+    end
+
+    expect_raises(Exception, "sink materialization failed") do
+      source.to(failing_sink).run(BLUEPRINT_STREAM_SYSTEM)
+    end
+    edges = [created.receive, created.receive]
+    edges.map(&.cancelled?).should eq([true, true])
+  ensure
+    edges.try { |items| items.each { |edge| edge.cancel } }
+  end
+
+  it "rolls back all composed edges when materialized-value combination raises" do
+    edges = [] of BlueprintStreams::StageChannel(Int32)
+    created = Channel(BlueprintStreams::StageChannel(Int32)).new(2)
+    source = BlueprintStreams::Source(Int32, BlueprintStreams::NotUsed).new do |system|
+      outlet = BlueprintStreams::StageChannel(Int32).new(system)
+      created.send(outlet)
+      BlueprintStreams::Materialization(Int32, BlueprintStreams::NotUsed).new(
+        outlet,
+        BlueprintStreams::NotUsed::INSTANCE
+      )
+    end
+    flow = BlueprintStreams::Flow(Int32, Int32, BlueprintStreams::NotUsed).new do |system, _inlet|
+      outlet = BlueprintStreams::StageChannel(Int32).new(system)
+      created.send(outlet)
+      BlueprintStreams::Materialization(Int32, BlueprintStreams::NotUsed).new(
+        outlet,
+        BlueprintStreams::NotUsed::INSTANCE
+      )
+    end
+    combined = source.via_mat(flow) do |_source_mat, _flow_mat|
+      raise "materialized combination failed"
+      BlueprintStreams::NotUsed::INSTANCE
+    end
+
+    expect_raises(Exception, "materialized combination failed") do
+      combined.to(BlueprintStreams::Sinks.collect(Int32)).run(BLUEPRINT_STREAM_SYSTEM)
+    end
+    edges = [created.receive, created.receive]
+    edges.map(&.cancelled?).should eq([true, true])
+  ensure
+    edges.try { |items| items.each { |edge| edge.cancel } }
+  end
+
+  it "rolls back nested flow edges when Flow via_mat combination raises" do
+    edges = [] of BlueprintStreams::StageChannel(Int32)
+    created = Channel(BlueprintStreams::StageChannel(Int32)).new(3)
+    source = BlueprintStreams::Source(Int32, BlueprintStreams::NotUsed).new do |system|
+      outlet = BlueprintStreams::StageChannel(Int32).new(system)
+      created.send(outlet)
+      BlueprintStreams::Materialization(Int32, BlueprintStreams::NotUsed).new(
+        outlet,
+        BlueprintStreams::NotUsed::INSTANCE
+      )
+    end
+    first = BlueprintStreams::Flow(Int32, Int32, BlueprintStreams::NotUsed).new do |system, _inlet|
+      outlet = BlueprintStreams::StageChannel(Int32).new(system)
+      created.send(outlet)
+      BlueprintStreams::Materialization(Int32, BlueprintStreams::NotUsed).new(
+        outlet,
+        BlueprintStreams::NotUsed::INSTANCE
+      )
+    end
+    second = BlueprintStreams::Flow(Int32, Int32, BlueprintStreams::NotUsed).new do |system, _inlet|
+      outlet = BlueprintStreams::StageChannel(Int32).new(system)
+      created.send(outlet)
+      BlueprintStreams::Materialization(Int32, BlueprintStreams::NotUsed).new(
+        outlet,
+        BlueprintStreams::NotUsed::INSTANCE
+      )
+    end
+    composed = first.via_mat(second) do |_first_mat, _second_mat|
+      raise "flow combination failed"
+      BlueprintStreams::NotUsed::INSTANCE
+    end
+
+    expect_raises(Exception, "flow combination failed") do
+      source.via(composed).to(BlueprintStreams::Sinks.collect(Int32)).run(BLUEPRINT_STREAM_SYSTEM)
+    end
+    edges = [created.receive, created.receive, created.receive]
+    edges.map(&.cancelled?).should eq([true, true, true])
+  ensure
+    edges.try { |items| items.each { |edge| edge.cancel } }
+  end
+
+  it "rolls back the source edge when to_mat combination raises" do
+    edges = [] of BlueprintStreams::StageChannel(Int32)
+    created = Channel(BlueprintStreams::StageChannel(Int32)).new(1)
+    source = BlueprintStreams::Source(Int32, BlueprintStreams::NotUsed).new do |system|
+      outlet = BlueprintStreams::StageChannel(Int32).new(system)
+      created.send(outlet)
+      BlueprintStreams::Materialization(Int32, BlueprintStreams::NotUsed).new(
+        outlet,
+        BlueprintStreams::NotUsed::INSTANCE
+      )
+    end
+    graph = source.to_mat(BlueprintStreams::Sinks.collect(Int32)) do |_source_mat, _sink_mat|
+      raise "sink combination failed"
+      BlueprintStreams::NotUsed::INSTANCE
+    end
+
+    expect_raises(Exception, "sink combination failed") { graph.run(BLUEPRINT_STREAM_SYSTEM) }
+    edges = [created.receive]
+    edges.map(&.cancelled?).should eq([true])
+  ensure
+    edges.try { |items| items.each { |edge| edge.cancel } }
   end
 end

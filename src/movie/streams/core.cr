@@ -104,6 +104,31 @@ module Movie
         end
       end
 
+      # Tracks edges created during one synchronous materialization call. A
+      # nested successful scope transfers ownership to its parent; an escaping
+      # exception cancels every edge created by that scope in reverse order.
+      class MaterializationScope
+        @rollbacks = [] of Proc(Nil)
+
+        def track(&rollback : -> Nil)
+          @rollbacks << rollback
+        end
+
+        def absorb(rollbacks : Array(Proc(Nil)))
+          @rollbacks.concat(rollbacks)
+        end
+
+        def commit_to(parent : MaterializationScope?)
+          parent.try &.absorb(@rollbacks)
+          @rollbacks.clear
+        end
+
+        def rollback
+          @rollbacks.reverse_each(&.call)
+          @rollbacks.clear
+        end
+      end
+
       # Bounded runtime edge used by the reusable blueprint API.
       class StageChannel(T)
         getter capacity : Int32
@@ -130,6 +155,7 @@ module Movie
             StreamRuntimeExtension.new
           end
           @registration_id = @runtime.register { cancel_from_runtime }
+          BlueprintRuntime.track_rollback { cancel }
         end
 
         def push(value : T)
@@ -202,14 +228,29 @@ module Movie
         end
 
         def receive : StreamEvent(T)
+          receive_internal(nil)
+        end
+
+        def receive(*, until_cancelled_by downstream : StageChannel(U)) : StreamEvent(T) forall U
+          receive_internal(downstream.cancellation_signal)
+        end
+
+        protected def cancellation_signal : Channel(Nil)
+          @cancel_signal
+        end
+
+        private def receive_internal(downstream_cancel_signal : Channel(Nil)?) : StreamEvent(T)
           loop do
             event = nil.as(StreamEvent(T)?)
             state_signal = nil.as(Channel(Nil)?)
             cancelled = false
+            downstream_cancelled = false
             terminal = false
 
             @state_mutex.synchronize do
-              if @cancelled || @terminal_delivered
+              if downstream_cancel_signal.try &.closed?
+                downstream_cancelled = true
+              elsif @cancelled || @terminal_delivered
                 cancelled = true
               elsif @buffer.empty?
                 if pending_terminal = @terminal
@@ -226,16 +267,29 @@ module Movie
               end
             end
 
+            if downstream_cancelled
+              raise StreamCancelledError.new("downstream cancelled the stream")
+            end
             raise StreamCancelledError.new("stream edge was cancelled") if cancelled
             if received = event
               @runtime.unregister(@registration_id) if terminal
               return received
             end
 
-            select
-            when state_signal.not_nil!.receive?
-            when @cancel_signal.receive?
-              raise StreamCancelledError.new("stream edge was cancelled")
+            if downstream_cancel = downstream_cancel_signal
+              select
+              when state_signal.not_nil!.receive?
+              when @cancel_signal.receive?
+                raise StreamCancelledError.new("stream edge was cancelled")
+              when downstream_cancel.receive?
+                raise StreamCancelledError.new("downstream cancelled the stream")
+              end
+            else
+              select
+              when state_signal.not_nil!.receive?
+              when @cancel_signal.receive?
+                raise StreamCancelledError.new("stream edge was cancelled")
+              end
             end
           end
         end
@@ -371,12 +425,53 @@ module Movie
       record Materialization(Out, Mat), outlet : StageChannel(Out), value : Mat
 
       module BlueprintRuntime
+        @@materialization_scopes = {} of UInt64 => Array(MaterializationScope)
+        @@materialization_scope_mutex = Mutex.new
+
         def self.validate_buffer_size(buffer_size : Int32)
           raise ArgumentError.new("buffer_size must be greater than zero") unless buffer_size > 0
         end
 
         def self.execute(system : AbstractActorSystem, &block : -> Nil)
           system.dispatchers.default.execute { block.call }
+        end
+
+        def self.materialize(&block : -> R) : R forall R
+          scope = MaterializationScope.new
+          fiber_id = Fiber.current.object_id
+          @@materialization_scope_mutex.synchronize do
+            stack = @@materialization_scopes[fiber_id] ||= [] of MaterializationScope
+            stack << scope
+          end
+
+          succeeded = false
+          begin
+            result = block.call
+            succeeded = true
+            result
+          ensure
+            parent = @@materialization_scope_mutex.synchronize do
+              stack = @@materialization_scopes[fiber_id]
+              popped = stack.pop
+              raise "materialization scope stack corrupted" unless popped.same?(scope)
+              parent_scope = stack.last?
+              @@materialization_scopes.delete(fiber_id) if stack.empty?
+              parent_scope
+            end
+
+            if succeeded
+              scope.commit_to(parent)
+            else
+              scope.rollback
+            end
+          end
+        end
+
+        def self.track_rollback(&rollback : -> Nil)
+          scope = @@materialization_scope_mutex.synchronize do
+            @@materialization_scopes[Fiber.current.object_id]?.try &.last?
+          end
+          scope.try { |current| current.track { rollback.call } }
         end
       end
 
@@ -391,7 +486,7 @@ module Movie
 
         # Internal materialization hook used by composition.
         def materialize(system : AbstractActorSystem) : Materialization(Out, Mat)
-          @materializer.call(system)
+          BlueprintRuntime.materialize { @materializer.call(system) }
         end
 
         def via(flow : Flow(Out, Next, FlowMat)) : Source(Next, Mat) forall Next, FlowMat
@@ -447,7 +542,7 @@ module Movie
 
         # Internal materialization hook used by composition.
         def materialize(system : AbstractActorSystem, inlet : StageChannel(In)) : Materialization(Out, Mat)
-          @materializer.call(system, inlet)
+          BlueprintRuntime.materialize { @materializer.call(system, inlet) }
         end
 
         def via(flow : Flow(Out, Next, NextMat)) : Flow(In, Next, Mat) forall Next, NextMat
@@ -484,7 +579,7 @@ module Movie
 
         # Internal materialization hook used by composition.
         def materialize(system : AbstractActorSystem, inlet : StageChannel(In)) : Mat
-          @materializer.call(system, inlet)
+          BlueprintRuntime.materialize { @materializer.call(system, inlet) }
         end
       end
 
@@ -498,7 +593,7 @@ module Movie
         end
 
         def run(system : AbstractActorSystem) : Mat
-          @materializer.call(system)
+          BlueprintRuntime.materialize { @materializer.call(system) }
         end
       end
 
@@ -530,7 +625,7 @@ module Movie
             BlueprintRuntime.execute(system) do
               begin
                 loop do
-                  case event = inlet.receive
+                  case event = inlet.receive(until_cancelled_by: outlet)
                   when StreamElement(In)
                     transformed = begin
                       transform.call(event.value)

@@ -2,6 +2,8 @@
 
 [Documentation index](README.md) · [Development workflow](development_workflow.md) · [Direct stream specs](../../spec/movie/streams_typed_spec.cr)
 
+The message, demand, stage-responsibility, and MVP-buffering sections below describe the legacy actor-stage DSL. The forward-looking blueprint API starts at [Reusable typed blueprints](#reusable-typed-blueprints-epic-07) and uses bounded push-driven runtime edges rather than legacy `Request` messages.
+
 ## Goals
 - Backpressure-first: downstream explicitly requests demand; upstream never overruns demand.
 - Clear terminals: completion, error, cancel are terminal; no signals after terminal.
@@ -41,7 +43,7 @@ Control/Data messages exchanged between adjacent stages (upstream -> downstream 
 - Upstream failure => `OnError` to downstream; downstream should stop and may propagate `Cancel` further upstream if needed (MVP: assume single upstream link so `OnError` is terminal).
 - Downstream `Cancel` => upstream stops emitting and drops further signals; upstream may propagate `Cancel` further upstream (for Flow) and complete internal cleanup.
 
-## Buffering (MVP)
+## Legacy buffering (MVP)
 - Default: zero/strict buffering in Flow — only emit when demand present; may hold at most one in-flight transform step.
 - If implementation adds small buffer, it must still respect outstanding demand and not overrun requested total.
 
@@ -61,7 +63,7 @@ Control/Data messages exchanged between adjacent stages (upstream -> downstream 
 
 ## Reusable typed blueprints (Epic 07)
 
-The blueprint API is the forward-looking stream surface. A blueprint is immutable and reusable; every `RunnableGraph#run` creates independent runtime channels, controls, and materialized values.
+The blueprint API is the forward-looking stream surface. A blueprint is immutable and reusable; every `RunnableGraph#run` creates independent runtime channels, controls, and materialized values. If stage construction or a materialized-value combiner raises, materialization rolls back every runtime edge created by that attempt.
 
 ```crystal
 alias Streams = Movie::Streams::Typed
@@ -91,7 +93,7 @@ Blueprint types:
 
 `via` preserves the materialized value on its left. `via_mat` combines the two values explicitly. `to` keeps the sink materialized value, while `to_mat` combines source and sink values. Current factories are `Sources.manual`, `Flows.map`, `Sinks.collect`, and `Sinks.fold`.
 
-Failure is terminal in both directions: a failing flow reports the error downstream and cancels its inlet so a manual producer cannot remain blocked on an abandoned edge. Blueprint runtime edges are owned by the supplied `ActorSystem`; shutting that system down cancels unfinished materialized futures and releases blocked producers.
+Failure is terminal in both directions: a failing flow reports the error downstream, while downstream cancellation wakes idle flows and propagates through their inlets so a manual producer cannot remain open on an abandoned edge. Blueprint runtime edges are owned by the supplied `ActorSystem`; shutting that system down cancels unfinished materialized futures and releases blocked producers.
 
 ### Bounded buffers and overflow
 
