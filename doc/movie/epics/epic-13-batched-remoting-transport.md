@@ -4,7 +4,7 @@
 
 **Depends on:** Epic 12.
 
-**Status:** In progress.
+**Status:** Completed (2026-08-30).
 
 **Done when:**
 
@@ -26,7 +26,7 @@ At the Epic start on commit `22205aa`, the repeated standard two-process tell me
 
 ## Task 13.1: Emit one complete frame per socket write
 
-**Status:** Implementation complete; re-review pending.
+**Status:** Completed (2026-08-30).
 
 **Outcome**
 
@@ -46,7 +46,7 @@ The one-write regression was observed failing with two writes and passed after t
 
 ## Task 13.2: Add a bounded FIFO writer and drain batching
 
-**Status:** Implementation complete; re-review pending.
+**Status:** Completed (2026-08-30).
 
 **Outcome**
 
@@ -61,7 +61,7 @@ Each outbound and inbound TCP connection now owns one writer fiber, a 4,096-enve
 
 ## Task 13.3: Validate inbound transport buffering
 
-**Status:** Implementation complete; re-review pending.
+**Status:** Completed (2026-08-30).
 
 **Outcome**
 
@@ -75,7 +75,7 @@ Crystal's `TCPSocket` includes `IO::Buffered`: writes are synchronous by default
 
 ## Task 13.4: Select the next measured hot path
 
-**Status:** Implementation complete; re-review pending.
+**Status:** Completed (2026-08-30).
 
 **Outcome**
 
@@ -88,7 +88,7 @@ The expanded release stage report separates decoder work, route/registry lookup,
 
 ## Task 13.5: Remove canonical route parsing from delivery
 
-**Status:** Implementation complete; re-review pending.
+**Status:** Completed (2026-08-30).
 
 **Outcome**
 
@@ -102,7 +102,7 @@ Canonical string lookup previously rebuilt an `ActorPath` and allocated about 62
 
 ## Task 13.6: Reuse internal mailbox storage
 
-**Status:** Implementation complete; re-review pending.
+**Status:** Completed (2026-08-30).
 
 **Outcome**
 
@@ -116,13 +116,15 @@ Normal mailbox storage moved from a heap `Envelope` plus linked `QueueNode` per 
 
 The next remoting epic should reduce or batch the decoded receiver-to-mailbox handoff and its allocation/GC interaction. After that gap closes, introduce a negotiated compact protocol with numeric route/type identifiers and macro-generated binary payload codecs; JSON envelope decode then becomes the roughly quarter-million-message ceiling. Cluster work should remain behind both tasks.
 
+Final verification passes 261 examples on both the local Crystal 1.21 toolchain and the minimum supported Crystal 1.19.1 container. The opt-in stress suite passes 10 examples, the release benchmark passes 16 examples, formatting is clean, and all six examples build. The final two-axis review has zero remaining Standards findings and zero remaining Spec findings.
+
 ## Completion checklist
 
 - [x] Failing test written first.
 - [x] Failing test observed red.
 - [x] Minimal implementation written.
 - [x] Targeted verification green.
-- [ ] Broader verification green.
+- [x] Broader verification green.
 - [x] Formatting check green.
 - [x] Docs/examples updated if needed.
 - [x] Review requested.
