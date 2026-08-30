@@ -69,12 +69,10 @@ module Movie::Remote
         when "message_type"
           message_type = pull.read_string
         when "payload"
-          payload_data = if decoder = payload_decoder
-                           if type = message_type
-                             decoder.call(type, pull)
-                           else
-                             RawJsonPayload.new(pull.read_raw)
-                           end
+          decoder = payload_decoder
+          type = message_type
+          payload_data = if decoder && type
+                           decoder.call(type, pull)
                          else
                            RawJsonPayload.new(pull.read_raw)
                          end

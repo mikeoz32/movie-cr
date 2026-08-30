@@ -10,7 +10,7 @@
 
 - the inbound tell pipeline reports decode, typed-deserialization, and combined allocations separately,
 - registered user messages can be deserialized directly from the envelope pull parser without rebuilding payload JSON,
-- unknown message tags retain the existing raw/lazy payload behavior,
+- unknown message tags and compatible envelopes with `payload` before `message_type` retain the existing raw/lazy payload behavior,
 - a malformed registered payload is rejected without poisoning the decoder or consuming the next frame,
 - public stateless frame decoding retains its existing raw-payload semantics,
 - repeated before/after ActorSystem benchmarks report throughput and client/server allocation deltas separately,
@@ -33,14 +33,14 @@
 
 - Inject the registered-message payload decoder only into connection-owned frame decoders.
 - Preserve a decoded typed wrapper in the envelope until normal routing consumes it.
-- Keep unknown payloads raw and keep malformed typed-payload failures isolated to one already-buffered frame.
+- Keep unknown and payload-before-type envelopes raw, and keep malformed typed-payload failures isolated to one already-buffered frame.
 - Avoid coupling the public frame codec to the global registry.
 
 **Verification**
 
 - Measure the current frame-decode, typed-deserialization, and combined allocation costs independently.
 - Write and observe a failing spec whose type rejects the materialized `from_json(String | IO)` path but accepts `JSON::PullParser` construction.
-- Verify decoder recovery by decoding a valid frame after a malformed registered payload.
+- Verify decoder recovery by decoding a valid frame after a malformed registered payload, including payload-before-type wire ordering.
 - Re-run the unchanged release ActorSystem benchmark matrix from Epic 10.
 - Complete Standards and Spec review with no remaining findings.
 

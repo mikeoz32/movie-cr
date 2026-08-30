@@ -86,6 +86,23 @@ private class RemoteTerminationWatcher < Movie::AbstractBehavior(String)
   end
 end
 
+private def write_reordered_user_frame(io : IO, target_path : String, message_type : String, payload : JSON::Any) : Nil
+  frame = IO::Memory.new
+  json = JSON::Builder.new(frame)
+  json.document do
+    json.object do
+      json.field("kind", "USER_MESSAGE")
+      json.field("target_path", target_path)
+      json.field("payload") { payload.to_json(json) }
+      json.field("message_type", message_type)
+      json.field("timestamp", Time.utc.to_unix_ms)
+    end
+  end
+  io.write_bytes(frame.bytesize.to_u32, IO::ByteFormat::BigEndian)
+  io.write(frame.to_slice)
+  io.flush
+end
+
 describe "Movie Remote E2E" do
   it "delivers a user message to a remote actor" do
     Movie::Remote::MessageRegistry.register(RemoteDeliveryMessage)
@@ -150,18 +167,17 @@ describe "Movie Remote E2E" do
       )
       socket = TCPSocket.new("127.0.0.1", server_remote.local_port)
 
-      Movie::Remote::FrameCodec.encode(
-        Movie::Remote::WireEnvelope.user_message(
-          target_path.to_s,
-          "RemoteDeliveryMessage",
-          JSON.parse(%({"unexpected":true}))
-        ),
-        socket
+      write_reordered_user_frame(
+        socket,
+        target_path.to_s,
+        "RemoteDeliveryMessage",
+        JSON.parse(%({"unexpected":true}))
       )
-      tag, payload = Movie::Remote::MessageRegistry.prepare(RemoteDeliveryMessage.new("after malformed"))
-      Movie::Remote::FrameCodec.encode(
-        Movie::Remote::WireEnvelope.user_message(target_path.to_s, tag, payload),
-        socket
+      write_reordered_user_frame(
+        socket,
+        target_path.to_s,
+        "RemoteDeliveryMessage",
+        JSON.parse(%({"body":"after malformed"}))
       )
 
       select

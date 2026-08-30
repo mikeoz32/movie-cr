@@ -27,7 +27,7 @@ end
 Movie::Remote::MessageRegistry.register(Ping)
 ```
 
-Outgoing registered messages retain their `JSON::Serializable` value until frame encoding. The connection writes envelope and payload JSON through `to_json(JSON::Builder)` into a reusable per-connection `IO::Memory`; it does not build a message JSON `String` or an intermediate `JSON::Any`. Incoming connections reuse their frame byte buffer and retain payload JSON in raw form until the registered typed deserializer consumes it. Dynamic `WireEnvelope#payload` access remains available, but materializes `JSON::Any` lazily and should not be used on delivery hot paths.
+Outgoing registered messages retain their `JSON::Serializable` value until frame encoding. The connection writes envelope and payload JSON through `to_json(JSON::Builder)` into a reusable per-connection `IO::Memory`; it does not build a message JSON `String` or an intermediate `JSON::Any`. Incoming connections reuse their frame byte buffer and decode registered payloads directly from the envelope `JSON::PullParser` into typed messages, avoiding a raw payload rebuild and second parse. Unknown tags, or compatible envelopes whose `payload` field precedes `message_type`, retain raw payload JSON for the existing lazy typed/dynamic path. Dynamic `WireEnvelope#payload` access remains available, but materializes `JSON::Any` lazily and should not be used on delivery hot paths.
 
 Encoder/decoder buffers retain at most 1 MiB per connection. Larger frames up to the 16 MiB protocol limit use temporary storage so a single large message does not permanently multiply memory across all stripes.
 
