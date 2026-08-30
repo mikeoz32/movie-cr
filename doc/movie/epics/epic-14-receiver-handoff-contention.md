@@ -4,7 +4,7 @@
 
 **Depends on:** Epic 13.
 
-**Status:** In progress.
+**Status:** Completed (2026-08-30).
 
 **Done when:**
 
@@ -65,6 +65,8 @@ Each inbound connection now owns the only 32 KiB socket-read buffer and a reusab
 
 Repeated standard two-process medians rose from Epic 13's 48.5-50.6k to 170.1-172.0k msg/s, while server allocation fell from 619-624 to 436-439 B/message. The million-message single-actor lane rose from 59.8-61.5k to 232.3-234.6k msg/s at 356 B/message; the comparable local run was 3.60M msg/s. Receiver handoff now reaches the existing direct JSON decoder ceiling of roughly 220-230k msg/s, so the next performance epic should target a negotiated compact codec and numeric route/type identifiers rather than more mailbox or registry locking work.
 
+Final verification passes 267 examples on both Crystal 1.19.1 and 1.21, 93 focused remoting examples, 10 stress examples, and 17 opt-in release benchmark examples; formatting is clean and all examples build. The final two-axis review has zero Standards findings and zero Spec findings. Review feedback added direct batch behavior coverage and deferred later protocol errors so an already-decoded valid prefix is delivered before the connection closes.
+
 ## Completion checklist
 
 - [x] Failing test written first.
@@ -75,4 +77,4 @@ Repeated standard two-process medians rose from Epic 13's 48.5-50.6k to 170.1-17
 - [x] Formatting check green.
 - [x] Docs/examples updated if needed.
 - [x] Review requested.
-- [ ] Review feedback addressed.
+- [x] Review feedback addressed.
