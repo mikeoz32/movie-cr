@@ -1,4 +1,5 @@
 require "./wire_envelope"
+require "./reusable_json_pull_parser"
 
 module Movie::Remote
   # FrameCodec handles length-prefixed framing for wire protocol messages.
@@ -74,6 +75,7 @@ module Movie::Remote
       def initialize(@payload_decoder : JsonPayloadDecoder? = nil)
         @buffer = Bytes.new(INITIAL_BUFFER_CAPACITY)
         @reader = BufferReader.new
+        @json = ReusableJsonPullParser.new(@reader.reset(Bytes.empty))
       end
 
       def decode(io : IO) : WireEnvelope?
@@ -102,7 +104,12 @@ module Movie::Remote
                   @buffer[0, frame_size]
                 end
         io.read_fully(frame)
-        WireEnvelope.new(JSON::PullParser.new(@reader.reset(frame)), @payload_decoder)
+        @json.reset(@reader.reset(frame))
+        begin
+          WireEnvelope.new(@json, @payload_decoder)
+        ensure
+          @json.release_excess(frame_size > MAX_RETAINED_BUFFER_CAPACITY)
+        end
       rescue IO::EOFError
         nil
       end

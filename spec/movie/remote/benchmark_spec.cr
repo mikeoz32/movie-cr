@@ -141,7 +141,7 @@ if BENCH_ENABLED
         bytes = Movie::Remote::FrameCodec.encode_to_bytes(envelope)
         iterations = 10_000
         decoder = Movie::Remote::FrameCodec::Decoder.new
-        input = IO::Memory.new(bytes, writable: false)
+        input = IO::Memory.new(bytes, false)
 
         elapsed = Time.measure do
           iterations.times do
@@ -194,7 +194,7 @@ if BENCH_ENABLED
         )
         iterations = 10_000
 
-        input = IO::Memory.new(frame, writable: false)
+        input = IO::Memory.new(frame, false)
         decoder = Movie::Remote::FrameCodec::Decoder.new
         decode_checksum = 0_i64
         decode_bytes = RemoteBenchmarkMeasurements.allocated_bytes_per_iteration(iterations) do
@@ -213,7 +213,7 @@ if BENCH_ENABLED
           end
         end
 
-        pipeline_input = IO::Memory.new(frame, writable: false)
+        pipeline_input = IO::Memory.new(frame, false)
         pipeline_decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
         pipeline_checksum = 0_i64
         pipeline_bytes = RemoteBenchmarkMeasurements.allocated_bytes_per_iteration(iterations) do
@@ -225,9 +225,49 @@ if BENCH_ENABLED
           end
         end
 
+        payload_json = message.to_json
+        typed_checksum = 0_i64
+        typed_bytes = RemoteBenchmarkMeasurements.allocated_bytes_per_iteration(iterations) do
+          iterations.times do
+            typed_checksum &+= BenchmarkMessage.from_json(payload_json).id
+          end
+        end
+
+        wrapped_checksum = 0_i64
+        wrapped_bytes = RemoteBenchmarkMeasurements.allocated_bytes_per_iteration(iterations) do
+          iterations.times do
+            pull = JSON::PullParser.new(payload_json)
+            decoded = Movie::Remote::MessageRegistry.decode_payload(tag, pull)
+            wrapped_checksum &+= Movie::Remote::MessageRegistry.deserialize(tag, decoded).unwrap(BenchmarkMessage).id
+          end
+        end
+
+        frame_json = frame[4, frame.size - 4]
+        string_input_checksum = 0_i64
+        string_input_bytes = RemoteBenchmarkMeasurements.allocated_bytes_per_iteration(iterations) do
+          iterations.times do
+            json_source = String.new(frame_json)
+            envelope = Movie::Remote::WireEnvelope.new(
+              JSON::PullParser.new(json_source),
+              Movie::Remote::MessageRegistry.payload_decoder
+            )
+            string_input_checksum &+= Movie::Remote::MessageRegistry
+              .deserialize(tag, envelope.payload_data)
+              .unwrap(BenchmarkMessage).id
+          end
+        end
+
         decode_checksum.should be > 0_i64
-        {deserialize_checksum, pipeline_checksum}.should eq({iterations.to_i64, iterations.to_i64})
+        {
+          deserialize_checksum,
+          pipeline_checksum,
+          typed_checksum,
+          wrapped_checksum,
+          string_input_checksum,
+        }.should eq({iterations.to_i64, iterations.to_i64, iterations.to_i64, iterations.to_i64, iterations.to_i64})
         puts "\n  Inbound allocations: raw decode #{decode_bytes.round(1)} B/msg, second deserialize #{deserialize_bytes.round(1)} B/msg, direct combined #{pipeline_bytes.round(1)} B/msg"
+        puts "  Payload allocations: typed value #{typed_bytes.round(1)} B/msg, registry wrappers #{wrapped_bytes.round(1)} B/msg"
+        puts "  Parser input allocations: reusable IO #{pipeline_bytes.round(1)} B/msg, copied String #{string_input_bytes.round(1)} B/msg"
       end
     end
 

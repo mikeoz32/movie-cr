@@ -115,6 +115,39 @@ describe Movie::Remote::FrameCodec do
       decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::HEARTBEAT)
     end
 
+    it "reuses one pull parser across sequential registered frames" do
+      Movie::Remote::MessageRegistry.clear
+      Movie::Remote::MessageRegistry.register(PullParserOnlyFrameMessage)
+      parser_ids = [] of UInt64
+      payload_decoder = ->(tag : String, pull : JSON::PullParser) do
+        parser_ids << pull.object_id
+        Movie::Remote::MessageRegistry.decode_payload(tag, pull).as(Movie::Remote::JsonPayload)
+      end
+      decoder = Movie::Remote::FrameCodec::Decoder.new(payload_decoder)
+      io = IO::Memory.new
+
+      2.times do |index|
+        tag, payload = Movie::Remote::MessageRegistry.prepare(
+          PullParserOnlyFrameMessage.new("message-#{index}")
+        )
+        Movie::Remote::FrameCodec.encode(
+          Movie::Remote::WireEnvelope.user_message("movie://sys/user/direct", tag, payload),
+          io
+        )
+      end
+      io.rewind
+
+      2.times do
+        envelope = decoder.decode(io).not_nil!
+        Movie::Remote::MessageRegistry.deserialize(envelope.message_type, envelope.payload_data)
+      end
+
+      parser_ids.size.should eq(2)
+      parser_ids.uniq.size.should eq(1)
+    ensure
+      Movie::Remote::MessageRegistry.clear
+    end
+
     it "recovers a reusable encoder after payload serialization fails" do
       encoder = Movie::Remote::FrameCodec::Encoder.new
       io = IO::Memory.new
@@ -143,7 +176,7 @@ describe Movie::Remote::FrameCodec do
       )
       decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
 
-      envelope = decoder.decode(IO::Memory.new(frame, writable: false)).not_nil!
+      envelope = decoder.decode(IO::Memory.new(frame, false)).not_nil!
       restored = Movie::Remote::MessageRegistry.deserialize(tag, envelope.payload_data)
 
       restored.unwrap(PullParserOnlyFrameMessage).value.should eq("direct")
@@ -158,7 +191,7 @@ describe Movie::Remote::FrameCodec do
       )
       decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
 
-      envelope = decoder.decode(IO::Memory.new(frame, writable: false)).not_nil!
+      envelope = decoder.decode(IO::Memory.new(frame, false)).not_nil!
 
       envelope.payload_data.should be_a(Movie::Remote::RawJsonPayload)
       envelope.payload["value"].as_s.should eq("raw")
@@ -184,6 +217,36 @@ describe Movie::Remote::FrameCodec do
       decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::HEARTBEAT)
     ensure
       Movie::Remote::MessageRegistry.clear
+    end
+
+    it "releases excess reusable parser state and decodes the next frame" do
+      many_keys = Hash(String, JSON::Any).new
+      300.times { |index| many_keys["key-#{index}"] = JSON::Any.new(index.to_i64) }
+      large_value = "x" * (Movie::Remote::FrameCodec::MAX_RETAINED_BUFFER_CAPACITY + 1)
+      io = IO::Memory.new
+      Movie::Remote::FrameCodec.encode(
+        Movie::Remote::WireEnvelope.user_message(
+          "movie://sys/user/many-keys",
+          "UnknownManyKeys",
+          JSON::Any.new(many_keys)
+        ),
+        io
+      )
+      Movie::Remote::FrameCodec.encode(
+        Movie::Remote::WireEnvelope.user_message(
+          "movie://sys/user/large",
+          "UnknownLargePayload",
+          JSON::Any.new({"value" => JSON::Any.new(large_value)})
+        ),
+        io
+      )
+      Movie::Remote::FrameCodec.encode(Movie::Remote::WireEnvelope.heartbeat, io)
+      io.rewind
+      decoder = Movie::Remote::FrameCodec::Decoder.new(Movie::Remote::MessageRegistry.payload_decoder)
+
+      decoder.decode(io).not_nil!.payload["key-299"].as_i64.should eq(299_i64)
+      decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::USER_MESSAGE)
+      decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::HEARTBEAT)
     end
   end
 

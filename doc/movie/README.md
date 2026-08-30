@@ -22,6 +22,7 @@
 - [Epic 09 - Local ask hot-path optimization](epics/epic-09-local-ask-hot-path.md)
 - [Epic 10 - IO-native serialization](epics/epic-10-io-native-serialization.md)
 - [Epic 11 - Inbound remoting hot-path optimization](epics/epic-11-inbound-remoting-hot-path.md)
+- [Epic 12 - Inbound envelope allocation reduction](epics/epic-12-inbound-envelope-allocation.md)
 
 ## How To Use This Folder
 

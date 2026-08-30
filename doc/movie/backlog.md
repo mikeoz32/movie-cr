@@ -19,6 +19,7 @@ Mandatory workflow for every task lives in [development_workflow.md](development
 | P1 | [Epic 09 - Local Ask Hot-Path Optimization](epics/epic-09-local-ask-hot-path.md) | Removes the highest-impact actor lifecycle bottleneck identified by the end-to-end benchmark. | Completed (2026-08-30) |
 | P1 | [Epic 10 - IO-Native Serialization](epics/epic-10-io-native-serialization.md) | Writes remoting and machine-readable output directly to reusable IO buffers to minimize intermediate JSON allocations. | Completed (2026-08-30) |
 | P1 | [Epic 11 - Inbound Remoting Hot-Path Optimization](epics/epic-11-inbound-remoting-hot-path.md) | Removes the remaining payload rebuild and second JSON parse from registered inbound messages. | Completed (2026-08-30) |
+| P1 | [Epic 12 - Inbound Envelope Allocation Reduction](epics/epic-12-inbound-envelope-allocation.md) | Measures and removes the next dominant parser/input or decoded-wrapper allocation boundary. | In progress |
 
 ## Planning Rules
 
