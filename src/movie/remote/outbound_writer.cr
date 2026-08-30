@@ -24,7 +24,6 @@ module Movie::Remote
     @started = false
     @accepting = true
     @stopping = false
-    @writer_fiber : Fiber?
 
     def initialize(
       @io : IO,
@@ -68,7 +67,7 @@ module Movie::Remote
       end
       return false unless can_start
 
-      @writer_fiber = spawn { writer_loop }
+      spawn { writer_loop }
       true
     end
 

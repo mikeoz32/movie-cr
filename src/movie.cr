@@ -460,26 +460,16 @@ module Movie
           raise ArgumentError.new("Actor path #{path} is already registered by actor #{existing_id}") unless existing_id == ref.id
         end
         if old_path = @id_to_path[ref.id]?
-          old_key = normalize_key(old_path)
-          old_canonical_path = old_path.to_s
-          @path_to_id.delete(old_key) if old_key != key && @path_to_id[old_key]? == ref.id
-          if old_canonical_path != canonical_path && @canonical_path_to_id[old_canonical_path]? == ref.id
-            @canonical_path_to_id.delete(old_canonical_path)
-          end
+          remove_path_indexes(old_path, ref.id) unless old_path == path
         end
-        @path_to_id[key] = ref.id
-        @canonical_path_to_id[canonical_path] = ref.id
-        @id_to_path[ref.id] = path
+        store_path_indexes(path, key, canonical_path, ref.id)
       end
     end
 
     def unregister(ref : ActorRefBase)
       @mutex.synchronize do
         if path = @id_to_path.delete(ref.id)
-          key = normalize_key(path)
-          @path_to_id.delete(key) if @path_to_id[key]? == ref.id
-          canonical_path = path.to_s
-          @canonical_path_to_id.delete(canonical_path) if @canonical_path_to_id[canonical_path]? == ref.id
+          remove_path_indexes(path, ref.id)
         end
       end
     end
@@ -487,10 +477,7 @@ module Movie
     def unregister(id : Int32)
       @mutex.synchronize do
         if path = @id_to_path.delete(id)
-          key = normalize_key(path)
-          @path_to_id.delete(key) if @path_to_id[key]? == id
-          canonical_path = path.to_s
-          @canonical_path_to_id.delete(canonical_path) if @canonical_path_to_id[canonical_path]? == id
+          remove_path_indexes(path, id)
         end
       end
     end
@@ -533,10 +520,27 @@ module Movie
 
     def clear
       @mutex.synchronize do
-        @path_to_id.clear
-        @canonical_path_to_id.clear
-        @id_to_path.clear
+        clear_path_indexes
       end
+    end
+
+    private def store_path_indexes(path : ActorPath, key : String, canonical_path : String, id : Int32) : Nil
+      @path_to_id[key] = id
+      @canonical_path_to_id[canonical_path] = id
+      @id_to_path[id] = path
+    end
+
+    private def remove_path_indexes(path : ActorPath, id : Int32) : Nil
+      key = normalize_key(path)
+      @path_to_id.delete(key) if @path_to_id[key]? == id
+      canonical_path = path.to_s
+      @canonical_path_to_id.delete(canonical_path) if @canonical_path_to_id[canonical_path]? == id
+    end
+
+    private def clear_path_indexes : Nil
+      @path_to_id.clear
+      @canonical_path_to_id.clear
+      @id_to_path.clear
     end
   end
 
