@@ -17,6 +17,7 @@
 - [Epic 04 - Configuration API consistency](epics/epic-04-configuration-api-consistency.md)
 - [Epic 05 - Quality gates and documentation accuracy](epics/epic-05-quality-gates-and-documentation.md)
 - [Epic 06 - Runtime review hardening](epics/epic-06-runtime-review-hardening.md)
+- [Epic 07 - Stream blueprints, boundedness, and TestKit](epics/epic-07-stream-blueprints-boundedness-and-testkit.md)
 
 ## How To Use This Folder
 

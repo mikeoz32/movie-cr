@@ -608,11 +608,13 @@ module Movie
   class ExtensionRegistry
     @extensions : Hash(String, Extension)
     @starting : Hash(String, Channel(Nil))
+    @closed : Bool
     @mutex : Mutex
 
     def initialize
       @extensions = {} of String => Extension
       @starting = {} of String => Channel(Nil)
+      @closed = false
       @mutex = Mutex.new
     end
 
@@ -620,19 +622,32 @@ module Movie
     # The extension's class name is used as the key.
     def register(extension : Extension)
       key = extension.class.name
+      registry_closed = @mutex.synchronize { @closed }
+      if registry_closed
+        extension.stop
+        raise ActorSystemShuttingDownError.new("extension registry is stopped")
+      end
+
       started = extension.start
       if started == false
         extension.stop
         raise ExtensionStartError.new("Extension #{key} failed to start")
       end
 
-      @mutex.synchronize do
-        if @extensions.has_key?(key)
-          extension.stop
-          raise "Extension #{key} is already registered"
+      rejection = @mutex.synchronize do
+        if @closed
+          ActorSystemShuttingDownError.new("extension registry is stopped").as(Exception)
+        elsif @extensions.has_key?(key)
+          Exception.new("Extension #{key} is already registered")
+        else
+          @extensions[key] = extension
+          nil
         end
-        @extensions[key] = extension
       end
+      return unless rejection
+
+      extension.stop
+      raise rejection
     end
 
     # Creates, starts, and registers an extension once. Concurrent callers wait
@@ -643,9 +658,12 @@ module Movie
         existing = nil.as(Extension?)
         start_signal = nil.as(Channel(Nil)?)
         starts_extension = false
+        registry_closed = false
 
         @mutex.synchronize do
-          if ext = @extensions[key]?
+          if @closed
+            registry_closed = true
+          elsif ext = @extensions[key]?
             existing = ext
           elsif signal = @starting[key]?
             start_signal = signal
@@ -656,6 +674,7 @@ module Movie
           end
         end
 
+        raise ActorSystemShuttingDownError.new("extension registry is stopped") if registry_closed
         return existing.as(T) if existing
 
         unless starts_extension
@@ -671,11 +690,19 @@ module Movie
             raise ExtensionStartError.new("Extension #{key} failed to start")
           end
 
-          @mutex.synchronize do
-            @extensions[key] = extension
+          published = @mutex.synchronize do
             @starting.delete(key)
+            unless @closed
+              @extensions[key] = extension
+              true
+            else
+              false
+            end
           end
           start_signal.not_nil!.close
+          unless published
+            raise ActorSystemShuttingDownError.new("extension registry stopped during extension startup")
+          end
           return extension.as(T)
         rescue ex
           begin
@@ -721,6 +748,7 @@ module Movie
     # Stops all registered extensions.
     def stop_all
       registered_extensions = @mutex.synchronize do
+        @closed = true
         current_extensions = @extensions.values
         @extensions.clear
         current_extensions
@@ -1292,6 +1320,9 @@ module Movie
     end
   end
 end
+
+# Typed stream blueprints use ActorSystem extensions for runtime ownership.
+require "./movie/streams/core"
 
 # Require executor after base extension types are defined
 require "./movie/executor"

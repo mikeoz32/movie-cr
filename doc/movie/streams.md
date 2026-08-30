@@ -1,4 +1,4 @@
-# Streams Protocol (Source/Flow/Sink MVP)
+# Streams Protocol and Typed Blueprints
 
 [Documentation index](README.md) · [Development workflow](development_workflow.md) · [Direct stream specs](../../spec/movie/streams_typed_spec.cr)
 
@@ -46,8 +46,9 @@ Control/Data messages exchanged between adjacent stages (upstream -> downstream 
 - If implementation adds small buffer, it must still respect outstanding demand and not overrun requested total.
 
 ## Element types
-- Streams are typed via `Movie::Streams::Typed`; every stage/message is parameterized by `T`.
-- For mixed payloads, define your own union (for example `Nil | Int32 | Int64 | Float64 | String | Bool | Symbol | JSON::Any`).
+- Streams are typed via `Movie::Streams::Typed`.
+- The legacy actor-stage DSL uses one `MessageBase(T)` across a linear pipeline. Use a union only when that legacy surface must carry mixed payloads.
+- The reusable blueprint API models `Source(Out, Mat)`, `Flow(In, Out, Mat)`, and `Sink(In, Mat)` separately, so a flow may change its element type without a union.
 
 ## Rejection / violations (to decide in impl)
 - If `Request` arrives before `OnSubscribe`, either queue until subscribed or drop with warning.
@@ -58,17 +59,51 @@ Control/Data messages exchanged between adjacent stages (upstream -> downstream 
 - Add operators beyond the current map/tap/filter/take/drop MVP.
 - Expand multi-subscriber, failure-race, and performance coverage.
 
-## Builder surface & materialization (OZW-65)
+## Reusable typed blueprints (Epic 07)
+
+The blueprint API is the forward-looking stream surface. A blueprint is immutable and reusable; every `RunnableGraph#run` creates independent runtime channels, controls, and materialized values.
+
+```crystal
+alias Streams = Movie::Streams::Typed
+
+source = Streams::Sources.manual(Int32)
+stringify = Streams::Flows.map(Int32, String) { |value| "value=#{value}" }
+length = Streams::Flows.map(String, Int32, &.size)
+sink = Streams::Sinks.collect(Int32)
+
+graph = source
+  .via(stringify.via(length))
+  .to_mat(sink) { |control, result| {control, result} }
+
+control, result = graph.run(system)
+control << 7
+control.complete
+result.await # => [7]
+```
+
+Blueprint types:
+
+- `Source(Out, Mat)` has one typed output and materializes a source-specific control value.
+- `Flow(In, Out, Mat)` has distinct input/output types and composes through `via` or `via_mat`.
+- `Sink(In, Mat)` has one typed input and materializes its result or control value.
+- `RunnableGraph(Mat)` is closed and returns a fresh `Mat` on every run.
+- `NotUsed` marks stages without a runtime control value.
+
+`via` preserves the materialized value on its left. `via_mat` combines the two values explicitly. `to` keeps the sink materialized value, while `to_mat` combines source and sink values. Current factories are `Sources.manual`, `Flows.map`, `Sinks.collect`, and `Sinks.fold`.
+
+Failure is terminal in both directions: a failing flow reports the error downstream and cancels its inlet so a manual producer cannot remain blocked on an abandoned edge. Blueprint runtime edges are owned by the supplied `ActorSystem`; shutting that system down cancels unfinished materialized futures and releases blocked producers. The next Epic 07 task replaces the current rendezvous edges with configurable bounded queues and overflow policies.
+
+## Legacy builder surface & materialization (OZW-65)
 - Single-subscription builders in MVP.
 - Sources: `Streams::Typed.manual(T)` is the currently implemented source builder. Array, single, and tick sources are future work.
 - Flows (initial set): `Flow.map`, `Flow.filter`, `Flow.take(n)`, `Flow.drop(n)`; more to follow in operator tasks. MVP implementations exist as actors: `MapFlow`, `FilterFlow`, `TakeFlow`, `DropFlow`.
-- Sinks (initial set): `Sink.foreach(&block)`, `Sink.fold(seed, &block)`, `Sink.first`.
+- Sinks: custom actor sinks through `.to`, collect through `.to_collect`, and fold through `.fold`. Named `foreach` and `first` sink factories are future work.
 - Composition DSL: `Streams::Typed.manual(T).via(flow).to(sink).run(system)` returns a materialized handle.
 - Materialized handle: `{completion: Future(T), cancel: -> Void}` where `T` is the sink’s materialized value (e.g., `Nil` for foreach, accumulator for fold). Cancel is idempotent and propagates `Cancel` upstream.
 - Completion semantics: completion future succeeds on `OnComplete`, fails on `OnError`, cancels on `Cancel`.
 - Re-materialization: calling `.to` again builds a new graph; prior refs are independent.
 
-## Current DSL (MVP)
+## Current legacy DSL (MVP)
 - `Movie::Streams::Typed.manual(T)` creates a manual source builder.
 - `.via(flow)` appends a flow stage.
 - `.to(sink, initial_demand = 0)` creates a runnable pipeline.

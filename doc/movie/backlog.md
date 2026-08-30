@@ -14,6 +14,7 @@ Mandatory workflow for every task lives in [development_workflow.md](development
 | P0 | [Epic 06 - Runtime Review Hardening](epics/epic-06-runtime-review-hardening.md) | Closes the remaining lifecycle, mailbox, ask, registry, and remoting correctness blockers found during pre-merge review. | Completed (2026-08-19) |
 | P1 | [Epic 04 - Configuration API Consistency](epics/epic-04-configuration-api-consistency.md) | Removes ambiguous config behavior and normalizes public settings. | Completed (2026-08-30) |
 | P1 | [Epic 05 - Quality Gates and Documentation Accuracy](epics/epic-05-quality-gates-and-documentation.md) | Makes regressions harder to reintroduce and aligns docs with reality. | Completed (2026-08-30) |
+| P0 | [Epic 07 - Stream Blueprints, Boundedness, and TestKit](epics/epic-07-stream-blueprints-boundedness-and-testkit.md) | Establishes the typed, bounded stream core required before graph junctions and a Graph DSL. | In progress |
 
 ## Planning Rules
 

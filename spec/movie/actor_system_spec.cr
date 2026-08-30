@@ -91,6 +91,7 @@ private class BlockingStartExtension < Movie::Extension
   @@start_release : Channel(Nil) = Channel(Nil).new(1)
 
   getter started : Atomic(Bool) = Atomic(Bool).new(false)
+  getter stop_count : Atomic(Int32) = Atomic(Int32).new(0)
 
   def self.reset
     @@start_entered = Channel(Nil).new(1)
@@ -112,6 +113,7 @@ private class BlockingStartExtension < Movie::Extension
   end
 
   def stop
+    @stop_count.add(1)
   end
 end
 
@@ -149,6 +151,34 @@ describe Movie::ActorSystem do
   ensure
     BlockingStartExtension.release_start rescue nil
     system.try &.shutdown
+  end
+
+  it "rejects an extension whose startup finishes after registry shutdown" do
+    BlockingStartExtension.reset
+    registry = Movie::ExtensionRegistry.new
+    extension = BlockingStartExtension.new
+    result = Channel(Exception?).new(1)
+
+    spawn do
+      begin
+        registry.get_or_register(BlockingStartExtension) { extension }
+        result.send(nil)
+      rescue ex
+        result.send(ex)
+      end
+    end
+
+    BlockingStartExtension.wait_until_starting
+    registry.stop_all
+    BlockingStartExtension.release_start
+
+    error = result.receive
+    error.should be_a(Movie::ActorSystemShuttingDownError)
+    registry.registered?(BlockingStartExtension).should be_false
+    extension.stop_count.get.should eq(1)
+  ensure
+    BlockingStartExtension.release_start rescue nil
+    registry.try &.stop_all
   end
 
   it "supports ask on the system root" do
