@@ -26,7 +26,7 @@ At the Epic start on commit `22205aa`, the repeated standard two-process tell me
 
 ## Task 13.1: Emit one complete frame per socket write
 
-**Status:** Completed (2026-08-30).
+**Status:** Implementation complete; re-review pending.
 
 **Outcome**
 
@@ -46,7 +46,7 @@ The one-write regression was observed failing with two writes and passed after t
 
 ## Task 13.2: Add a bounded FIFO writer and drain batching
 
-**Status:** In progress.
+**Status:** Implementation complete; re-review pending.
 
 **Outcome**
 
@@ -55,9 +55,13 @@ The one-write regression was observed failing with two writes and passed after t
 - Drain ready frames up to a frame-count or byte limit into one socket write.
 - Preserve FIFO order within each stripe and close/fail queued work on disconnect.
 
+### Result
+
+Each outbound and inbound TCP connection now owns one writer fiber, a 4,096-envelope FIFO, a 128-frame drain limit, and a strict 64 KiB write target except when one frame is larger by itself. Producers perform no socket IO while capacity is available and block deterministically at saturation rather than dropping accepted tells. Drained envelopes are released after every write cycle, and close wakes blocked producers with rejection. A diagnostic saturation run confirmed that 100,003 frames were emitted in 784 writes (127.6 frames/write, maximum 128), but the first actor-processed comparison fell to 37,305-38,299 msg/s and the first million-message run reached only 46,392 msg/s. Batching removed the syscall fan-out but exposed that it was not the dominant end-to-end boundary.
+
 ## Task 13.3: Validate inbound transport buffering
 
-**Status:** Pending.
+**Status:** Implementation complete; re-review pending.
 
 **Outcome**
 
@@ -65,18 +69,26 @@ The one-write regression was observed failing with two writes and passed after t
 - Avoid layering a redundant buffer over existing multi-frame read-ahead.
 - Preserve partial-header, partial-payload, maximum-frame, malformed-frame, and EOF behavior.
 
+### Result
+
+Crystal's `TCPSocket` includes `IO::Buffered`: writes are synchronous by default, but reads retain the default bounded 32 KiB read-ahead buffer. A four-byte frame-prefix read fills that buffer, payload and subsequent frame reads consume its remainder, and partial data stays buffered. A second Movie-owned inbound buffer would duplicate the existing mechanism and was therefore not added.
+
 ## Task 13.4: Select the next measured hot path
 
-**Status:** Pending.
+**Status:** Implementation complete; re-review pending.
 
 **Outcome**
 
 - Decompose post-decode path resolution, registry lookup, mailbox enqueue, and actor dispatch.
 - Record whether numeric target/type IDs, mailbox batching, or binary protocol v2 is the next dominant task.
 
+### Result
+
+The expanded release stage report separates decoder work, route/registry lookup, local mailbox enqueue and completion, and the combined decoded-delivery enqueue and completion barrier. A final run measured about 217k msg/s for direct typed JSON decode, 203k after route/registry, 3.62M local mailbox enqueues and 3.49M local actor completions, but only 50.1k for both decoded-delivery enqueue and actor completion. The actor keeps up once work is enqueued; the active boundary is the allocation/locking interaction while decoded values are handed off one by one, not a backlog in actor execution.
+
 ## Task 13.5: Remove canonical route parsing from delivery
 
-**Status:** Pending.
+**Status:** Implementation complete; re-review pending.
 
 **Outcome**
 
@@ -84,9 +96,13 @@ The one-write regression was observed failing with two writes and passed after t
 - Preserve normalized local/remote aliases as a compatibility fallback.
 - Keep registration, rebinding, unregister, and clear indexes consistent.
 
+### Result
+
+Canonical string lookup previously rebuilt an `ActorPath` and allocated about 624 B/message. `PathRegistry` now checks an exact registered-path cache before the normalized compatibility fallback, with registration, rebinding, both unregister forms, and clear maintaining all indexes. Repeated canonical benchmarks reach roughly 28-37M lookups/second at 0 B/op while alternate-address aliases retain the parsing fallback. This reduced standard server allocation from roughly 1.37 KiB to 0.69 KiB/message and raised repeated standard medians to 46,809-47,143 msg/s before the mailbox change.
+
 ## Task 13.6: Reuse internal mailbox storage
 
-**Status:** Pending.
+**Status:** Implementation complete; re-review pending.
 
 **Outcome**
 
@@ -94,14 +110,20 @@ The one-write regression was observed failing with two writes and passed after t
 - Preserve the public `Envelope`, `Queue`, and `QueueNode` APIs.
 - Retain system-message priority and the existing dispatch throughput limit.
 
+### Result
+
+Normal mailbox storage moved from a heap `Envelope` plus linked `QueueNode` per message to internal value envelopes in a reusable deque; the existing public types retain their reference and linked-node semantics. The allocation regression fell from 641,856 bytes for 10,000 steady-state enqueue/dequeue pairs to at most 4 KiB. Final standard medians reached 48,540 and 50,636 msg/s, with 619-624 server B/message; repeated million-message saturation reached 59,835 and 61,473 msg/s with 470-471 server B/message. Local million-message delivery rose from the Epic baseline of 1.95M to 3.00-4.24M msg/s.
+
+The next remoting epic should reduce or batch the decoded receiver-to-mailbox handoff and its allocation/GC interaction. After that gap closes, introduce a negotiated compact protocol with numeric route/type identifiers and macro-generated binary payload codecs; JSON envelope decode then becomes the roughly quarter-million-message ceiling. Cluster work should remain behind both tasks.
+
 ## Completion checklist
 
-- [ ] Failing test written first.
-- [ ] Failing test observed red.
-- [ ] Minimal implementation written.
-- [ ] Targeted verification green.
+- [x] Failing test written first.
+- [x] Failing test observed red.
+- [x] Minimal implementation written.
+- [x] Targeted verification green.
 - [ ] Broader verification green.
-- [ ] Formatting check green.
-- [ ] Docs/examples updated if needed.
-- [ ] Review requested.
-- [ ] Review feedback addressed.
+- [x] Formatting check green.
+- [x] Docs/examples updated if needed.
+- [x] Review requested.
+- [x] Review feedback addressed.
