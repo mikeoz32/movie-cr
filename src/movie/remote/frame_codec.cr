@@ -104,8 +104,8 @@ module Movie::Remote
                   @buffer[0, frame_size]
                 end
         io.read_fully(frame)
-        @json.reset(@reader.reset(frame))
         begin
+          @json.reset(@reader.reset(frame))
           WireEnvelope.new(@json, @payload_decoder)
         ensure
           @json.release_excess(frame_size > MAX_RETAINED_BUFFER_CAPACITY)

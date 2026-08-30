@@ -31,6 +31,8 @@ Outgoing registered messages retain their `JSON::Serializable` value until frame
 
 Encoder/decoder buffers retain at most 1 MiB per connection. Connection-owned decoders also reuse their JSON pull parser, lexer token, object stack, string buffer, and a pool of at most 256 JSON keys. Larger frames up to the 16 MiB protocol limit use temporary storage and release oversized lexer storage so a single large message does not permanently multiply memory across all stripes.
 
+Parser reuse resets private state from Crystal's standard JSON lexer and pull parser. Movie currently bounds support to Crystal 1.19.1 through 1.21.x, whose layouts are verified by the minimum-version CI lane and the current development toolchain. Supporting a newer Crystal minor requires reviewing this reset contract before widening the version constraint.
+
 ## Starting Two Systems
 
 Use the actual bound port in paths when binding to port `0`. Actor paths are rebound to the remote address after remoting starts:

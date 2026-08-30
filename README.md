@@ -15,7 +15,7 @@ Movie is a lightweight typed actor framework for Crystal. It provides actor life
 
 ## Requirements and installation
 
-- Crystal 1.18.2 or newer.
+- Crystal 1.19.1 through 1.21.x.
 - SQLite development headers when using persistence or running the full test suite.
 
 Add Movie to `shard.yml`:

@@ -248,6 +248,21 @@ describe Movie::Remote::FrameCodec do
       decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::USER_MESSAGE)
       decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::HEARTBEAT)
     end
+
+    it "releases oversized parser state when initial tokenization fails" do
+      malformed_size = Movie::Remote::FrameCodec::MAX_RETAINED_BUFFER_CAPACITY + 1
+      malformed = Bytes.new(malformed_size, 'x'.ord.to_u8)
+      malformed[0] = '"'.ord.to_u8
+      io = IO::Memory.new
+      io.write_bytes(malformed_size.to_u32, IO::ByteFormat::BigEndian)
+      io.write(malformed)
+      Movie::Remote::FrameCodec.encode(Movie::Remote::WireEnvelope.heartbeat, io)
+      io.rewind
+      decoder = Movie::Remote::FrameCodec::Decoder.new
+
+      expect_raises(JSON::ParseException) { decoder.decode(io) }
+      decoder.decode(io).not_nil!.kind.should eq(Movie::Remote::WireEnvelope::Kind::HEARTBEAT)
+    end
   end
 
   describe ".decode" do
