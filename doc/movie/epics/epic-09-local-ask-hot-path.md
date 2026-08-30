@@ -4,7 +4,7 @@
 
 **Depends on:** Epic 08.
 
-**Status:** In progress.
+**Status:** Completed (2026-08-30).
 
 **Done when:**
 
@@ -17,7 +17,7 @@
 
 ## Task 09.1: Replace local ask listener actors with one-shot response refs
 
-**Status:** In progress.
+**Status:** Completed (2026-08-30).
 
 **Files**
 
@@ -47,20 +47,22 @@ Release comparison used the unchanged Epic 08 matrix: 10,000 messages, 64-byte p
 
 | Metric | Before | After | Change |
 |---|---:|---:|---:|
-| Local ask median throughput | 6,352 msg/s | 17,431 msg/s | +174% |
-| Local ask median latency | approximately 157 us/msg | 57.4 us/msg | approximately -64% |
-| Local ask client allocation | 4.43-4.46 KB/msg | 1.28-1.30 KB/msg | approximately -71% |
+| Local ask median throughput | 6,352 msg/s | 18,436 msg/s | +190% |
+| Local ask median latency | approximately 157 us/msg | 54.2 us/msg | approximately -66% |
+| Local ask client allocation | 4.43-4.46 KB/msg | 1.28-1.29 KB/msg | approximately -71% |
 
 Local tell and remote workloads remain noisy but retain their previous allocation profiles. In particular, in-process remote ask remains approximately 16.41 KB/msg and two-process remote ask remains approximately 9.01 KB/msg client plus 7.40 KB/msg server. Those remoting allocations are a separate optimization target.
 
 ## Completion checklist
 
-- [ ] Failing test written first.
-- [ ] Failing test observed red.
-- [ ] Minimal implementation written.
-- [ ] Targeted verification green.
-- [ ] Broader verification green.
-- [ ] Formatting check green.
-- [ ] Docs/examples updated if needed.
-- [ ] Review requested.
-- [ ] Review feedback addressed.
+- [x] Failing test written first.
+- [x] Failing test observed red.
+- [x] Minimal implementation written.
+- [x] Targeted verification green.
+- [x] Broader verification green.
+- [x] Formatting check green.
+- [x] Docs/examples updated if needed.
+- [x] Review requested.
+- [x] Review feedback addressed.
+
+Final verification: the registration regression was observed red with the next actor receiving ID 10 instead of 8, then passed with the one-shot response ref. The focused actor-system, benchmark-contract, and runtime-hardening set passes with 37 examples; the full CI-flagged suite passes with 241 examples; the opt-in release remoting benchmark passes with 14 examples; formatting is clean across `src`, `spec`, `examples`, and `benchmarks`; and the standalone release runner completes the unchanged five-run comparison matrix. Initial Standards review findings about the unused legacy path, repeated sender dispatch, and stale listener terminology were fixed. Final Standards and Spec reviews have no remaining findings.
