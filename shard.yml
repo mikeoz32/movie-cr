@@ -7,7 +7,7 @@ authors:
 dependencies:
   pg:
     github: will/crystal-pg
-    commit: 9ce74e0c72b93a7c4ceca8b2f6fee00038108c74
+    version: ~> 0.30.0
   sqlite3:
     github: crystal-lang/crystal-sqlite3
     version: ~> 0.22.0

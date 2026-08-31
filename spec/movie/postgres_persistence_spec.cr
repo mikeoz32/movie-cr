@@ -60,6 +60,56 @@ module Movie
       end
     end
   end
+
+  # Simulates the only unsafe observation a client can make around a committed
+  # database write: PostgreSQL committed it, but the connection disappeared
+  # before the caller received the result.
+  class CommittedWriteConnectionLost < Exception
+  end
+
+  class CommitDisconnectProbe
+    def initialize
+      @pending = Atomic(Bool).new(true)
+    end
+
+    def trigger? : Bool
+      _, changed = @pending.compare_and_set(true, false)
+      changed
+    end
+  end
+
+  class CommitThenDisconnectPostgresConnection < Persistence::PostgresBackendConnection
+    def initialize(connection : DB::Connection, @disconnect_after_commit : CommitDisconnectProbe)
+      super(connection)
+    end
+
+    def append_events(message : Persistence::AppendEvents) : Persistence::WriteResult
+      result = super
+      if @disconnect_after_commit.trigger?
+        raise CommittedWriteConnectionLost.new("connection dropped after commit")
+      end
+      result
+    end
+
+    def connection_lost?(error : Exception) : Bool
+      error.is_a?(CommittedWriteConnectionLost) || super
+    end
+  end
+
+  class CommitThenDisconnectPostgresBackend < Persistence::PostgresBackend
+    getter connections : Atomic(Int32)
+
+    def initialize(uri : String)
+      @connections = Atomic(Int32).new(0)
+      @disconnect_after_commit = CommitDisconnectProbe.new
+      super(uri)
+    end
+
+    def connect : Persistence::BackendConnection
+      @connections.add(1)
+      CommitThenDisconnectPostgresConnection.new(DB.connect(uri), @disconnect_after_commit)
+    end
+  end
 end
 
 if postgres_url = ENV["MOVIE_POSTGRES_TEST_URL"]?
@@ -261,6 +311,35 @@ if postgres_url = ENV["MOVIE_POSTGRES_TEST_URL"]?
     ensure
       first_system.try &.shutdown
       second_system.try &.shutdown
+    end
+
+    it "deduplicates an ambiguous committed write after reconnect" do
+      stream = "pg-ambiguous-write-#{UUID.random}"
+      operation_id = Movie::Persistence::OperationId.random
+      request = Movie::Persistence::AppendEvents.new(
+        stream,
+        0_i64,
+        operation_id,
+        [Movie::Persistence::SerializedEvent.new("Added", "once")]
+      )
+      backend = Movie::CommitThenDisconnectPostgresBackend.new(postgres_url)
+      worker = Movie::Persistence::ConnectionWorker.new(backend, "movie-pg-ambiguous-write")
+      worker.execute { |connection| connection.ensure_event_store }
+
+      expect_raises(Movie::CommittedWriteConnectionLost, "connection dropped after commit") do
+        worker.execute { |connection| request.execute(connection) }
+      end
+
+      retried = worker.execute { |connection| request.execute(connection) }
+      retried.should eq(Movie::Persistence::WriteResult.new(1_i64, true))
+      backend.connections.get.should eq(2)
+
+      events = worker.execute do |connection|
+        Movie::Persistence::LoadEvents.new(stream).execute(connection)
+      end
+      events.map(&.payload).should eq(["once"])
+    ensure
+      worker.try &.close
     end
 
     it "fails the in-flight request and reconnects after PostgreSQL terminates the connection" do
