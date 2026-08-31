@@ -9,7 +9,6 @@ module Movie
         fingerprint = event_fingerprint(message.events, message.outbox)
         result = connection.transaction do |transaction|
           conn = transaction.connection
-          serialize_event_commit(conn) unless message.events.empty?
           operation = conn.exec(
             bind_sql("INSERT INTO journal_operation (persistence_id, operation_id, fingerprint, revision) " +
                      "VALUES (?, ?, ?, ?) ON CONFLICT(persistence_id, operation_id) DO NOTHING"),
@@ -63,9 +62,18 @@ module Movie
               bind_sql("INSERT INTO event_journal (persistence_id, sequence_nr, manifest, payload) VALUES (?, ?, ?, ?)"),
               args: [message.persistence_id, sequence_nr, event.manifest, event.payload] of DB::Any
             )
-            insert_event_feed(conn, message.persistence_id, sequence_nr, event.manifest, event.payload)
           end
           write_outbox_entries(conn, message.persistence_id, message.operation_id, message.outbox)
+
+          # Keep the global sequencer at the transaction tail: stream and
+          # outbox validation can run concurrently, while offset allocation and
+          # commit remain ordered without holding the lock across all writes.
+          serialize_event_commit(conn)
+          sequence_nr = message.expected_revision
+          message.events.each do |event|
+            sequence_nr += 1
+            insert_event_feed(conn, message.persistence_id, sequence_nr, event.manifest, event.payload)
+          end
           WriteResult.new(sequence_nr, false)
         end
         result.not_nil!
