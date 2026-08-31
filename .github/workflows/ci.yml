@@ -11,6 +11,20 @@ jobs:
   specs:
     runs-on: ubuntu-latest
     container: crystallang/crystal:1.19.1
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: movie
+          POSTGRES_PASSWORD: movie
+          POSTGRES_DB: movie_test
+        options: >-
+          --health-cmd "pg_isready -U movie -d movie_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOVIE_POSTGRES_TEST_URL: postgres://movie:movie@postgres:5432/movie_test?sslmode=disable
     steps:
       - name: Check out source
         uses: actions/checkout@v4

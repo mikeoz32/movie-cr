@@ -1,6 +1,6 @@
 # Movie
 
-Movie is a lightweight typed actor framework for Crystal. It provides actor lifecycle and supervision, ask/futures, scheduling, bounded execution, optional SQLite persistence, typed streams, and an experimental TCP remoting MVP.
+Movie is a lightweight typed actor framework for Crystal. It provides actor lifecycle and supervision, ask/futures, scheduling, bounded execution, pluggable SQLite/PostgreSQL persistence, typed streams, and an experimental TCP remoting MVP.
 
 ## Feature maturity
 
@@ -9,7 +9,7 @@ Movie is a lightweight typed actor framework for Crystal. It provides actor life
 | Typed actors and lifecycle | Stable core | Hierarchical actors, mailbox isolation, watching, restart/stop/resume supervision, and orderly shutdown. |
 | Futures, ask, scheduler | Stable public API | Thread-safe terminal futures, lightweight local ask response refs, and cancellable one-shot timers. |
 | Executor | Advanced API | Bounded worker pool; task timeout does not cancel the task body. |
-| Persistence | Beta, single-node | Typed effects, atomic revisions, restart recovery, snapshots, schema upcasting, and isolated SQLite I/O; not a distributed journal. |
+| Persistence | Beta | Typed effects, atomic revisions, restart recovery, snapshots, schema upcasting, local SQLite, and a shared PostgreSQL backend; cluster sharding is not included. |
 | Typed streams | MVP | Manual sources, transform stages, fold/collect sinks, cancellation, backpressure, and broadcast fan-out. |
 | Remoting | Experimental MVP | Typed TCP delivery and remote ask, without production transport guarantees. |
 
@@ -92,9 +92,11 @@ event_sourcing = Movie::EventSourcing.get(system)
 durable_state = Movie::DurableState.get(system)
 ```
 
-`EventSourcedBehavior` and `DurableStateBehavior` use typed effects, optimistic revisions, restart-safe recovery, and post-persist callbacks. Event batches are atomic; deletes retain revision tombstones; optional snapshots bound replay. SQLite work runs on dedicated isolated connection threads rather than actor dispatchers. See the [persistence guide](doc/movie/persistence.md) for the complete API and its single-node limits.
+`EventSourcedBehavior` and `DurableStateBehavior` use typed effects, optimistic revisions, restart-safe recovery, and post-persist callbacks. Event batches are atomic; deletes retain revision tombstones; optional snapshots bound replay. Backend connections run on dedicated isolated connection threads rather than actor dispatchers. See the [persistence guide](doc/movie/persistence.md) for the complete API and cluster limits.
 
 Run the complete event-sourcing example with `crystal run examples/persistence_example.cr -Dpreview_mt -Dexecution_context`.
+
+For a shared PostgreSQL journal, require `movie/persistence/postgres`, set `persistence.backend = postgres` and `persistence.connection-uri`, or run `MOVIE_POSTGRES_URL=postgres://... crystal run examples/postgres_persistence_example.cr -Dpreview_mt -Dexecution_context`.
 
 ## Typed streams
 

@@ -46,10 +46,12 @@ config = file.with_env_overrides
 | `remoting.stripe-count` | Int | `8` | Parallel outbound TCP connections per remote address. |
 | `executor.pool-size` | Int | `4` | Bounded executor worker count. |
 | `executor.queue-capacity` | Int | `128` | Number of queued executor tasks. |
+| `persistence.backend` | String | `sqlite` | Registered persistence backend; `postgres` requires the PostgreSQL entrypoint. |
+| `persistence.connection-uri` | String | empty | Required for PostgreSQL; credentials and TLS parameters belong in this URI. |
 | `persistence.db-path` | String | `data/movie_persistence.sqlite3` | SQLite database path; missing parent directories are created on startup. |
-| `persistence.pool-size` | Int | `1` | SQLite connection actor count; values below one are clamped to one. |
-| `persistence.io-queue-capacity` | Int | `256` | Bounded pending jobs per isolated SQLite connection worker. |
-| `persistence.operation-timeout` | Duration | `5s` | Ask timeout for journal and durable-state operations; timeout does not cancel SQLite work already running. |
+| `persistence.pool-size` | Int | `1` | Backend connection worker count; values below one are clamped to one. |
+| `persistence.io-queue-capacity` | Int | `256` | Bounded pending jobs per isolated backend connection worker. |
+| `persistence.operation-timeout` | Duration | `5s` | Ask timeout for journal and durable-state operations; timeout does not cancel backend work already running. |
 
 The old `movie.persistence.db_path` and `movie.persistence.pool_size` shapes are not aliases. Movie is still pre-1.0, and configuration now has one canonical naming scheme.
 
@@ -65,6 +67,8 @@ The default prefix is `MOVIE`. Canonical environment names use `__` between dott
 | `MOVIE_SUPERVISION__BACKOFF__MIN` | `supervision.backoff.min` |
 | `MOVIE_REMOTING__STRIPE_COUNT` | `remoting.stripe-count` |
 | `MOVIE_EXECUTOR__QUEUE_CAPACITY` | `executor.queue-capacity` |
+| `MOVIE_PERSISTENCE__BACKEND` | `persistence.backend` |
+| `MOVIE_PERSISTENCE__CONNECTION_URI` | `persistence.connection-uri` |
 | `MOVIE_PERSISTENCE__DB_PATH` | `persistence.db-path` |
 | `MOVIE_PERSISTENCE__IO_QUEUE_CAPACITY` | `persistence.io-queue-capacity` |
 | `MOVIE_PERSISTENCE__OPERATION_TIMEOUT` | `persistence.operation-timeout` |
@@ -82,4 +86,10 @@ Core configuration, executor, streams, and remoting are available through `requi
 ```crystal
 require "movie"
 require "movie/persistence"
+```
+
+PostgreSQL persistence includes the core persistence API and registers the `postgres` backend:
+
+```crystal
+require "movie/persistence/postgres"
 ```

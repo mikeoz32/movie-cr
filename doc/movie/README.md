@@ -27,6 +27,7 @@
 - [Epic 13 - Batched remoting transport](epics/epic-13-batched-remoting-transport.md)
 - [Epic 14 - Receiver handoff contention](epics/epic-14-receiver-handoff-contention.md)
 - [Epic 15 - Persistence contract and recovery](epics/epic-15-persistence-contract-and-recovery.md)
+- [Epic 16 - Pluggable persistence and PostgreSQL](epics/epic-16-pluggable-persistence-and-postgresql.md)
 
 ## How To Use This Folder
 

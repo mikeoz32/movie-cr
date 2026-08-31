@@ -2,9 +2,9 @@
 
 [Documentation index](README.md) · [Configuration](configuration.md) · [Recovery backlog](backlog.md)
 
-Movie persistence is an optional, local SQLite implementation for event-sourced and durable-state actors. It provides typed command effects, atomic optimistic revisions, restart recovery, entity re-resolution, event manifests, snapshots, and isolated blocking database I/O.
+Movie persistence provides backend-neutral event-sourced and durable-state actors with SQLite and PostgreSQL storage implementations. It provides typed command effects, atomic optimistic revisions, restart recovery, entity re-resolution, event manifests, snapshots, and isolated database I/O.
 
-It is not a distributed journal or cluster sharding implementation. Use one logical owner per persistence id. If two owners write the same revision, exactly one succeeds and the other receives `Movie::Persistence::ConcurrentWriteError`.
+SQLite is local to one process. PostgreSQL is a shared journal that lets another actor-system node recover the same persistence id and arbitrates concurrent revisions across nodes. Movie still does not provide cluster membership, sharding, automatic entity relocation, or split-brain ownership. Use one logical owner per persistence id; if two owners write the same revision, exactly one succeeds and the other receives `Movie::Persistence::ConcurrentWriteError`.
 
 ## Event-sourced behavior
 
@@ -137,21 +137,47 @@ The default event, state, and snapshot manifests are their Crystal type names. O
 
 Override `snapshot_every` with a positive event count to enable periodic snapshots. The default is `nil`, which disables snapshots. The pre-revision Movie tables are migrated in place; their existing payloads receive the `legacy` manifest.
 
-Recovery and write hooks are available for metrics and logging: `on_recovery_completed`, `on_recovery_failure`, and `on_persist_failure`. A timed-out write is not cancelled at SQLite. The actor restarts and recovers; retrying with the same mandatory operation id does not append or apply the effect again. A duplicate response triggers another recovery, which also covers the race where the late commit became visible after restart recovery. Optimistic revisions still reject a genuinely different stale operation.
+Recovery and write hooks are available for metrics and logging: `on_recovery_completed`, `on_recovery_failure`, and `on_persist_failure`. A timed-out backend write is not cancelled. The actor restarts and recovers; retrying with the same mandatory operation id does not append or apply the effect again. A duplicate response triggers another recovery, which also covers the race where the late commit became visible after restart recovery. Optimistic revisions still reject a genuinely different stale operation.
 
 ## I/O and concurrency
 
-Each SQLite connection is owned by one bounded `ConnectionWorker` on a dedicated `Fiber::ExecutionContext::Isolated` OS thread. `DB.connect`, statements, transactions, and close all execute there, so native SQLite work does not block actor dispatcher threads. Store actors forward independent operations asynchronously across the configured connection pool.
+Each backend connection is owned by one bounded `ConnectionWorker` on a dedicated `Fiber::ExecutionContext::Isolated` OS thread. Connect, statements, transactions, and close all execute there, so storage work does not block actor dispatcher threads. Store actors forward independent operations asynchronously across the configured connection pool. A lost established connection fails the in-flight operation because its commit status may be ambiguous; the worker reconnects for the next retry. Reuse the same operation id for that retry.
 
-JSON is written directly into the one `String` required for SQLite text binding; no second intermediate JSON string is built. Persistent command processing also performs one defensive state round trip to enforce commit-before-mutation semantics; this is a deliberate correctness allocation boundary.
+JSON is written directly into the one `String` required for SQL text binding; no second intermediate JSON string is built. Persistent command processing also performs one defensive state round trip to enforce commit-before-mutation semantics; this is a deliberate correctness allocation boundary.
+
+## Backends
+
+SQLite remains the zero-configuration default:
+
+```crystal
+require "movie/persistence"
+```
+
+PostgreSQL is an explicit entrypoint so applications opt into its driver:
+
+```crystal
+require "movie/persistence/postgres"
+
+config = Movie::Config.builder
+  .set("persistence.backend", "postgres")
+  .set("persistence.connection-uri", ENV["DATABASE_URL"])
+  .set("persistence.pool-size", 4)
+  .build
+```
+
+PostgreSQL schema creation is automatic and serialized with an advisory lock, so the configured role needs DDL permissions on first startup. Later nodes use the same tables. Credentials and TLS options belong in the connection URI and should come from deployment secrets, not source control.
+
+Custom implementations register an immutable `Persistence::Backend` factory and return one `Persistence::BackendConnection` per worker. The connection implements the `JournalBackend`, `SnapshotBackend`, and `DurableStateBackend` contracts. Run the shared backend contract specs before relying on a custom implementation.
 
 ## Configuration
 
 | Path | Default | Meaning |
 |---|---:|---|
+| `persistence.backend` | `sqlite` | Registered backend name: built-ins are `sqlite` and, after requiring its entrypoint, `postgres`. |
+| `persistence.connection-uri` | empty | Required PostgreSQL connection URI; ignored by the default SQLite backend. |
 | `persistence.db-path` | `data/movie_persistence.sqlite3` | SQLite database file. |
 | `persistence.pool-size` | `1` | Parallel connection workers. Start with `1`; raise only for measured concurrent workloads. |
 | `persistence.io-queue-capacity` | `256` | Bounded jobs waiting per connection worker. |
 | `persistence.operation-timeout` | `5s` | Ask timeout for journal and durable-state operations. |
 
-For a distributed cluster, use this API contract as the behavioral layer but replace local entity ownership and SQLite with cluster sharding plus a distributed journal. SQLite persistence alone does not provide node failover, replication, or split-brain protection.
+PostgreSQL supplies shared durable storage and node-to-node recovery, but not actor ownership. A complete distributed cluster still needs membership, failure detection, sharding/placement, and split-brain protection above this persistence layer. PostgreSQL replication and failover are deployment responsibilities; Movie reconnects after a lost established connection but does not provision or promote database replicas.
