@@ -54,6 +54,17 @@
 - Update persistence/configuration documentation and provide a PostgreSQL example.
 - Complete mandatory Spec and Standards review and address material findings.
 
+## Follow-up Task 16.5: Decompose the persistence module
+
+**Status:** Complete.
+
+- Preserve `require "movie/persistence"` and every public persistence type and behavior.
+- Split protocol/SPI, connection workers, shared SQL, SQLite, storage actors, and persistent behaviors by responsibility.
+- Treat the existing persistence and full suites as characterization tests because this refactor intentionally adds no behavior.
+- Verify PostgreSQL's explicit entrypoint still composes with the split default persistence facade.
+
+**Verification:** Extracted implementation bodies match their original source ranges exactly; SQLite characterization specs pass 20/20, PostgreSQL integration specs pass 6/6, and the PostgreSQL-enabled full suite passes 291/291 on Crystal 1.21 and the minimum supported Crystal 1.19.1.
+
 ## Completion checklist
 
 - [x] Failing test written first.
@@ -75,6 +86,6 @@
 - Dependency, formatting, and whitespace checks pass.
 - The final Spec review has no findings, and the final Standards review has no hard findings.
 
-## Deferred maintainability note
+## Resolved maintainability note
 
-The Standards review identified one non-blocking Divergent Change: `src/movie/persistence.cr` now owns the backend SPI, shared SQL engine, SQLite adapter, storage actors, and persistent behavior APIs. A later mechanical refactor should split those responsibilities into narrower files without changing the completed public contract.
+The Standards review originally identified `src/movie/persistence.cr` as a non-blocking Divergent Change. Follow-up Task 16.5 resolved it by retaining that path as the stable facade while moving the backend SPI, connection worker, shared SQL engine, SQLite adapter, storage actors, and persistent behaviors into responsibility-focused modules without changing the public contract.
