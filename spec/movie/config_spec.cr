@@ -546,6 +546,11 @@ describe Movie::ActorSystemConfig do
     config.get_int("persistence.pool-size").should eq(1)
     config.get_int("persistence.io-queue-capacity").should eq(256)
     config.get_duration("persistence.operation-timeout").should eq(5.seconds)
+    config.get_int("persistence.retry.max-retries").should eq(2)
+    config.get_duration("persistence.retry.min-backoff").should eq(10.milliseconds)
+    config.get_duration("persistence.retry.max-backoff").should eq(250.milliseconds)
+    config.get_int("persistence.circuit-breaker.failure-threshold").should eq(5)
+    config.get_duration("persistence.circuit-breaker.reset-timeout").should eq(5.seconds)
     config.has_path?("movie.persistence.db_path").should be_false
   end
 

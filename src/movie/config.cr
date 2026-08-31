@@ -894,6 +894,11 @@ module Movie
     PERSISTENCE_POOL_SIZE         = "persistence.pool-size"
     PERSISTENCE_IO_QUEUE_CAPACITY = "persistence.io-queue-capacity"
     PERSISTENCE_OPERATION_TIMEOUT = "persistence.operation-timeout"
+    PERSISTENCE_RETRY_MAX_RETRIES = "persistence.retry.max-retries"
+    PERSISTENCE_RETRY_MIN_BACKOFF = "persistence.retry.min-backoff"
+    PERSISTENCE_RETRY_MAX_BACKOFF = "persistence.retry.max-backoff"
+    PERSISTENCE_CIRCUIT_THRESHOLD = "persistence.circuit-breaker.failure-threshold"
+    PERSISTENCE_CIRCUIT_RESET     = "persistence.circuit-breaker.reset-timeout"
 
     # Returns the default configuration for an ActorSystem.
     def self.default : Config
@@ -929,6 +934,11 @@ module Movie
         .set(PERSISTENCE_POOL_SIZE, 1)
         .set(PERSISTENCE_IO_QUEUE_CAPACITY, 256)
         .set_duration(PERSISTENCE_OPERATION_TIMEOUT, 5.seconds)
+        .set(PERSISTENCE_RETRY_MAX_RETRIES, 2)
+        .set_duration(PERSISTENCE_RETRY_MIN_BACKOFF, 10.milliseconds)
+        .set_duration(PERSISTENCE_RETRY_MAX_BACKOFF, 250.milliseconds)
+        .set(PERSISTENCE_CIRCUIT_THRESHOLD, 5)
+        .set_duration(PERSISTENCE_CIRCUIT_RESET, 5.seconds)
 
         .build
     end
