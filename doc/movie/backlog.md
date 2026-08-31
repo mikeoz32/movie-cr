@@ -24,6 +24,7 @@ Mandatory workflow for every task lives in [development_workflow.md](development
 | P0 | [Epic 14 - Receiver Handoff Contention](epics/epic-14-receiver-handoff-contention.md) | Measures and removes receiver-side lock and scheduling amplification before changing the wire codec. | Completed (2026-08-30) |
 | P0 | [Epic 15 - Persistence Contract and Recovery](epics/epic-15-persistence-contract-and-recovery.md) | Defines safe persistence effects, atomic recovery semantics, entity lifecycle, snapshots, and blocking-I/O isolation. | Completed (2026-08-30) |
 | P0 | [Epic 16 - Pluggable Persistence and PostgreSQL](epics/epic-16-pluggable-persistence-and-postgresql.md) | Separates persistence semantics from SQLite and adds a shared PostgreSQL backend for multi-node recovery. | Completed (2026-08-31) |
+| P0 | [Epic 17 - Persistence Production Hardening](epics/epic-17-persistence-production-hardening.md) | Adds operable schema evolution, telemetry, retention, projections, outbox delivery, resilience policies, and fault/load evidence. | Completed (2026-08-31) |
 
 ## Planning Rules
 
@@ -46,5 +47,5 @@ Mandatory workflow for every task lives in [development_workflow.md](development
 These items are intentionally not in the first recovery wave:
 
 - New stream operators beyond current MVP.
-- New persistence features beyond stabilization and documentation.
+- Distributed persistence ownership, archival storage, and backend-native table partitioning.
 - Performance tuning before correctness gaps are closed.

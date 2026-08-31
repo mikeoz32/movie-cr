@@ -28,6 +28,7 @@
 - [Epic 14 - Receiver handoff contention](epics/epic-14-receiver-handoff-contention.md)
 - [Epic 15 - Persistence contract and recovery](epics/epic-15-persistence-contract-and-recovery.md)
 - [Epic 16 - Pluggable persistence and PostgreSQL](epics/epic-16-pluggable-persistence-and-postgresql.md)
+- [Epic 17 - Persistence production hardening](epics/epic-17-persistence-production-hardening.md)
 
 ## How To Use This Folder
 

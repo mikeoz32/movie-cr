@@ -52,6 +52,11 @@ config = file.with_env_overrides
 | `persistence.pool-size` | Int | `1` | Backend connection worker count; values below one are clamped to one. |
 | `persistence.io-queue-capacity` | Int | `256` | Bounded pending jobs per isolated backend connection worker. |
 | `persistence.operation-timeout` | Duration | `5s` | Ask timeout for journal and durable-state operations; timeout does not cancel backend work already running. |
+| `persistence.retry.max-retries` | Int | `2` | Automatic retries after connection loss for typed idempotent requests. |
+| `persistence.retry.min-backoff` | Duration | `10ms` | Delay before the first automatic connection retry. |
+| `persistence.retry.max-backoff` | Duration | `250ms` | Upper bound for exponential connection-retry delay. |
+| `persistence.circuit-breaker.failure-threshold` | Int | `5` | Consecutive connection failures per worker before its circuit opens. |
+| `persistence.circuit-breaker.reset-timeout` | Duration | `5s` | Delay before an open worker circuit permits a probe request. |
 
 The old `movie.persistence.db_path` and `movie.persistence.pool_size` shapes are not aliases. Movie is still pre-1.0, and configuration now has one canonical naming scheme.
 
@@ -72,6 +77,11 @@ The default prefix is `MOVIE`. Canonical environment names use `__` between dott
 | `MOVIE_PERSISTENCE__DB_PATH` | `persistence.db-path` |
 | `MOVIE_PERSISTENCE__IO_QUEUE_CAPACITY` | `persistence.io-queue-capacity` |
 | `MOVIE_PERSISTENCE__OPERATION_TIMEOUT` | `persistence.operation-timeout` |
+| `MOVIE_PERSISTENCE__RETRY__MAX_RETRIES` | `persistence.retry.max-retries` |
+| `MOVIE_PERSISTENCE__RETRY__MIN_BACKOFF` | `persistence.retry.min-backoff` |
+| `MOVIE_PERSISTENCE__RETRY__MAX_BACKOFF` | `persistence.retry.max-backoff` |
+| `MOVIE_PERSISTENCE__CIRCUIT_BREAKER__FAILURE_THRESHOLD` | `persistence.circuit-breaker.failure-threshold` |
+| `MOVIE_PERSISTENCE__CIRCUIT_BREAKER__RESET_TIMEOUT` | `persistence.circuit-breaker.reset-timeout` |
 
 Legacy single-underscore names remain accepted for simple paths where every underscore means a dot, such as `MOVIE_REMOTING_PORT` -> `remoting.port`. Use the canonical double-underscore form whenever a path segment contains a hyphen.
 
