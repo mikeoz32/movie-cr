@@ -9,13 +9,14 @@ describe Movie::Persistence::ConnectionActor do
     caller_thread = Thread.current.object_id
 
     worker_thread, value = worker.execute do |connection|
-      connection.exec("CREATE TABLE worker_probe (value INTEGER)")
-      connection.exec("INSERT INTO worker_probe (value) VALUES (42)")
-      {Thread.current.object_id, connection.query_one("SELECT value FROM worker_probe", as: Int64)}
+      connection.exec(Movie::Persistence::DbExec.new("CREATE TABLE worker_probe (value INTEGER)"))
+      connection.exec(Movie::Persistence::DbExec.new("INSERT INTO worker_probe (value) VALUES (42)"))
+      query = Movie::Persistence::DbQueryString.new("SELECT CAST(value AS TEXT) FROM worker_probe")
+      {Thread.current.object_id, connection.query_string(query)}
     end
 
     worker_thread.should_not eq(caller_thread)
-    value.should eq(42_i64)
+    value.should eq("42")
 
     worker.close
     expect_raises(Movie::Persistence::ConnectionWorker::Stopped) do

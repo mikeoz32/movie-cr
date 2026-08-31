@@ -34,38 +34,77 @@ module Movie
       "entity-#{type}-#{ent}"
     end
 
+    # A storage request owns its response type and execution dispatch. Adding a
+    # new operation does not require another switch in ConnectionActor.
+    module ConnectionRequest
+      abstract def dispatch(worker : ConnectionWorker, sender : Movie::ActorRefBase?) : Nil
+    end
+
+    module TypedConnectionRequest(T)
+      include ConnectionRequest
+
+      abstract def execute(connection : BackendConnection) : T
+
+      def dispatch(worker : ConnectionWorker, sender : Movie::ActorRefBase?) : Nil
+        Movie::Ask.reply_if_asked(sender, worker.execute { |connection| execute(connection) })
+      rescue error
+        Movie::Ask.fail_if_asked(sender, error, T)
+      end
+    end
+
     # Database connection messages
     alias DbArgs = Array(DB::Any)
 
     struct DbExec
+      include TypedConnectionRequest(Bool)
       getter sql : String
       getter args : DbArgs
 
       def initialize(@sql : String, @args : DbArgs = [] of DB::Any)
+      end
+
+      def execute(connection : BackendConnection) : Bool
+        connection.exec(self)
+        true
       end
     end
 
     struct DbExecLastId
+      include TypedConnectionRequest(Int64)
       getter sql : String
       getter args : DbArgs
 
       def initialize(@sql : String, @args : DbArgs = [] of DB::Any)
+      end
+
+      def execute(connection : BackendConnection) : Int64
+        connection.exec_last_id(self)
       end
     end
 
     struct DbQueryString
+      include TypedConnectionRequest(String?)
       getter sql : String
       getter args : DbArgs
 
       def initialize(@sql : String, @args : DbArgs = [] of DB::Any)
       end
+
+      def execute(connection : BackendConnection) : String?
+        connection.query_string(self)
+      end
     end
 
     struct DbQueryStrings
+      include TypedConnectionRequest(Array(String))
       getter sql : String
       getter args : DbArgs
 
       def initialize(@sql : String, @args : DbArgs = [] of DB::Any)
+      end
+
+      def execute(connection : BackendConnection) : Array(String)
+        connection.query_strings(self)
       end
     end
 
@@ -105,12 +144,25 @@ module Movie
     end
 
     struct EnsureEventStore
+      include TypedConnectionRequest(Bool)
+
+      def execute(connection : BackendConnection) : Bool
+        connection.ensure_event_store
+        true
+      end
     end
 
     struct EnsureStateStore
+      include TypedConnectionRequest(Bool)
+
+      def execute(connection : BackendConnection) : Bool
+        connection.ensure_state_store
+        true
+      end
     end
 
     struct AppendEvents
+      include TypedConnectionRequest(WriteResult)
       getter persistence_id : String
       getter expected_revision : Int64
       getter operation_id : OperationId
@@ -123,39 +175,66 @@ module Movie
         @events : Array(SerializedEvent),
       )
       end
+
+      def execute(connection : BackendConnection) : WriteResult
+        connection.append_events(self)
+      end
     end
 
     struct LoadEvents
+      include TypedConnectionRequest(Array(StoredEvent))
       getter persistence_id : String
       getter after_sequence_nr : Int64
 
       def initialize(@persistence_id : String, @after_sequence_nr : Int64 = 0_i64)
       end
+
+      def execute(connection : BackendConnection) : Array(StoredEvent)
+        connection.load_events(self)
+      end
     end
 
     struct SaveSnapshot
+      include TypedConnectionRequest(Bool)
       getter persistence_id : String
       getter snapshot : SnapshotRecord
 
       def initialize(@persistence_id : String, @snapshot : SnapshotRecord)
       end
+
+      def execute(connection : BackendConnection) : Bool
+        connection.save_snapshot(self)
+        true
+      end
     end
 
     struct LoadSnapshot
+      include TypedConnectionRequest(SnapshotRecord?)
       getter persistence_id : String
 
       def initialize(@persistence_id : String)
+      end
+
+      def execute(connection : BackendConnection) : SnapshotRecord?
+        connection.load_snapshot(self)
       end
     end
 
     struct DeleteSnapshot
+      include TypedConnectionRequest(Bool)
       getter persistence_id : String
 
       def initialize(@persistence_id : String)
       end
+
+      def execute(connection : BackendConnection) : Bool
+        connection.delete_snapshot(self)
+        true
+      end
     end
 
     struct SaveState
+      include TypedConnectionRequest(WriteResult)
       getter persistence_id : String
       getter expected_revision : Int64
       getter operation_id : OperationId
@@ -170,21 +249,35 @@ module Movie
         @payload : String,
       )
       end
+
+      def execute(connection : BackendConnection) : WriteResult
+        connection.save_state(self)
+      end
     end
 
     struct LoadState
+      include TypedConnectionRequest(StateRecord?)
       getter persistence_id : String
 
       def initialize(@persistence_id : String)
       end
+
+      def execute(connection : BackendConnection) : StateRecord?
+        connection.load_state(self)
+      end
     end
 
     struct DeleteState
+      include TypedConnectionRequest(WriteResult)
       getter persistence_id : String
       getter expected_revision : Int64
       getter operation_id : OperationId
 
       def initialize(@persistence_id : String, @expected_revision : Int64, @operation_id : OperationId)
+      end
+
+      def execute(connection : BackendConnection) : WriteResult
+        connection.delete_state(self)
       end
     end
 
@@ -193,6 +286,64 @@ module Movie
                               SaveSnapshot | LoadSnapshot | DeleteSnapshot |
                               SaveState | LoadState | DeleteState
 
+    # Backend-neutral journal contract. Implementations must preserve operation-id
+    # deduplication, optimistic revisions, and atomic event batches.
+    module JournalBackend
+      abstract def ensure_event_store : Nil
+      abstract def append_events(message : AppendEvents) : WriteResult
+      abstract def load_events(message : LoadEvents) : Array(StoredEvent)
+    end
+
+    # Backend-neutral snapshot contract used by event-sourced recovery.
+    module SnapshotBackend
+      abstract def save_snapshot(message : SaveSnapshot) : Nil
+      abstract def load_snapshot(message : LoadSnapshot) : SnapshotRecord?
+      abstract def delete_snapshot(message : DeleteSnapshot) : Nil
+    end
+
+    # Backend-neutral durable-state contract.
+    module DurableStateBackend
+      abstract def ensure_state_store : Nil
+      abstract def save_state(message : SaveState) : WriteResult
+      abstract def load_state(message : LoadState) : StateRecord?
+      abstract def delete_state(message : DeleteState) : WriteResult
+    end
+
+    # One physical backend connection. A connection is owned by exactly one
+    # ConnectionWorker and is never used from another execution context.
+    abstract class BackendConnection
+      include JournalBackend
+      include SnapshotBackend
+      include DurableStateBackend
+
+      abstract def connection_lost?(error : Exception) : Bool
+      abstract def close : Nil
+
+      # Raw SQL requests are retained for compatibility with the low-level
+      # connection API. Persistence itself never depends on them.
+      def exec(message : DbExec) : Nil
+        raise NotImplementedError.new("Raw SQL is not supported by this persistence backend")
+      end
+
+      def exec_last_id(message : DbExecLastId) : Int64
+        raise NotImplementedError.new("Last-insert ids are not supported by this persistence backend")
+      end
+
+      def query_string(message : DbQueryString) : String?
+        raise NotImplementedError.new("Raw SQL is not supported by this persistence backend")
+      end
+
+      def query_strings(message : DbQueryStrings) : Array(String)
+        raise NotImplementedError.new("Raw SQL is not supported by this persistence backend")
+      end
+    end
+
+    # Immutable backend factory shared by the connection workers in one pool.
+    abstract class Backend
+      abstract def name : String
+      abstract def connect : BackendConnection
+    end
+
     # Owns one database connection on a dedicated OS thread. Jobs are bounded and
     # always execute on the same isolated execution context as the connection.
     class ConnectionWorker
@@ -200,15 +351,15 @@ module Movie
       end
 
       private abstract class Work
-        abstract def execute(connection : DB::Connection)
+        abstract def execute(connection : BackendConnection)
         abstract def fail(error : Exception)
       end
 
       private class TypedWork(T) < Work
-        def initialize(@operation : Proc(DB::Connection, T), @promise : Movie::Promise(T))
+        def initialize(@operation : Proc(BackendConnection, T), @promise : Movie::Promise(T))
         end
 
-        def execute(connection : DB::Connection)
+        def execute(connection : BackendConnection)
           @promise.try_success(@operation.call(connection))
         end
 
@@ -222,14 +373,18 @@ module Movie
       @stopped : Atomic(Bool)
       @execution_context : Fiber::ExecutionContext::Isolated
 
-      def initialize(@db_uri : String, name : String, queue_capacity : Int32 = 256)
+      def initialize(@backend : Backend, name : String, queue_capacity : Int32 = 256)
         @jobs = Channel(Work).new(queue_capacity < 1 ? 1 : queue_capacity)
         @ready = Movie::Promise(Nil).new
         @stopped = Atomic(Bool).new(false)
         @execution_context = Fiber::ExecutionContext::Isolated.new(name) { run }
       end
 
-      def execute(&operation : DB::Connection -> T) : T forall T
+      def initialize(db_uri : String, name : String, queue_capacity : Int32 = 256)
+        initialize(SQLiteBackend.new(db_uri), name, queue_capacity)
+      end
+
+      def execute(&operation : BackendConnection -> T) : T forall T
         @ready.future.await
         raise Stopped.new("Database connection worker is stopped") if @stopped.get
 
@@ -255,20 +410,28 @@ module Movie
       end
 
       private def run
-        connection = nil.as(DB::Connection?)
+        connection = nil.as(BackendConnection?)
         begin
-          connection = DB.connect(@db_uri)
-          if @db_uri.starts_with?("sqlite3:")
-            connection.exec("PRAGMA busy_timeout = 5000")
-          end
+          connection = @backend.connect
           @ready.try_success(nil)
 
           loop do
             work = @jobs.receive
             begin
-              work.execute(connection)
+              current = connection || @backend.connect
+              connection = current
+              work.execute(current)
             rescue error
               work.fail(error)
+              if current = connection
+                if current.connection_lost?(error)
+                  begin
+                    current.close
+                  rescue
+                  end
+                  connection = nil
+                end
+              end
             end
           end
         rescue Channel::ClosedError
@@ -295,96 +458,28 @@ module Movie
       end
     end
 
-    # Actor that owns a single DB connection and executes queries sequentially.
-    class ConnectionActor < Movie::AbstractBehavior(ConnectionMessage)
-      @worker : ConnectionWorker? = nil
-
-      def initialize(@db_uri : String, @queue_capacity : Int32 = 256)
+    # Shared SQL implementation. Dialects only supply connection setup and
+    # schema introspection; all persistence invariants live here.
+    abstract class SqlBackendConnection < BackendConnection
+      def initialize(@connection : DB::Connection)
       end
 
-      def receive(message, context)
-        case message
-        when DbExec
-          respond(context.sender, Bool) do
-            exec(message)
-            true
-          end
-        when DbExecLastId
-          respond(context.sender, Int64) { exec_last_id(message) }
-        when DbQueryString
-          respond(context.sender, String?) { query_string(message) }
-        when DbQueryStrings
-          respond(context.sender, Array(String)) { query_strings(message) }
-        when EnsureEventStore
-          respond(context.sender, Bool) do
-            ensure_event_store
-            true
-          end
-        when EnsureStateStore
-          respond(context.sender, Bool) do
-            ensure_state_store
-            true
-          end
-        when AppendEvents
-          respond(context.sender, WriteResult) { append_events(message) }
-        when LoadEvents
-          respond(context.sender, Array(StoredEvent)) { load_events(message) }
-        when SaveSnapshot
-          respond(context.sender, Bool) do
-            save_snapshot(message)
-            true
-          end
-        when LoadSnapshot
-          respond(context.sender, SnapshotRecord?) { load_snapshot(message) }
-        when DeleteSnapshot
-          respond(context.sender, Bool) do
-            delete_snapshot(message)
-            true
-          end
-        when SaveState
-          respond(context.sender, WriteResult) { save_state(message) }
-        when LoadState
-          respond(context.sender, StateRecord?) { load_state(message) }
-        when DeleteState
-          respond(context.sender, WriteResult) { delete_state(message) }
-        end
-        Movie::Behaviors(ConnectionMessage).same
-      end
-
-      private def respond(sender : Movie::ActorRefBase?, response_type : T.class, &operation : -> T) forall T
-        Movie::Ask.reply_if_asked(sender, operation.call)
-      rescue error
-        Movie::Ask.fail_if_asked(sender, error, response_type)
-      end
-
-      def on_signal(signal : SystemMessage)
-        case signal
-        when PreStart
-          ensure_worker
-        when PreStop
-          begin
-            @worker.try &.close
-          rescue
-          end
-        end
-      end
-
-      private def exec(message : DbExec)
+      def exec(message : DbExec) : Nil
         with_connection { |connection| connection.exec(message.sql, args: message.args) }
       end
 
-      private def exec_last_id(message : DbExecLastId) : Int64
+      def exec_last_id(message : DbExecLastId) : Int64
         with_connection do |connection|
           result = connection.exec(message.sql, args: message.args)
           result.last_insert_id
         end
       end
 
-      private def query_string(message : DbQueryString) : String?
+      def query_string(message : DbQueryString) : String?
         with_connection { |connection| connection.query_one?(message.sql, args: message.args, as: String) }
       end
 
-      private def query_strings(message : DbQueryStrings) : Array(String)
+      def query_strings(message : DbQueryStrings) : Array(String)
         with_connection do |connection|
           values = [] of String
           connection.query_each(message.sql, args: message.args) do |rs|
@@ -394,12 +489,12 @@ module Movie
         end
       end
 
-      private def ensure_event_store
+      def ensure_event_store : Nil
         with_connection { |connection| ensure_event_store(connection) }
       end
 
       private def ensure_event_store(connection : DB::Connection)
-        connection.exec("PRAGMA journal_mode = WAL")
+        configure_schema(connection)
         if table_exists?(connection, "event_journal") && !table_columns(connection, "event_journal").includes?("sequence_nr")
           migrate_legacy_event_store(connection)
         end
@@ -408,10 +503,10 @@ module Movie
         connection.exec(<<-SQL)
           CREATE TABLE IF NOT EXISTS snapshot_store (
             persistence_id TEXT PRIMARY KEY,
-            sequence_nr INTEGER NOT NULL,
+            sequence_nr BIGINT NOT NULL,
             manifest TEXT NOT NULL,
             payload TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
           )
         SQL
       end
@@ -420,17 +515,17 @@ module Movie
         conn.exec(<<-SQL)
           CREATE TABLE IF NOT EXISTS event_journal (
             persistence_id TEXT NOT NULL,
-            sequence_nr INTEGER NOT NULL,
+            sequence_nr BIGINT NOT NULL,
             manifest TEXT NOT NULL,
             payload TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (persistence_id, sequence_nr)
           )
         SQL
         conn.exec(<<-SQL)
           CREATE TABLE IF NOT EXISTS event_stream (
             persistence_id TEXT PRIMARY KEY,
-            revision INTEGER NOT NULL
+            revision BIGINT NOT NULL
           )
         SQL
         conn.exec(<<-SQL)
@@ -438,26 +533,33 @@ module Movie
             persistence_id TEXT NOT NULL,
             operation_id TEXT NOT NULL,
             fingerprint TEXT NOT NULL,
-            revision INTEGER NOT NULL,
+            revision BIGINT NOT NULL,
             PRIMARY KEY (persistence_id, operation_id)
           )
         SQL
       end
 
       private def synchronize_event_stream_revisions(connection : DB::Connection)
-        connection.exec(<<-SQL)
-          INSERT INTO event_stream (persistence_id, revision)
-          SELECT persistence_id, MAX(sequence_nr) FROM event_journal GROUP BY persistence_id
-          ON CONFLICT(persistence_id) DO UPDATE SET revision = MAX(event_stream.revision, excluded.revision)
-        SQL
+        revisions = connection.query_all(
+          "SELECT persistence_id, MAX(sequence_nr) FROM event_journal GROUP BY persistence_id",
+          as: {String, Int64}
+        )
+        revisions.each do |persistence_id, revision|
+          connection.exec(
+            "INSERT INTO event_stream (persistence_id, revision) VALUES (?, ?) " +
+            "ON CONFLICT(persistence_id) DO UPDATE SET revision = excluded.revision " +
+            "WHERE event_stream.revision < excluded.revision",
+            args: [persistence_id, revision] of DB::Any
+          )
+        end
       end
 
-      private def ensure_state_store
+      def ensure_state_store : Nil
         with_connection { |connection| ensure_state_store(connection) }
       end
 
       private def ensure_state_store(connection : DB::Connection)
-        connection.exec("PRAGMA journal_mode = WAL")
+        configure_schema(connection)
         if table_exists?(connection, "durable_state") && !table_columns(connection, "durable_state").includes?("revision")
           migrate_legacy_state_store(connection)
         end
@@ -468,11 +570,11 @@ module Movie
         conn.exec(<<-SQL)
           CREATE TABLE IF NOT EXISTS durable_state (
             persistence_id TEXT PRIMARY KEY,
-            revision INTEGER NOT NULL,
+            revision BIGINT NOT NULL,
             manifest TEXT NOT NULL,
             payload TEXT,
             deleted INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
           )
         SQL
         conn.exec(<<-SQL)
@@ -480,7 +582,7 @@ module Movie
             persistence_id TEXT NOT NULL,
             operation_id TEXT NOT NULL,
             fingerprint TEXT NOT NULL,
-            revision INTEGER NOT NULL,
+            revision BIGINT NOT NULL,
             PRIMARY KEY (persistence_id, operation_id)
           )
         SQL
@@ -518,32 +620,7 @@ module Movie
         end
       end
 
-      private def table_exists?(name : String) : Bool
-        with_connection { |connection| table_exists?(connection, name) }
-      end
-
-      private def table_exists?(connection : DB::Connection, name : String) : Bool
-        !connection.query_one?(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-          args: [name] of DB::Any,
-          as: String
-        ).nil?
-      end
-
-      private def table_columns(name : String) : Array(String)
-        with_connection { |connection| table_columns(connection, name) }
-      end
-
-      private def table_columns(connection : DB::Connection, name : String) : Array(String)
-        columns = [] of String
-        connection.query_each("PRAGMA table_info(#{name})") do |row|
-          row.read(Int64)
-          columns << row.read(String)
-        end
-        columns
-      end
-
-      private def append_events(message : AppendEvents) : WriteResult
+      def append_events(message : AppendEvents) : WriteResult
         with_connection { |connection| append_events(connection, message) }
       end
 
@@ -607,7 +684,8 @@ module Movie
           WriteResult.new(sequence_nr, false)
         end
         result.not_nil!
-      rescue error : SQLite3::Exception
+      rescue error
+        raise error unless database_error?(error)
         actual = event_revision(connection, message.persistence_id)
         if actual != message.expected_revision
           raise ConcurrentWriteError.new(message.persistence_id, message.expected_revision, actual)
@@ -632,7 +710,7 @@ module Movie
         ) || 0_i64
       end
 
-      private def load_events(message : LoadEvents) : Array(StoredEvent)
+      def load_events(message : LoadEvents) : Array(StoredEvent)
         with_connection do |connection|
           rows = connection.query_all(
             "SELECT sequence_nr, manifest, payload FROM event_journal " +
@@ -644,7 +722,7 @@ module Movie
         end
       end
 
-      private def save_snapshot(message : SaveSnapshot)
+      def save_snapshot(message : SaveSnapshot) : Nil
         with_connection do |connection|
           snapshot = message.snapshot
           connection.exec(
@@ -658,7 +736,7 @@ module Movie
         end
       end
 
-      private def load_snapshot(message : LoadSnapshot) : SnapshotRecord?
+      def load_snapshot(message : LoadSnapshot) : SnapshotRecord?
         with_connection do |connection|
           row = connection.query_one?(
             "SELECT sequence_nr, manifest, payload FROM snapshot_store WHERE persistence_id = ?",
@@ -669,7 +747,7 @@ module Movie
         end
       end
 
-      private def delete_snapshot(message : DeleteSnapshot)
+      def delete_snapshot(message : DeleteSnapshot) : Nil
         with_connection do |connection|
           connection.exec(
             "DELETE FROM snapshot_store WHERE persistence_id = ?",
@@ -678,7 +756,7 @@ module Movie
         end
       end
 
-      private def save_state(message : SaveState) : WriteResult
+      def save_state(message : SaveState) : WriteResult
         write_state(
           message.persistence_id,
           message.expected_revision,
@@ -689,7 +767,7 @@ module Movie
         )
       end
 
-      private def delete_state(message : DeleteState) : WriteResult
+      def delete_state(message : DeleteState) : WriteResult
         write_state(message.persistence_id, message.expected_revision, message.operation_id, "deleted", nil, true)
       end
 
@@ -761,7 +839,8 @@ module Movie
           WriteResult.new(revision, false)
         end
         result.not_nil!
-      rescue error : SQLite3::Exception
+      rescue error
+        raise error unless database_error?(error)
         actual = state_revision(connection, persistence_id)
         if actual != expected_revision
           raise ConcurrentWriteError.new(persistence_id, expected_revision, actual)
@@ -789,7 +868,7 @@ module Movie
         ) || 0_i64
       end
 
-      private def load_state(message : LoadState) : StateRecord?
+      def load_state(message : LoadState) : StateRecord?
         with_connection do |connection|
           row = connection.query_one?(
             "SELECT revision, manifest, payload, deleted FROM durable_state WHERE persistence_id = ?",
@@ -801,11 +880,100 @@ module Movie
       end
 
       private def with_connection(&operation : DB::Connection -> T) : T forall T
-        ensure_worker.execute(&operation)
+        yield @connection
+      end
+
+      protected def configure_schema(connection : DB::Connection) : Nil
+      end
+
+      protected abstract def table_exists?(connection : DB::Connection, name : String) : Bool
+      protected abstract def table_columns(connection : DB::Connection, name : String) : Array(String)
+      protected abstract def database_error?(error : Exception) : Bool
+
+      def connection_lost?(error : Exception) : Bool
+        error.is_a?(DB::ConnectionLost) || @connection.closed?
+      end
+
+      def close : Nil
+        @connection.close
+      end
+    end
+
+    class SQLiteBackendConnection < SqlBackendConnection
+      protected def configure_schema(connection : DB::Connection) : Nil
+        connection.exec("PRAGMA journal_mode = WAL")
+      end
+
+      protected def table_exists?(connection : DB::Connection, name : String) : Bool
+        !connection.query_one?(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+          args: [name] of DB::Any,
+          as: String
+        ).nil?
+      end
+
+      protected def table_columns(connection : DB::Connection, name : String) : Array(String)
+        columns = [] of String
+        connection.query_each("PRAGMA table_info(#{name})") do |row|
+          row.read(Int64)
+          columns << row.read(String)
+        end
+        columns
+      end
+
+      protected def database_error?(error : Exception) : Bool
+        error.is_a?(SQLite3::Exception)
+      end
+    end
+
+    class SQLiteBackend < Backend
+      getter uri : String
+
+      def initialize(@uri : String)
+      end
+
+      def name : String
+        "sqlite"
+      end
+
+      def connect : BackendConnection
+        connection = DB.connect(@uri)
+        connection.exec("PRAGMA busy_timeout = 5000")
+        SQLiteBackendConnection.new(connection)
+      end
+    end
+
+    # Actor that owns one backend connection worker and executes requests
+    # sequentially without exposing SQL to persistence behaviors.
+    class ConnectionActor < Movie::AbstractBehavior(ConnectionMessage)
+      @worker : ConnectionWorker? = nil
+
+      def initialize(@backend : Backend, @queue_capacity : Int32 = 256)
+      end
+
+      def initialize(db_uri : String, @queue_capacity : Int32 = 256)
+        @backend = SQLiteBackend.new(db_uri)
+      end
+
+      def receive(message, context)
+        message.dispatch(ensure_worker, context.sender)
+        Movie::Behaviors(ConnectionMessage).same
+      end
+
+      def on_signal(signal : SystemMessage)
+        case signal
+        when PreStart
+          ensure_worker
+        when PreStop
+          begin
+            @worker.try &.close
+          rescue
+          end
+        end
       end
 
       private def ensure_worker : ConnectionWorker
-        @worker ||= ConnectionWorker.new(@db_uri, "movie-db-#{object_id}", @queue_capacity)
+        @worker ||= ConnectionWorker.new(@backend, "movie-db-#{object_id}", @queue_capacity)
       end
     end
 
@@ -823,14 +991,18 @@ module Movie
         Movie::Behaviors(ConnectionMessage).same
       end
 
-      def self.behavior(db_uri : String, pool_size : Int32, queue_capacity : Int32 = 256)
+      def self.behavior(backend : Backend, pool_size : Int32, queue_capacity : Int32 = 256)
         Movie::Behaviors(ConnectionMessage).setup do |ctx|
           size = pool_size < 1 ? 1 : pool_size
           connections = Array(Movie::ActorRef(ConnectionMessage)).new(size) do |i|
-            ctx.spawn(ConnectionActor.new(db_uri, queue_capacity), name: "db-#{i}")
+            ctx.spawn(ConnectionActor.new(backend, queue_capacity), name: "db-#{i}")
           end
           ConnectionPool.new(connections)
         end
+      end
+
+      def self.behavior(db_uri : String, pool_size : Int32, queue_capacity : Int32 = 256)
+        behavior(SQLiteBackend.new(db_uri), pool_size, queue_capacity)
       end
 
       private def next_connection : Movie::ActorRef(ConnectionMessage)
@@ -1088,15 +1260,17 @@ module Movie
   class DatabaseExtension < Extension
     getter pool : ActorRef(Persistence::ConnectionMessage)
     getter operation_timeout : Time::Span
+    getter backend_name : String
 
     def initialize(
       @system : AbstractActorSystem,
-      @db_uri : String,
+      backend : Persistence::Backend,
       @pool_size : Int32,
       queue_capacity : Int32,
       @operation_timeout : Time::Span,
     )
-      @pool = @system.spawn(Persistence::ConnectionPool.behavior(@db_uri, @pool_size, queue_capacity))
+      @backend_name = backend.name
+      @pool = @system.spawn(Persistence::ConnectionPool.behavior(backend, @pool_size, queue_capacity))
     end
 
     def stop
@@ -1113,7 +1287,8 @@ module Movie
       operation_timeout = cfg.get_duration(ActorSystemConfig::PERSISTENCE_OPERATION_TIMEOUT, 5.seconds)
       parent = File.dirname(path)
       Dir.mkdir_p(parent) unless parent == "." || Dir.exists?(parent)
-      DatabaseExtension.new(system, "sqlite3:#{path}", pool_size, queue_capacity, operation_timeout)
+      backend = Persistence::SQLiteBackend.new("sqlite3:#{path}")
+      DatabaseExtension.new(system, backend, pool_size, queue_capacity, operation_timeout)
     end
   end
 

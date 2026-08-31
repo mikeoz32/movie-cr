@@ -23,6 +23,7 @@ Mandatory workflow for every task lives in [development_workflow.md](development
 | P0 | [Epic 13 - Batched Remoting Transport](epics/epic-13-batched-remoting-transport.md) | Removes synchronous per-message socket IO and measures the remaining receiver path before cluster work. | Completed (2026-08-30) |
 | P0 | [Epic 14 - Receiver Handoff Contention](epics/epic-14-receiver-handoff-contention.md) | Measures and removes receiver-side lock and scheduling amplification before changing the wire codec. | Completed (2026-08-30) |
 | P0 | [Epic 15 - Persistence Contract and Recovery](epics/epic-15-persistence-contract-and-recovery.md) | Defines safe persistence effects, atomic recovery semantics, entity lifecycle, snapshots, and blocking-I/O isolation. | Completed (2026-08-30) |
+| P0 | [Epic 16 - Pluggable Persistence and PostgreSQL](epics/epic-16-pluggable-persistence-and-postgresql.md) | Separates persistence semantics from SQLite and adds a shared PostgreSQL backend for multi-node recovery. | In progress |
 
 ## Planning Rules
 
