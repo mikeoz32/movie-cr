@@ -6,7 +6,7 @@
 
 **Fixed point:** `9e1c114`.
 
-**Status:** In progress.
+**Status:** Completed (2026-08-31).
 
 **Done when:**
 
@@ -47,7 +47,7 @@
 
 ## Task 16.4: Complete production integration
 
-**Status:** In progress.
+**Status:** Complete.
 
 - Add backend and connection URI configuration with environment mappings.
 - Run PostgreSQL integration specs in CI.
@@ -56,12 +56,25 @@
 
 ## Completion checklist
 
-- [ ] Failing test written first.
-- [ ] Failing test observed red.
-- [ ] Minimal implementation written.
-- [ ] Targeted verification green.
-- [ ] Broader verification green.
-- [ ] Formatting check green.
-- [ ] Docs/examples updated if needed.
-- [ ] Review requested.
-- [ ] Review feedback addressed.
+- [x] Failing test written first.
+- [x] Failing test observed red.
+- [x] Minimal implementation written.
+- [x] Targeted verification green.
+- [x] Broader verification green.
+- [x] Formatting check green.
+- [x] Docs/examples updated if needed.
+- [x] Review requested.
+- [x] Review feedback addressed.
+
+## Final verification
+
+- Full Movie specs with PostgreSQL enabled: 291 examples, 0 failures on Crystal 1.21.
+- CI-equivalent minimum-version specs with PostgreSQL enabled: 291 examples, 0 failures on Crystal 1.19.1.
+- Dedicated PostgreSQL integration specs: 6 examples, 0 failures, including physical connection termination and a committed-write/ack-loss retry.
+- All 8 examples build; the PostgreSQL example persists and recovers the expected counter value of 1.
+- Dependency, formatting, and whitespace checks pass.
+- The final Spec review has no findings, and the final Standards review has no hard findings.
+
+## Deferred maintainability note
+
+The Standards review identified one non-blocking Divergent Change: `src/movie/persistence.cr` now owns the backend SPI, shared SQL engine, SQLite adapter, storage actors, and persistent behavior APIs. A later mechanical refactor should split those responsibilities into narrower files without changing the completed public contract.
