@@ -79,6 +79,12 @@ module Movie
 end
 
 describe "Movie persistence backend SPI" do
+  it "rejects an unregistered backend by name" do
+    expect_raises(Movie::Persistence::UnknownBackendError, /not registered: missing/) do
+      Movie::Persistence::BackendRegistry.build("missing", Movie::Config.empty)
+    end
+  end
+
   it "executes storage requests without a SQL driver and reconnects after connection loss" do
     backend = Movie::ProbeBackend.new
     system = Movie::ActorSystem(Movie::SystemMessage).new(Movie::Behaviors(Movie::SystemMessage).same)

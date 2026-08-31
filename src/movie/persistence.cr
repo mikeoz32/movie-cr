@@ -490,7 +490,9 @@ module Movie
       end
 
       def ensure_event_store : Nil
-        with_connection { |connection| ensure_event_store(connection) }
+        with_connection do |connection|
+          with_schema_lock(connection) { ensure_event_store(connection) }
+        end
       end
 
       private def ensure_event_store(connection : DB::Connection)
@@ -546,16 +548,18 @@ module Movie
         )
         revisions.each do |persistence_id, revision|
           connection.exec(
-            "INSERT INTO event_stream (persistence_id, revision) VALUES (?, ?) " +
-            "ON CONFLICT(persistence_id) DO UPDATE SET revision = excluded.revision " +
-            "WHERE event_stream.revision < excluded.revision",
+            bind_sql("INSERT INTO event_stream (persistence_id, revision) VALUES (?, ?) " +
+                     "ON CONFLICT(persistence_id) DO UPDATE SET revision = excluded.revision " +
+                     "WHERE event_stream.revision < excluded.revision"),
             args: [persistence_id, revision] of DB::Any
           )
         end
       end
 
       def ensure_state_store : Nil
-        with_connection { |connection| ensure_state_store(connection) }
+        with_connection do |connection|
+          with_schema_lock(connection) { ensure_state_store(connection) }
+        end
       end
 
       private def ensure_state_store(connection : DB::Connection)
@@ -573,7 +577,7 @@ module Movie
             revision BIGINT NOT NULL,
             manifest TEXT NOT NULL,
             payload TEXT,
-            deleted INTEGER NOT NULL DEFAULT 0,
+            deleted BIGINT NOT NULL DEFAULT 0,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
           )
         SQL
@@ -629,8 +633,8 @@ module Movie
         result = connection.transaction do |transaction|
           conn = transaction.connection
           operation = conn.exec(
-            "INSERT INTO journal_operation (persistence_id, operation_id, fingerprint, revision) " +
-            "VALUES (?, ?, ?, ?) ON CONFLICT(persistence_id, operation_id) DO NOTHING",
+            bind_sql("INSERT INTO journal_operation (persistence_id, operation_id, fingerprint, revision) " +
+                     "VALUES (?, ?, ?, ?) ON CONFLICT(persistence_id, operation_id) DO NOTHING"),
             args: [
               message.persistence_id,
               message.operation_id.value,
@@ -640,7 +644,7 @@ module Movie
           )
           unless operation.rows_affected == 1
             stored = conn.query_one(
-              "SELECT fingerprint, revision FROM journal_operation WHERE persistence_id = ? AND operation_id = ?",
+              bind_sql("SELECT fingerprint, revision FROM journal_operation WHERE persistence_id = ? AND operation_id = ?"),
               args: [message.persistence_id, message.operation_id.value] of DB::Any,
               as: {String, Int64}
             )
@@ -651,7 +655,7 @@ module Movie
           end
 
           conn.exec(
-            "INSERT INTO event_stream (persistence_id, revision) VALUES (?, 0) ON CONFLICT(persistence_id) DO NOTHING",
+            bind_sql("INSERT INTO event_stream (persistence_id, revision) VALUES (?, 0) ON CONFLICT(persistence_id) DO NOTHING"),
             args: [message.persistence_id] of DB::Any
           )
 
@@ -665,7 +669,7 @@ module Movie
 
           next_revision = message.expected_revision + message.events.size
           updated = conn.exec(
-            "UPDATE event_stream SET revision = ? WHERE persistence_id = ? AND revision = ?",
+            bind_sql("UPDATE event_stream SET revision = ? WHERE persistence_id = ? AND revision = ?"),
             args: [next_revision, message.persistence_id, message.expected_revision] of DB::Any
           )
           unless updated.rows_affected == 1
@@ -677,7 +681,7 @@ module Movie
           message.events.each do |event|
             sequence_nr += 1
             conn.exec(
-              "INSERT INTO event_journal (persistence_id, sequence_nr, manifest, payload) VALUES (?, ?, ?, ?)",
+              bind_sql("INSERT INTO event_journal (persistence_id, sequence_nr, manifest, payload) VALUES (?, ?, ?, ?)"),
               args: [message.persistence_id, sequence_nr, event.manifest, event.payload] of DB::Any
             )
           end
@@ -704,7 +708,7 @@ module Movie
 
       private def event_revision(conn : DB::Connection, persistence_id : String) : Int64
         conn.query_one?(
-          "SELECT revision FROM event_stream WHERE persistence_id = ?",
+          bind_sql("SELECT revision FROM event_stream WHERE persistence_id = ?"),
           args: [persistence_id] of DB::Any,
           as: Int64
         ) || 0_i64
@@ -713,8 +717,8 @@ module Movie
       def load_events(message : LoadEvents) : Array(StoredEvent)
         with_connection do |connection|
           rows = connection.query_all(
-            "SELECT sequence_nr, manifest, payload FROM event_journal " +
-            "WHERE persistence_id = ? AND sequence_nr > ? ORDER BY sequence_nr ASC",
+            bind_sql("SELECT sequence_nr, manifest, payload FROM event_journal " +
+                     "WHERE persistence_id = ? AND sequence_nr > ? ORDER BY sequence_nr ASC"),
             args: [message.persistence_id, message.after_sequence_nr] of DB::Any,
             as: {Int64, String, String}
           )
@@ -726,11 +730,11 @@ module Movie
         with_connection do |connection|
           snapshot = message.snapshot
           connection.exec(
-            "INSERT INTO snapshot_store (persistence_id, sequence_nr, manifest, payload, updated_at) " +
-            "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) " +
-            "ON CONFLICT(persistence_id) DO UPDATE SET sequence_nr = excluded.sequence_nr, " +
-            "manifest = excluded.manifest, payload = excluded.payload, updated_at = CURRENT_TIMESTAMP " +
-            "WHERE excluded.sequence_nr >= snapshot_store.sequence_nr",
+            bind_sql("INSERT INTO snapshot_store (persistence_id, sequence_nr, manifest, payload, updated_at) " +
+                     "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) " +
+                     "ON CONFLICT(persistence_id) DO UPDATE SET sequence_nr = excluded.sequence_nr, " +
+                     "manifest = excluded.manifest, payload = excluded.payload, updated_at = CURRENT_TIMESTAMP " +
+                     "WHERE excluded.sequence_nr >= snapshot_store.sequence_nr"),
             args: [message.persistence_id, snapshot.sequence_nr, snapshot.manifest, snapshot.payload] of DB::Any
           )
         end
@@ -739,7 +743,7 @@ module Movie
       def load_snapshot(message : LoadSnapshot) : SnapshotRecord?
         with_connection do |connection|
           row = connection.query_one?(
-            "SELECT sequence_nr, manifest, payload FROM snapshot_store WHERE persistence_id = ?",
+            bind_sql("SELECT sequence_nr, manifest, payload FROM snapshot_store WHERE persistence_id = ?"),
             args: [message.persistence_id] of DB::Any,
             as: {Int64, String, String}
           )
@@ -750,7 +754,7 @@ module Movie
       def delete_snapshot(message : DeleteSnapshot) : Nil
         with_connection do |connection|
           connection.exec(
-            "DELETE FROM snapshot_store WHERE persistence_id = ?",
+            bind_sql("DELETE FROM snapshot_store WHERE persistence_id = ?"),
             args: [message.persistence_id] of DB::Any
           )
         end
@@ -798,13 +802,13 @@ module Movie
         result = connection.transaction do |transaction|
           conn = transaction.connection
           operation = conn.exec(
-            "INSERT INTO state_operation (persistence_id, operation_id, fingerprint, revision) " +
-            "VALUES (?, ?, ?, ?) ON CONFLICT(persistence_id, operation_id) DO NOTHING",
+            bind_sql("INSERT INTO state_operation (persistence_id, operation_id, fingerprint, revision) " +
+                     "VALUES (?, ?, ?, ?) ON CONFLICT(persistence_id, operation_id) DO NOTHING"),
             args: [persistence_id, operation_id.value, fingerprint, revision] of DB::Any
           )
           unless operation.rows_affected == 1
             stored = conn.query_one(
-              "SELECT fingerprint, revision FROM state_operation WHERE persistence_id = ? AND operation_id = ?",
+              bind_sql("SELECT fingerprint, revision FROM state_operation WHERE persistence_id = ? AND operation_id = ?"),
               args: [persistence_id, operation_id.value] of DB::Any,
               as: {String, Int64}
             )
@@ -815,12 +819,12 @@ module Movie
           end
 
           write = conn.exec(
-            "INSERT INTO durable_state (persistence_id, revision, manifest, payload, deleted, updated_at) " +
-            "SELECT ?, ?, ?, ?, ?, CURRENT_TIMESTAMP " +
-            "WHERE ? = 0 OR EXISTS (SELECT 1 FROM durable_state WHERE persistence_id = ?) " +
-            "ON CONFLICT(persistence_id) DO UPDATE SET revision = excluded.revision, " +
-            "manifest = excluded.manifest, payload = excluded.payload, deleted = excluded.deleted, " +
-            "updated_at = CURRENT_TIMESTAMP WHERE durable_state.revision = ?",
+            bind_sql("INSERT INTO durable_state (persistence_id, revision, manifest, payload, deleted, updated_at) " +
+                     "SELECT ?, ?, ?, ?, ?, CURRENT_TIMESTAMP " +
+                     "WHERE ? = 0 OR EXISTS (SELECT 1 FROM durable_state WHERE persistence_id = ?) " +
+                     "ON CONFLICT(persistence_id) DO UPDATE SET revision = excluded.revision, " +
+                     "manifest = excluded.manifest, payload = excluded.payload, deleted = excluded.deleted, " +
+                     "updated_at = CURRENT_TIMESTAMP WHERE durable_state.revision = ?"),
             args: [
               persistence_id,
               revision,
@@ -862,7 +866,7 @@ module Movie
 
       private def state_revision(conn : DB::Connection, persistence_id : String) : Int64
         conn.query_one?(
-          "SELECT revision FROM durable_state WHERE persistence_id = ?",
+          bind_sql("SELECT revision FROM durable_state WHERE persistence_id = ?"),
           args: [persistence_id] of DB::Any,
           as: Int64
         ) || 0_i64
@@ -871,7 +875,7 @@ module Movie
       def load_state(message : LoadState) : StateRecord?
         with_connection do |connection|
           row = connection.query_one?(
-            "SELECT revision, manifest, payload, deleted FROM durable_state WHERE persistence_id = ?",
+            bind_sql("SELECT revision, manifest, payload, CAST(deleted AS BIGINT) FROM durable_state WHERE persistence_id = ?"),
             args: [message.persistence_id] of DB::Any,
             as: {Int64, String, String?, Int64}
           )
@@ -884,6 +888,14 @@ module Movie
       end
 
       protected def configure_schema(connection : DB::Connection) : Nil
+      end
+
+      protected def bind_sql(statement : String) : String
+        statement
+      end
+
+      protected def with_schema_lock(connection : DB::Connection, &operation : -> T) : T forall T
+        yield
       end
 
       protected abstract def table_exists?(connection : DB::Connection, name : String) : Bool
@@ -941,6 +953,52 @@ module Movie
         connection.exec("PRAGMA busy_timeout = 5000")
         SQLiteBackendConnection.new(connection)
       end
+    end
+
+    class UnknownBackendError < Exception
+      def initialize(name : String)
+        super("Persistence backend is not registered: #{name}")
+      end
+    end
+
+    class BackendRegistry
+      alias Factory = Proc(Movie::Config, Backend)
+
+      @@factories = {} of String => Factory
+      @@mutex = Mutex.new
+
+      def self.register(name : String, &factory : Movie::Config -> Backend) : Nil
+        key = normalize(name)
+        @@mutex.synchronize do
+          if @@factories.has_key?(key)
+            raise ArgumentError.new("Persistence backend already registered: #{key}")
+          end
+          @@factories[key] = factory
+        end
+      end
+
+      def self.build(name : String, config : Movie::Config) : Backend
+        key = normalize(name)
+        factory = @@mutex.synchronize { @@factories[key]? }
+        raise UnknownBackendError.new(key) unless factory
+        factory.call(config)
+      end
+
+      def self.registered?(name : String) : Bool
+        key = normalize(name)
+        @@mutex.synchronize { @@factories.has_key?(key) }
+      end
+
+      private def self.normalize(name : String) : String
+        name.strip.downcase
+      end
+    end
+
+    BackendRegistry.register("sqlite") do |config|
+      path = config.get_string(Movie::ActorSystemConfig::PERSISTENCE_DB_PATH, "data/movie_persistence.sqlite3")
+      parent = File.dirname(path)
+      Dir.mkdir_p(parent) unless parent == "." || Dir.exists?(parent)
+      SQLiteBackend.new("sqlite3:#{path}").as(Backend)
     end
 
     # Actor that owns one backend connection worker and executes requests
@@ -1281,13 +1339,11 @@ module Movie
   class Database < ExtensionId(DatabaseExtension)
     def create(system : AbstractActorSystem) : DatabaseExtension
       cfg = system.config
-      path = cfg.get_string(ActorSystemConfig::PERSISTENCE_DB_PATH, "data/movie_persistence.sqlite3")
+      backend_name = cfg.get_string(ActorSystemConfig::PERSISTENCE_BACKEND, "sqlite")
       pool_size = cfg.get_int(ActorSystemConfig::PERSISTENCE_POOL_SIZE, 1)
       queue_capacity = cfg.get_int(ActorSystemConfig::PERSISTENCE_IO_QUEUE_CAPACITY, 256)
       operation_timeout = cfg.get_duration(ActorSystemConfig::PERSISTENCE_OPERATION_TIMEOUT, 5.seconds)
-      parent = File.dirname(path)
-      Dir.mkdir_p(parent) unless parent == "." || Dir.exists?(parent)
-      backend = Persistence::SQLiteBackend.new("sqlite3:#{path}")
+      backend = Persistence::BackendRegistry.build(backend_name, cfg)
       DatabaseExtension.new(system, backend, pool_size, queue_capacity, operation_timeout)
     end
   end

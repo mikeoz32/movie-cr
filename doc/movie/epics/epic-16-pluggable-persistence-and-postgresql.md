@@ -31,7 +31,7 @@
 
 ## Task 16.2: Add the PostgreSQL backend
 
-**Status:** In progress.
+**Status:** Complete.
 
 - Add the explicit `movie/persistence/postgres` entrypoint and backend registration.
 - Implement PostgreSQL schema creation and all journal, state, and snapshot operations.
@@ -39,7 +39,7 @@
 
 ## Task 16.3: Verify shared and multi-node semantics
 
-**Status:** Pending.
+**Status:** Complete.
 
 - Run one backend contract suite against SQLite and PostgreSQL.
 - Cover competing writers from independent actor systems and recovery on another system.
@@ -47,7 +47,7 @@
 
 ## Task 16.4: Complete production integration
 
-**Status:** Pending.
+**Status:** In progress.
 
 - Add backend and connection URI configuration with environment mappings.
 - Run PostgreSQL integration specs in CI.

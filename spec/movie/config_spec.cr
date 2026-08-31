@@ -473,16 +473,22 @@ describe Movie::Config do
     it "maps canonical double-underscore paths and hyphenated keys" do
       ENV["MOVIE_TEST_REMOTING__STRIPE_COUNT"] = "3"
       ENV["MOVIE_TEST_EXECUTOR__QUEUE_CAPACITY"] = "64"
+      ENV["MOVIE_TEST_PERSISTENCE__BACKEND"] = "postgres"
+      ENV["MOVIE_TEST_PERSISTENCE__CONNECTION_URI"] = "postgres://database/movie"
 
       begin
         config = Movie::ActorSystemConfig.default.with_env_overrides("MOVIE_TEST")
 
         config.get_int("remoting.stripe-count").should eq(3)
         config.get_int("executor.queue-capacity").should eq(64)
+        config.get_string("persistence.backend").should eq("postgres")
+        config.get_string("persistence.connection-uri").should eq("postgres://database/movie")
         config.has_path?("remoting.stripe.count").should be_false
       ensure
         ENV.delete("MOVIE_TEST_REMOTING__STRIPE_COUNT")
         ENV.delete("MOVIE_TEST_EXECUTOR__QUEUE_CAPACITY")
+        ENV.delete("MOVIE_TEST_PERSISTENCE__BACKEND")
+        ENV.delete("MOVIE_TEST_PERSISTENCE__CONNECTION_URI")
       end
     end
 
@@ -534,6 +540,8 @@ describe Movie::ActorSystemConfig do
 
     config.get_int("executor.pool-size").should eq(4)
     config.get_int("executor.queue-capacity").should eq(128)
+    config.get_string("persistence.backend").should eq("sqlite")
+    config.get_string("persistence.connection-uri").should eq("")
     config.get_string("persistence.db-path").should eq("data/movie_persistence.sqlite3")
     config.get_int("persistence.pool-size").should eq(1)
     config.get_int("persistence.io-queue-capacity").should eq(256)

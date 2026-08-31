@@ -889,6 +889,8 @@ module Movie
     EXECUTOR_POOL_SIZE            = "executor.pool-size"
     EXECUTOR_QUEUE_CAPACITY       = "executor.queue-capacity"
     PERSISTENCE_DB_PATH           = "persistence.db-path"
+    PERSISTENCE_BACKEND           = "persistence.backend"
+    PERSISTENCE_CONNECTION_URI    = "persistence.connection-uri"
     PERSISTENCE_POOL_SIZE         = "persistence.pool-size"
     PERSISTENCE_IO_QUEUE_CAPACITY = "persistence.io-queue-capacity"
     PERSISTENCE_OPERATION_TIMEOUT = "persistence.operation-timeout"
@@ -921,6 +923,8 @@ module Movie
         .set(EXECUTOR_QUEUE_CAPACITY, 128)
 
         # Persistence defaults
+        .set(PERSISTENCE_BACKEND, "sqlite")
+        .set(PERSISTENCE_CONNECTION_URI, "")
         .set(PERSISTENCE_DB_PATH, "data/movie_persistence.sqlite3")
         .set(PERSISTENCE_POOL_SIZE, 1)
         .set(PERSISTENCE_IO_QUEUE_CAPACITY, 256)
