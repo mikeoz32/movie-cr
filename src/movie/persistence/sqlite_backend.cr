@@ -1,6 +1,8 @@
 module Movie
   module Persistence
     class SQLiteBackendConnection < SqlBackendConnection
+      @@schema_mutex = Mutex.new
+
       protected def configure_schema(connection : DB::Connection) : Nil
         connection.exec("PRAGMA journal_mode = WAL")
       end
@@ -24,6 +26,89 @@ module Movie
 
       protected def database_error?(error : Exception) : Bool
         error.is_a?(SQLite3::Exception)
+      end
+
+      protected def with_schema_lock(connection : DB::Connection, &operation : -> T) : T forall T
+        @@schema_mutex.synchronize { yield }
+      end
+
+      protected def create_event_feed_table(connection : DB::Connection) : Nil
+        connection.exec(<<-SQL)
+          CREATE TABLE IF NOT EXISTS event_feed (
+            event_offset INTEGER PRIMARY KEY AUTOINCREMENT,
+            persistence_id TEXT NOT NULL,
+            sequence_nr BIGINT NOT NULL,
+            manifest TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (persistence_id, sequence_nr)
+          )
+        SQL
+      end
+
+      protected def insert_event_feed(
+        connection : DB::Connection,
+        persistence_id : String,
+        sequence_nr : Int64,
+        manifest : String,
+        payload : String,
+      ) : Int64
+        connection.exec(
+          "INSERT INTO event_feed (persistence_id, sequence_nr, manifest, payload) VALUES (?, ?, ?, ?)",
+          persistence_id,
+          sequence_nr,
+          manifest,
+          payload
+        ).last_insert_id
+      end
+
+      protected def create_outbox_table(connection : DB::Connection) : Nil
+        connection.exec(<<-SQL)
+          CREATE TABLE IF NOT EXISTS persistence_outbox (
+            outbox_offset INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT NOT NULL UNIQUE,
+            persistence_id TEXT NOT NULL,
+            operation_id TEXT NOT NULL,
+            destination TEXT NOT NULL,
+            manifest TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            delivered BIGINT NOT NULL DEFAULT 0,
+            attempts BIGINT NOT NULL DEFAULT 0,
+            lease_owner TEXT,
+            lease_until_epoch_ms BIGINT NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            delivered_at TIMESTAMP
+          )
+        SQL
+      end
+
+      protected def insert_outbox(
+        connection : DB::Connection,
+        persistence_id : String,
+        operation_id : OperationId,
+        entry : OutboxEntry,
+      ) : Int64
+        connection.exec(
+          "INSERT INTO persistence_outbox " +
+          "(message_id, persistence_id, operation_id, destination, manifest, payload) " +
+          "VALUES (?, ?, ?, ?, ?, ?)",
+          entry.message_id,
+          persistence_id,
+          operation_id.value,
+          entry.destination,
+          entry.manifest,
+          entry.payload
+        ).last_insert_id
+      end
+
+      protected def maintenance_backend_name : String
+        "sqlite"
+      end
+
+      protected def perform_maintenance(connection : DB::Connection) : Nil
+        connection.exec("PRAGMA optimize")
+        connection.exec("VACUUM")
       end
     end
 

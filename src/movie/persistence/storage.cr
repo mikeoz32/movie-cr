@@ -5,11 +5,18 @@ module Movie
     class ConnectionActor < Movie::AbstractBehavior(ConnectionMessage)
       @worker : ConnectionWorker? = nil
 
-      def initialize(@backend : Backend, @queue_capacity : Int32 = 256)
+      def initialize(
+        @backend : Backend,
+        @queue_capacity : Int32 = 256,
+        @telemetry : Telemetry = Telemetry.new,
+        @resilience : ResiliencePolicy = ResiliencePolicy.disabled,
+      )
       end
 
       def initialize(db_uri : String, @queue_capacity : Int32 = 256)
         @backend = SQLiteBackend.new(db_uri)
+        @telemetry = Telemetry.new
+        @resilience = ResiliencePolicy.disabled
       end
 
       def receive(message, context)
@@ -30,7 +37,13 @@ module Movie
       end
 
       private def ensure_worker : ConnectionWorker
-        @worker ||= ConnectionWorker.new(@backend, "movie-db-#{object_id}", @queue_capacity)
+        @worker ||= ConnectionWorker.new(
+          @backend,
+          "movie-db-#{object_id}",
+          @queue_capacity,
+          @telemetry,
+          @resilience
+        )
       end
     end
 
@@ -48,11 +61,20 @@ module Movie
         Movie::Behaviors(ConnectionMessage).same
       end
 
-      def self.behavior(backend : Backend, pool_size : Int32, queue_capacity : Int32 = 256)
+      def self.behavior(
+        backend : Backend,
+        pool_size : Int32,
+        queue_capacity : Int32 = 256,
+        telemetry : Telemetry = Telemetry.new,
+        resilience : ResiliencePolicy = ResiliencePolicy.disabled,
+      )
         Movie::Behaviors(ConnectionMessage).setup do |ctx|
           size = pool_size < 1 ? 1 : pool_size
           connections = Array(Movie::ActorRef(ConnectionMessage)).new(size) do |i|
-            ctx.spawn(ConnectionActor.new(backend, queue_capacity), name: "db-#{i}")
+            ctx.spawn(
+              ConnectionActor.new(backend, queue_capacity, telemetry, resilience),
+              name: "db-#{i}"
+            )
           end
           ConnectionPool.new(connections)
         end
@@ -146,7 +168,9 @@ module Movie
       end
     end
 
-    alias EventStoreMessage = AppendEvents | LoadEvents | SaveSnapshot | LoadSnapshot | DeleteSnapshot
+    alias EventStoreMessage = AppendEvents | LoadEvents | SaveSnapshot | LoadSnapshot | DeleteSnapshot |
+                              DeleteEventsTo | RunMaintenance
+    alias QueryStoreMessage = QueryEvents | LoadProjectionOffset | SaveProjectionOffset
     alias StateStoreMessage = SaveState | LoadState | DeleteState
 
     private module StoreForwarder
@@ -202,6 +226,10 @@ module Movie
           execute(context, message, SnapshotRecord?)
         when DeleteSnapshot
           execute(context, message, Bool)
+        when DeleteEventsTo
+          execute(context, message, RetentionResult)
+        when RunMaintenance
+          execute(context, message, MaintenanceResult)
         end
         Movie::Behaviors(EventStoreMessage).same
       end
@@ -259,8 +287,9 @@ module Movie
         expected_revision : Int64,
         operation_id : OperationId,
         events : Array(SerializedEvent),
+        outbox : Array(OutboxEntry) = [] of OutboxEntry,
       ) : WriteResult forall U
-        message = AppendEvents.new(persistence_id, expected_revision, operation_id, events)
+        message = AppendEvents.new(persistence_id, expected_revision, operation_id, events, outbox)
         ctx.ask(@ref, message, WriteResult, @timeout).await(@timeout)
       end
 
@@ -279,6 +308,23 @@ module Movie
       def delete_snapshot(ctx : Movie::ActorContext(U), persistence_id : String) : Bool forall U
         ctx.ask(@ref, DeleteSnapshot.new(persistence_id), Bool, @timeout).await(@timeout)
       end
+
+      def delete_events_to(
+        ctx : Movie::ActorContext(U),
+        persistence_id : String,
+        sequence_nr : Int64,
+      ) : RetentionResult forall U
+        ctx.ask(
+          @ref,
+          DeleteEventsTo.new(persistence_id, sequence_nr),
+          RetentionResult,
+          @timeout
+        ).await(@timeout)
+      end
+
+      def run_maintenance(ctx : Movie::ActorContext(U)) : MaintenanceResult forall U
+        ctx.ask(@ref, RunMaintenance.new, MaintenanceResult, @timeout).await(@timeout)
+      end
     end
 
     class StateStoreClient
@@ -292,8 +338,9 @@ module Movie
         operation_id : OperationId,
         manifest : String,
         payload : String,
+        outbox : Array(OutboxEntry) = [] of OutboxEntry,
       ) : WriteResult forall U
-        message = SaveState.new(persistence_id, expected_revision, operation_id, manifest, payload)
+        message = SaveState.new(persistence_id, expected_revision, operation_id, manifest, payload, outbox)
         ctx.ask(@ref, message, WriteResult, @timeout).await(@timeout)
       end
 
@@ -306,8 +353,9 @@ module Movie
         persistence_id : String,
         expected_revision : Int64,
         operation_id : OperationId,
+        outbox : Array(OutboxEntry) = [] of OutboxEntry,
       ) : WriteResult forall U
-        message = DeleteState.new(persistence_id, expected_revision, operation_id)
+        message = DeleteState.new(persistence_id, expected_revision, operation_id, outbox)
         ctx.ask(@ref, message, WriteResult, @timeout).await(@timeout)
       end
     end

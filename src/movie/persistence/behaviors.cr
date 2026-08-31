@@ -4,6 +4,7 @@ module Movie
     getter pool : ActorRef(Persistence::ConnectionMessage)
     getter operation_timeout : Time::Span
     getter backend_name : String
+    getter telemetry : Persistence::Telemetry
 
     def initialize(
       @system : AbstractActorSystem,
@@ -11,9 +12,140 @@ module Movie
       @pool_size : Int32,
       queue_capacity : Int32,
       @operation_timeout : Time::Span,
+      resilience : Persistence::ResiliencePolicy = Persistence::ResiliencePolicy.disabled,
     )
       @backend_name = backend.name
-      @pool = @system.spawn(Persistence::ConnectionPool.behavior(backend, @pool_size, queue_capacity))
+      @telemetry = Persistence::Telemetry.new
+      @pool = @system.spawn(
+        Persistence::ConnectionPool.behavior(
+          backend,
+          @pool_size,
+          queue_capacity,
+          @telemetry,
+          resilience
+        )
+      )
+    end
+
+    def metrics : Persistence::MetricsSnapshot
+      @telemetry.metrics
+    end
+
+    def health : Persistence::HealthSnapshot
+      @telemetry.health
+    end
+
+    # Performs an active backend/schema probe. Unlike `health`, this can block
+    # for the configured operation timeout and reports connection failures in
+    # the returned snapshot instead of raising them.
+    def readiness : Persistence::ReadinessSnapshot
+      version = schema_version
+      Persistence::ReadinessSnapshot.new(true, @backend_name, version, nil)
+    rescue error
+      Persistence::ReadinessSnapshot.new(
+        false,
+        @backend_name,
+        nil,
+        error.message || error.class.name
+      )
+    end
+
+    def schema_version : Int64
+      @system.ask(
+        @pool,
+        Persistence::GetSchemaVersion.new,
+        Int64,
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
+    def query_events(
+      after_offset : Int64 = 0_i64,
+      limit : Int32 = 100,
+      persistence_id : String? = nil,
+    ) : Persistence::EventPage
+      @system.ask(
+        @pool,
+        Persistence::QueryEvents.new(after_offset, limit, persistence_id),
+        Persistence::EventPage,
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
+    def projection_offset(name : String) : Int64
+      @system.ask(
+        @pool,
+        Persistence::LoadProjectionOffset.new(name),
+        Int64,
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
+    def save_projection_offset(name : String, offset : Int64) : Int64
+      @system.ask(
+        @pool,
+        Persistence::SaveProjectionOffset.new(name, offset),
+        Int64,
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
+    def delete_projection_offset(name : String) : Bool
+      @system.ask(
+        @pool,
+        Persistence::DeleteProjectionOffset.new(name),
+        Bool,
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
+    def delete_events_to(persistence_id : String, sequence_nr : Int64) : Persistence::RetentionResult
+      @system.ask(
+        @pool,
+        Persistence::DeleteEventsTo.new(persistence_id, sequence_nr),
+        Persistence::RetentionResult,
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
+    def run_maintenance : Persistence::MaintenanceResult
+      @system.ask(
+        @pool,
+        Persistence::RunMaintenance.new,
+        Persistence::MaintenanceResult,
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
+    def claim_outbox(
+      owner : String,
+      limit : Int32 = 100,
+      lease : Time::Span = 30.seconds,
+    ) : Array(Persistence::StoredOutboxEntry)
+      @system.ask(
+        @pool,
+        Persistence::ClaimOutbox.for(owner, limit, lease),
+        Array(Persistence::StoredOutboxEntry),
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
+    def acknowledge_outbox(owner : String, message_ids : Array(String)) : Int64
+      @system.ask(
+        @pool,
+        Persistence::AcknowledgeOutbox.new(owner, message_ids),
+        Int64,
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
+    def release_outbox(owner : String, message_id : String, error : String) : Bool
+      @system.ask(
+        @pool,
+        Persistence::ReleaseOutbox.new(owner, message_id, error),
+        Bool,
+        @operation_timeout
+      ).await(@operation_timeout)
     end
 
     def stop
@@ -28,16 +160,59 @@ module Movie
       pool_size = cfg.get_int(ActorSystemConfig::PERSISTENCE_POOL_SIZE, 1)
       queue_capacity = cfg.get_int(ActorSystemConfig::PERSISTENCE_IO_QUEUE_CAPACITY, 256)
       operation_timeout = cfg.get_duration(ActorSystemConfig::PERSISTENCE_OPERATION_TIMEOUT, 5.seconds)
+      resilience = Persistence::ResiliencePolicy.new(
+        max_retries: cfg.get_int(ActorSystemConfig::PERSISTENCE_RETRY_MAX_RETRIES, 2),
+        min_backoff: cfg.get_duration(
+          ActorSystemConfig::PERSISTENCE_RETRY_MIN_BACKOFF,
+          10.milliseconds
+        ),
+        max_backoff: cfg.get_duration(
+          ActorSystemConfig::PERSISTENCE_RETRY_MAX_BACKOFF,
+          250.milliseconds
+        ),
+        circuit_failure_threshold: cfg.get_int(
+          ActorSystemConfig::PERSISTENCE_CIRCUIT_THRESHOLD,
+          5
+        ),
+        circuit_reset_timeout: cfg.get_duration(
+          ActorSystemConfig::PERSISTENCE_CIRCUIT_RESET,
+          5.seconds
+        )
+      )
       backend = Persistence::BackendRegistry.build(backend_name, cfg)
-      DatabaseExtension.new(system, backend, pool_size, queue_capacity, operation_timeout)
+      DatabaseExtension.new(
+        system,
+        backend,
+        pool_size,
+        queue_capacity,
+        operation_timeout,
+        resilience
+      )
+    end
+  end
+
+  module OutboxEffect
+    abstract def outbox : Array(Persistence::OutboxEntry)
+
+    def then_publish(entry : Persistence::OutboxEntry) : self
+      outbox << entry
+      self
+    end
+
+    def then_publish(message_id : String, destination : String, message : T) : self forall T
+      payload = String.build { |json| message.to_json(json) }
+      then_publish(Persistence::OutboxEntry.new(message_id, destination, message.class.name, payload))
     end
   end
 
   class EventEffect(E, S)
+    include OutboxEffect
+
     getter events : Array(E)
     getter operation_id : Persistence::OperationId?
     getter callbacks : Array(Proc(S, Nil))
     getter? stop
+    getter outbox : Array(Persistence::OutboxEntry)
 
     def initialize(
       @events : Array(E) = [] of E,
@@ -45,6 +220,7 @@ module Movie
       @stop : Bool = false,
     )
       @callbacks = [] of Proc(S, Nil)
+      @outbox = [] of Persistence::OutboxEntry
     end
 
     def then_run(&callback : S ->) : self
@@ -60,11 +236,14 @@ module Movie
   end
 
   class DurableEffect(S)
+    include OutboxEffect
+
     getter action : DurableAction
     getter state : S?
     getter operation_id : Persistence::OperationId?
     getter callbacks : Array(Proc(S, Nil))
     getter? stop
+    getter outbox : Array(Persistence::OutboxEntry)
 
     def initialize(
       @action : DurableAction,
@@ -73,6 +252,7 @@ module Movie
       @stop : Bool = false,
     )
       @callbacks = [] of Proc(S, Nil)
+      @outbox = [] of Persistence::OutboxEntry
     end
 
     def then_run(&callback : S ->) : self
@@ -110,7 +290,8 @@ module Movie
             @persistence_id,
             @sequence_nr,
             effect.operation_id.not_nil!,
-            serialized
+            serialized,
+            effect.outbox
           )
           @sequence_nr = result.revision
           if result.duplicate
@@ -180,6 +361,12 @@ module Movie
       nil
     end
 
+    # Opt-in journal compaction after a successfully stored snapshot. Retention
+    # failure never turns an already committed command into a failed command.
+    protected def delete_events_on_snapshot? : Bool
+      false
+    end
+
     protected def on_recovery_completed(state : S, sequence_nr : Int64)
     end
 
@@ -187,6 +374,9 @@ module Movie
     end
 
     protected def on_persist_failure(error : Exception)
+    end
+
+    protected def on_retention_failure(error : Exception)
     end
 
     protected def on_persistence_signal(signal : SystemMessage)
@@ -239,6 +429,13 @@ module Movie
       payload = String.build { |json| @state.to_json(json) }
       snapshot = Movie::Persistence::SnapshotRecord.new(@sequence_nr, snapshot_manifest(@state), payload)
       @store.save_snapshot(ctx, @persistence_id, snapshot)
+      if delete_events_on_snapshot?
+        begin
+          @store.delete_events_to(ctx, @persistence_id, @sequence_nr)
+        rescue error
+          on_retention_failure(error)
+        end
+      end
     end
 
     private def reset_recovery_state
@@ -271,7 +468,8 @@ module Movie
             @revision,
             effect.operation_id.not_nil!,
             state_manifest(next_state),
-            payload
+            payload,
+            effect.outbox
           )
           @revision = result.revision
           if result.duplicate
@@ -281,7 +479,13 @@ module Movie
             @state = next_state
           end
         when DurableAction::Delete
-          result = @store.delete(ctx, @persistence_id, @revision, effect.operation_id.not_nil!)
+          result = @store.delete(
+            ctx,
+            @persistence_id,
+            @revision,
+            effect.operation_id.not_nil!,
+            effect.outbox
+          )
           @revision = result.revision
           if result.duplicate
             reset_recovery_state

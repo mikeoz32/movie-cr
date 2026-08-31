@@ -1,0 +1,5 @@
+require "./persistence_migrations_spec"
+require "./persistence_telemetry_spec"
+require "./persistence_retention_query_spec"
+require "./persistence_outbox_spec"
+require "./persistence_resilience_spec"
