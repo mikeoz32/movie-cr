@@ -29,7 +29,7 @@
 
 ## Task 19.2 - Cluster extension, daemon, and static-seed join
 
-**Status:** In progress.
+**Status:** Completed.
 
 - Add a typed internal cluster daemon actor at one well-known path.
 - Add idempotent `enable_cluster`, `cluster`, `join`, `leave`, and snapshot APIs.
@@ -38,7 +38,7 @@
 
 ## Task 19.3 - Gossip convergence and deterministic leadership
 
-**Status:** Planned.
+**Status:** In progress.
 
 - Periodically gossip bounded full-state snapshots to peers with per-node monotonic versions.
 - Track convergence acknowledgements and expose rounds/messages/merge counters.

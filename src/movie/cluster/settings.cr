@@ -1,0 +1,34 @@
+module Movie::Cluster
+  class ClusterConfigurationError < Exception
+  end
+
+  class ClusterSettings
+    getter cluster_name : String
+    getter join_retry_interval : Time::Span
+
+    @seed_nodes : Array(Movie::Address)
+    @roles : Array(String)
+
+    def initialize(
+      @cluster_name : String = "movie-cluster",
+      seed_nodes : Array(Movie::Address) = [] of Movie::Address,
+      roles : Array(String) = [] of String,
+      @join_retry_interval : Time::Span = 1.second,
+    )
+      raise ArgumentError.new("cluster name must not be empty") if @cluster_name.empty?
+      raise ArgumentError.new("cluster join retry interval must be positive") unless @join_retry_interval > Time::Span.zero
+      raise ArgumentError.new("cluster seed nodes must use remote addresses") unless seed_nodes.all?(&.remote?)
+      raise ArgumentError.new("cluster roles must not be empty") if roles.any?(&.empty?)
+      @seed_nodes = seed_nodes.uniq
+      @roles = roles.uniq.sort
+    end
+
+    def seed_nodes : Array(Movie::Address)
+      @seed_nodes.dup
+    end
+
+    def roles : Array(String)
+      @roles.dup
+    end
+  end
+end

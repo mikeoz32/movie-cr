@@ -1,1 +1,5 @@
 require "./cluster/model"
+require "./cluster/settings"
+require "./cluster/protocol"
+require "./cluster/daemon"
+require "./cluster/extension"

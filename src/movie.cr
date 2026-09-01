@@ -742,7 +742,9 @@ module Movie
         current_extensions
       end
 
-      registered_extensions.each(&.stop)
+      # Dependents are registered after their prerequisites (for example,
+      # cluster after remoting) and must stop before those prerequisites.
+      registered_extensions.reverse_each(&.stop)
     end
 
     # Returns all registered extensions.
@@ -908,6 +910,25 @@ module Movie
       @extensions.registered?(Remote::RemoteExtension)
     end
 
+    # Enables static-seed cluster membership above an existing remoting
+    # extension. Repeated calls return the same extension instance.
+    def enable_cluster(
+      settings : Cluster::ClusterSettings = Cluster::ClusterSettings.new,
+    ) : Cluster::ClusterExtension
+      raise Cluster::ClusterConfigurationError.new("cluster membership requires remoting") unless remoting_enabled?
+      @extensions.get_or_register(Cluster::ClusterExtension) do
+        Cluster::ClusterExtension.new(self, settings)
+      end
+    end
+
+    def cluster : Cluster::ClusterExtension?
+      @extensions.get(Cluster::ClusterExtension)
+    end
+
+    def cluster_enabled? : Bool
+      @extensions.registered?(Cluster::ClusterExtension)
+    end
+
     # Unified actor lookup - returns local or remote actor ref based on path.
     # For local paths (matching this system's address), returns the local ActorRef.
     # For remote paths, returns a RemoteActorRef that transparently handles serialization.
@@ -1016,10 +1037,11 @@ module Movie
       restart_strategy : RestartStrategy = RestartStrategy::RESTART,
       supervision_config : SupervisionConfig = SupervisionConfig.default,
     ) : ActorRef(T) forall T
-      raise "System guardian not initialized" if @registry.system_guardian.nil?
+      registry = @registry || raise "System not initialized"
+      raise "System guardian not initialized" if registry.system_guardian.nil?
 
       with_spawn_admission do
-        system_guardian = @registry.system_guardian.as(ActorRef(SystemGuardianMessage))
+        system_guardian = registry.system_guardian.as(ActorRef(SystemGuardianMessage))
         system_context = context(system_guardian.id)
         raise "System guardian context not found" unless system_context
 
@@ -1029,7 +1051,7 @@ module Movie
 
         ref = ActorRef(T).new(self, child_path)
         child_context = ActorContext(T).new(behavior, ref, self, restart_strategy, supervision_config, child_path)
-        @registry.register_context(ref.id, child_context)
+        registry.register_context(ref.id, child_context)
         begin
           @path_registry.register(ref, child_path)
         rescue ex
