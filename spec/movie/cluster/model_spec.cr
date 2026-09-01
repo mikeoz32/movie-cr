@@ -89,4 +89,21 @@ describe Movie::Cluster::MembershipState do
     first.member(left.unique_address).should eq(right)
     second.member(left.unique_address).should eq(right)
   end
+
+  it "produces an order-independent digest and rejects over-capacity gossip atomically" do
+    first_member = cluster_member("a", 2551, "uid-a", Movie::Cluster::MemberStatus::Up, 1)
+    second_member = cluster_member("b", 2552, "uid-b", Movie::Cluster::MemberStatus::Joining, 1)
+    first = Movie::Cluster::MembershipState.new(capacity: 2)
+    second = Movie::Cluster::MembershipState.new(capacity: 2)
+
+    first.merge([first_member, second_member])
+    second.merge([second_member, first_member])
+    first.digest.should eq(second.digest)
+
+    overflow = cluster_member("c", 2553, "uid-c", Movie::Cluster::MemberStatus::Up, 1)
+    expect_raises(Movie::Cluster::MembershipCapacityError) do
+      first.merge([overflow])
+    end
+    first.all_members.should eq([first_member, second_member])
+  end
 end

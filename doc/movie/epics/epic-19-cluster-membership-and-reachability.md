@@ -38,7 +38,7 @@
 
 ## Task 19.3 - Gossip convergence and deterministic leadership
 
-**Status:** In progress.
+**Status:** Completed.
 
 - Periodically gossip bounded full-state snapshots to peers with per-node monotonic versions.
 - Track convergence acknowledgements and expose rounds/messages/merge counters.
@@ -46,7 +46,7 @@
 
 ## Task 19.4 - Reachability, graceful leave, and explicit downing
 
-**Status:** Planned.
+**Status:** In progress.
 
 - Exchange heartbeat/ack traffic outside user actor mailboxes where practical, while retaining one remoting transport.
 - Mark members unreachable/reachable from monotonic local observations without globally removing them.

@@ -9,12 +9,17 @@ module Movie::Cluster
       Join
       Welcome
       JoinTick
+      Gossip
+      GossipAck
+      GossipTick
     end
 
     getter kind : Kind
     getter cluster_name : String
     getter sender : UniqueAddress
     getter member : Member?
+    getter round : Int64?
+    getter digest : String?
 
     @members : Array(Member)
 
@@ -24,6 +29,8 @@ module Movie::Cluster
       @sender : UniqueAddress,
       @member : Member? = nil,
       members : Array(Member) = [] of Member,
+      @round : Int64? = nil,
+      @digest : String? = nil,
     )
       @members = members.dup
     end
@@ -42,6 +49,24 @@ module Movie::Cluster
 
     def self.join_tick(cluster_name : String, sender : UniqueAddress) : self
       new(Kind::JoinTick, cluster_name, sender)
+    end
+
+    def self.gossip(
+      cluster_name : String,
+      sender : UniqueAddress,
+      members : Array(Member),
+      round : Int64,
+      digest : String,
+    ) : self
+      new(Kind::Gossip, cluster_name, sender, members: members, round: round, digest: digest)
+    end
+
+    def self.gossip_ack(cluster_name : String, sender : UniqueAddress, round : Int64, digest : String) : self
+      new(Kind::GossipAck, cluster_name, sender, round: round, digest: digest)
+    end
+
+    def self.gossip_tick(cluster_name : String, sender : UniqueAddress) : self
+      new(Kind::GossipTick, cluster_name, sender)
     end
   end
 end

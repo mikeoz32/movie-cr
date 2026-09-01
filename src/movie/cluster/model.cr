@@ -1,8 +1,12 @@
 require "json"
 require "set"
+require "digest/sha256"
 require "../path"
 
 module Movie::Cluster
+  class MembershipCapacityError < Exception
+  end
+
   struct UniqueAddress
     include JSON::Serializable
     include Comparable(self)
@@ -135,10 +139,20 @@ module Movie::Cluster
     @members = {} of String => Member
     @mutex = Mutex.new
 
+    def initialize(@capacity : Int32 = 10_000)
+      raise ArgumentError.new("membership capacity must be positive") unless @capacity > 0
+    end
+
     def merge(incoming : Enumerable(Member)) : Int32
+      records = incoming.to_a
       @mutex.synchronize do
+        additions = records.count { |candidate| !@members.has_key?(candidate.unique_address.key) }
+        if @members.size + additions > @capacity
+          raise MembershipCapacityError.new("membership capacity #{@capacity} is exhausted")
+        end
+
         changes = 0
-        incoming.each do |candidate|
+        records.each do |candidate|
           key = candidate.unique_address.key
           current = @members[key]?
           if current.nil? || supersedes?(candidate, current)
@@ -175,6 +189,21 @@ module Movie::Cluster
         leader = candidates.min_by?(&.unique_address).try(&.unique_address)
         ClusterSnapshot.new(self_unique_address, active, unreachable, leader)
       end
+    end
+
+    def digest : String
+      members = all_members
+      canonical = String.build do |io|
+        members.each do |member|
+          io << member.unique_address << '\0'
+          io << member.status.value << '\0'
+          io << member.revision << '\0'
+          io << member.changed_by << '\0'
+          member.roles.each { |role| io << role << '\0' }
+          io << '\n'
+        end
+      end
+      Digest::SHA256.hexdigest(canonical)
     end
 
     private def supersedes?(candidate : Member, current : Member) : Bool

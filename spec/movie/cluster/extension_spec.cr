@@ -103,4 +103,50 @@ describe Movie::Cluster::ClusterExtension do
       seed_system.shutdown(1.second)
     end
   end
+
+  it "gossips a transitive join to convergence across three nodes" do
+    common = {
+      join_retry_interval: 20.milliseconds,
+      gossip_interval:     20.milliseconds,
+      gossip_fanout:       3,
+    }
+    first_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "a-cluster-node")
+    first_remote = first_system.enable_remoting("127.0.0.1", 0, 1)
+    first = first_system.enable_cluster(Movie::Cluster::ClusterSettings.new(**common, roles: ["seed"]))
+
+    second_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "b-cluster-node")
+    second_remote = second_system.enable_remoting("127.0.0.1", 0, 1)
+    second = second_system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+      **common,
+      seed_nodes: [first_remote.address]
+    ))
+    second.await_up(3.seconds)
+
+    third_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "c-cluster-node")
+    third_system.enable_remoting("127.0.0.1", 0, 1)
+    third = third_system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+      **common,
+      seed_nodes: [second_remote.address]
+    ))
+
+    begin
+      third.await_up(3.seconds)
+      wait_for_cluster(5.seconds) do
+        [first, second, third].all? do |cluster|
+          cluster.snapshot.members.count(&.status.up?) == 3 && cluster.converged?
+        end
+      end
+
+      expected_leader = [first, second, third].map(&.self_unique_address).min
+      [first, second, third].each do |cluster|
+        cluster.snapshot.leader.should eq(expected_leader)
+        cluster.stats.gossip_rounds.should be > 0
+        cluster.stats.gossip_received.should be > 0
+      end
+    ensure
+      third_system.shutdown(1.second)
+      second_system.shutdown(1.second)
+      first_system.shutdown(1.second)
+    end
+  end
 end
