@@ -1,6 +1,7 @@
 require "./settings"
 require "./protocol"
 require "./daemon"
+require "./events"
 
 module Movie::Cluster
   private module ClusterClock
@@ -23,7 +24,10 @@ module Movie::Cluster
     heartbeats_sent : Int64,
     heartbeats_received : Int64,
     heartbeat_timeouts : Int64,
-    reachability_restorations : Int64
+    reachability_restorations : Int64,
+    protocol_rejections : Int64,
+    membership_capacity_rejections : Int64,
+    subscribers : Int32
 
   class ClusterExtension < Movie::Extension
     Log = ::Log.for(self)
@@ -59,6 +63,10 @@ module Movie::Cluster
     @heartbeats_received = Atomic(Int64).new(0_i64)
     @heartbeat_timeouts = Atomic(Int64).new(0_i64)
     @reachability_restorations = Atomic(Int64).new(0_i64)
+    @protocol_rejections = Atomic(Int64).new(0_i64)
+    @membership_capacity_rejections = Atomic(Int64).new(0_i64)
+    @subscribers = [] of Movie::ActorRef(ClusterEvent)
+    @subscribers_mutex = Mutex.new
 
     def initialize(
       @system : Movie::AbstractActorSystem,
@@ -74,7 +82,7 @@ module Movie::Cluster
     def start : Bool
       Movie::Remote::MessageRegistry.register(ProtocolMessage, PROTOCOL_TAG)
       initial_status = seed_node? ? MemberStatus::Up : MemberStatus::Joining
-      record_merge(@state.merge([new_self_member(initial_status)]))
+      merge_members([new_self_member(initial_status)])
       @daemon = @system.spawn_system_actor(
         ClusterDaemon.new(self),
         DAEMON_NAME,
@@ -116,7 +124,10 @@ module Movie::Cluster
         heartbeats_sent: @heartbeats_sent.get,
         heartbeats_received: @heartbeats_received.get,
         heartbeat_timeouts: @heartbeat_timeouts.get,
-        reachability_restorations: @reachability_restorations.get
+        reachability_restorations: @reachability_restorations.get,
+        protocol_rejections: @protocol_rejections.get,
+        membership_capacity_rejections: @membership_capacity_rejections.get,
+        subscribers: @subscribers_mutex.synchronize { @subscribers.size }
       )
     end
 
@@ -160,11 +171,25 @@ module Movie::Cluster
       request_departure(ProtocolMessage::Kind::DownRequest, target)
     end
 
+    def subscribe(subscriber : Movie::ActorRef(ClusterEvent), replay_state : Bool = true) : Nil
+      @subscribers_mutex.synchronize do
+        @subscribers << subscriber unless @subscribers.includes?(subscriber)
+      end
+      subscriber << ClusterEvent.current_state(snapshot) if replay_state
+    end
+
+    def unsubscribe(subscriber : Movie::ActorRef(ClusterEvent)) : Nil
+      @subscribers_mutex.synchronize { @subscribers.delete(subscriber) }
+    end
+
     # Internal actor entrypoint. Remote protocol traffic must carry a sender
     # actor path whose address matches the claimed process address.
     def handle_protocol(message : ProtocolMessage, sender_path : Movie::ActorPath?) : Nil
       return if @stopped.get
-      return unless message.cluster_name == @settings.cluster_name
+      unless message.cluster_name == @settings.cluster_name
+        @protocol_rejections.add(1)
+        return
+      end
 
       if message.kind.join_tick?
         attempt_join
@@ -178,6 +203,7 @@ module Movie::Cluster
       end
 
       unless sender_path && sender_path.address == message.sender.address
+        @protocol_rejections.add(1)
         Log.warn { "Rejected cluster #{message.kind} with mismatched sender identity" }
         return
       end
@@ -202,13 +228,16 @@ module Movie::Cluster
       when .join_tick?, .gossip_tick?, .heartbeat_tick?
         # handled before remote identity validation
       end
+    rescue ex : MembershipCapacityError
+      @membership_capacity_rejections.add(1)
+      Log.warn { "Rejected cluster #{message.kind} at membership capacity: #{ex.message}" }
     end
 
     private def handle_join(message : ProtocolMessage) : Nil
       candidate = message.member
       return unless candidate && candidate.unique_address == message.sender
 
-      record_merge(@state.merge([candidate]))
+      merge_members([candidate])
       current = @state.member(candidate.unique_address).not_nil!
       if current.status.joining? && local_leader?
         promoted = Member.new(
@@ -218,7 +247,7 @@ module Movie::Cluster
           next_revision,
           @self_unique_address.node_uid
         )
-        record_merge(@state.merge([promoted]))
+        merge_members([promoted])
       end
       send_to(candidate.unique_address.address, ProtocolMessage.welcome(
         @settings.cluster_name,
@@ -229,14 +258,14 @@ module Movie::Cluster
 
     private def handle_welcome(message : ProtocolMessage) : Nil
       return unless seed_address?(message.sender.address)
-      record_merge(@state.merge(message.members))
+      merge_members(message.members)
       promote_joining_if_leader
     end
 
     private def handle_gossip(message : ProtocolMessage) : Nil
       return unless known_active_sender?(message.sender)
       @gossip_received.add(1)
-      record_merge(@state.merge(message.members))
+      merge_members(message.members)
       promote_joining_if_leader
       round = message.round || return
       send_async(message.sender.address, ProtocolMessage.gossip_ack(
@@ -245,8 +274,6 @@ module Movie::Cluster
         round,
         @state.digest
       ))
-    rescue ex : MembershipCapacityError
-      Log.warn { "Rejected cluster gossip from #{message.sender}: #{ex.message}" }
     end
 
     private def handle_gossip_ack(message : ProtocolMessage) : Nil
@@ -375,6 +402,8 @@ module Movie::Cluster
           (member.status.up? || member.status.leaving? || member.status.exiting?)
       end
       active_keys = peers.map(&.unique_address.key).to_set
+      previous_leader = snapshot.leader
+      newly_unreachable = [] of Member
       @reachability_mutex.synchronize do
         @last_heartbeat_ns.reject! { |key, _| !active_keys.includes?(key) }
         @unreachable.reject! { |key| !active_keys.includes?(key) }
@@ -386,9 +415,14 @@ module Movie::Cluster
           end
           if now - last_seen > @settings.heartbeat_timeout.total_nanoseconds && @unreachable.add?(key)
             @heartbeat_timeouts.add(1)
+            newly_unreachable << peer
           end
         end
       end
+      newly_unreachable.each do |member|
+        publish(ClusterEvent.member(ClusterEvent::Kind::UnreachableMember, member))
+      end
+      publish_leader_change(previous_leader) unless newly_unreachable.empty?
 
       peers.each do |peer|
         sequence = @heartbeat_sequence.add(1) + 1
@@ -464,12 +498,8 @@ module Movie::Cluster
           next_revision,
           @self_unique_address.node_uid
         )
-        record_merge(@state.merge([promoted]))
+        merge_members([promoted])
       end
-    end
-
-    private def record_merge(changes : Int32) : Nil
-      @membership_merges.add(changes.to_i64) if changes > 0
     end
 
     private def participating? : Bool
@@ -514,8 +544,7 @@ module Movie::Cluster
         next_revision,
         @self_unique_address.node_uid
       )
-      changes = @state.merge([changed])
-      record_merge(changes)
+      changes = merge_members([changed])
       changes > 0
     end
 
@@ -548,11 +577,74 @@ module Movie::Cluster
     end
 
     private def mark_reachable(sender : UniqueAddress) : Nil
+      previous_leader = snapshot.leader
       restored = @reachability_mutex.synchronize do
         @last_heartbeat_ns[sender.key] = ClusterClock.now_nanoseconds
         @unreachable.delete(sender.key)
       end
-      @reachability_restorations.add(1) if restored
+      if restored
+        @reachability_restorations.add(1)
+        if member = @state.member(sender)
+          publish(ClusterEvent.member(ClusterEvent::Kind::ReachableMember, member))
+        end
+        publish_leader_change(previous_leader)
+      end
+    end
+
+    private def merge_members(records : Enumerable(Member)) : Int32
+      before = member_index(@state.all_members)
+      previous_leader = snapshot.leader
+      changes = @state.merge(records)
+      return 0 if changes == 0
+
+      @membership_merges.add(changes.to_i64)
+      after = @state.all_members
+      after.each do |member|
+        previous = before[member.unique_address.key]?
+        next if previous && previous.status == member.status
+        publish_member_status(member)
+      end
+      publish_leader_change(previous_leader)
+      changes
+    end
+
+    private def member_index(members : Array(Member)) : Hash(String, Member)
+      members.each_with_object({} of String => Member) do |member, index|
+        index[member.unique_address.key] = member
+      end
+    end
+
+    private def publish_member_status(member : Member) : Nil
+      kind = case member.status
+             when .joining? then ClusterEvent::Kind::MemberJoined
+             when .up?      then ClusterEvent::Kind::MemberUp
+             when .leaving? then ClusterEvent::Kind::MemberLeaving
+             when .exiting? then ClusterEvent::Kind::MemberExiting
+             when .down?    then ClusterEvent::Kind::MemberDown
+             when .removed? then ClusterEvent::Kind::MemberRemoved
+             else                return
+             end
+      publish(ClusterEvent.member(kind, member))
+    end
+
+    private def publish_leader_change(previous : UniqueAddress?) : Nil
+      current = snapshot.leader
+      publish(ClusterEvent.leader_changed(previous, current)) unless current == previous
+    end
+
+    private def publish(event : ClusterEvent) : Nil
+      subscribers = @subscribers_mutex.synchronize { @subscribers.dup }
+      failed = [] of Movie::ActorRef(ClusterEvent)
+      subscribers.each do |subscriber|
+        begin
+          subscriber << event
+        rescue ex : Exception
+          failed << subscriber
+          Log.debug { "Removed stopped cluster subscriber: #{ex.message}" }
+        end
+      end
+      return if failed.empty?
+      @subscribers_mutex.synchronize { failed.each { |subscriber| @subscribers.delete(subscriber) } }
     end
   end
 end

@@ -571,6 +571,53 @@ describe Movie::ActorSystemConfig do
       system.shutdown(1.second)
     end
   end
+
+  it "starts cluster membership from canonical configuration" do
+    config = Movie::Config.builder
+      .set("name", "configured-cluster")
+      .set("remoting.enabled", true)
+      .set("remoting.host", "127.0.0.1")
+      .set("remoting.port", 0)
+      .set("remoting.stripe-count", 1)
+      .set("cluster.enabled", true)
+      .set("cluster.name", "orders")
+      .set("cluster.seed-nodes", [] of String)
+      .set("cluster.roles", ["backend", "zone-a"])
+      .set_duration("cluster.join-retry-interval", 25.milliseconds)
+      .set_duration("cluster.gossip.interval", 30.milliseconds)
+      .set("cluster.gossip.fanout", 2)
+      .set_duration("cluster.heartbeat.interval", 40.milliseconds)
+      .set_duration("cluster.heartbeat.timeout", 250.milliseconds)
+      .set("cluster.max-members", 500)
+      .build
+    system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, config)
+
+    begin
+      cluster = system.cluster.not_nil!
+      cluster.up?.should be_true
+      cluster.settings.cluster_name.should eq("orders")
+      cluster.settings.roles.should eq(["backend", "zone-a"])
+      cluster.settings.join_retry_interval.should eq(25.milliseconds)
+      cluster.settings.gossip_interval.should eq(30.milliseconds)
+      cluster.settings.gossip_fanout.should eq(2)
+      cluster.settings.heartbeat_interval.should eq(40.milliseconds)
+      cluster.settings.heartbeat_timeout.should eq(250.milliseconds)
+      cluster.settings.max_members.should eq(500)
+    ensure
+      system.shutdown(1.second)
+    end
+  end
+
+  it "rejects configured cluster startup without remoting" do
+    config = Movie::Config.builder
+      .set("name", "invalid-cluster")
+      .set("cluster.enabled", true)
+      .build
+
+    expect_raises(Movie::Cluster::ClusterConfigurationError, /remoting/) do
+      Movie::ActorSystem(String).new(Movie::Behaviors(String).same, config)
+    end
+  end
 end
 
 describe Movie::ActorSystemConfig do

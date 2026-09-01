@@ -1091,6 +1091,7 @@ module Movie
       registry.start
       system.bootstrap_main
       system.auto_enable_remoting
+      system.auto_enable_cluster
       system
     end
 
@@ -1121,6 +1122,7 @@ module Movie
       registry.start
       system.bootstrap_main
       system.auto_enable_remoting
+      system.auto_enable_cluster
       system
     end
 
@@ -1171,6 +1173,30 @@ module Movie
         shared_secret: shared_secret.empty? ? nil : shared_secret
       )
       enable_remoting(host, port, stripe_count, settings)
+    end
+
+    protected def auto_enable_cluster
+      return if @config.empty?
+      return unless @config.get_bool(ActorSystemConfig::CLUSTER_ENABLED, false)
+      unless remoting_enabled?
+        raise Cluster::ClusterConfigurationError.new("configured cluster membership requires remoting.enabled = true")
+      end
+
+      seeds = @config
+        .get_string_array(ActorSystemConfig::CLUSTER_SEED_NODES, [] of String)
+        .map { |value| Address.parse(value) }
+      settings = Cluster::ClusterSettings.new(
+        cluster_name: @config.get_string(ActorSystemConfig::CLUSTER_NAME, "movie-cluster"),
+        seed_nodes: seeds,
+        roles: @config.get_string_array(ActorSystemConfig::CLUSTER_ROLES, [] of String),
+        join_retry_interval: @config.get_duration(ActorSystemConfig::CLUSTER_JOIN_RETRY, 1.second),
+        gossip_interval: @config.get_duration(ActorSystemConfig::CLUSTER_GOSSIP_INTERVAL, 1.second),
+        gossip_fanout: @config.get_int(ActorSystemConfig::CLUSTER_GOSSIP_FANOUT, 3),
+        heartbeat_interval: @config.get_duration(ActorSystemConfig::CLUSTER_HEARTBEAT_INTERVAL, 1.second),
+        heartbeat_timeout: @config.get_duration(ActorSystemConfig::CLUSTER_HEARTBEAT_TIMEOUT, 5.seconds),
+        max_members: @config.get_int(ActorSystemConfig::CLUSTER_MAX_MEMBERS, 10_000)
+      )
+      enable_cluster(settings)
     end
 
     protected def bootstrap_main

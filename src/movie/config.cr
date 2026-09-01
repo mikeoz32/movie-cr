@@ -880,6 +880,10 @@ module Movie
   #   remoting.control-buffer-capacity - Pending reliable control limit
   #   remoting.control-deduplication-capacity - Receiver-side control stream limit
   #   remoting.shared-secret         - Optional HMAC handshake secret
+  #   cluster.enabled                - Enable static-seed membership
+  #   cluster.name                   - Logical cluster name
+  #   cluster.seed-nodes             - Static remoting address list
+  #   cluster.roles                  - Local member roles
   #
   module ActorSystemConfig
     NAME                            = "name"
@@ -906,6 +910,16 @@ module Movie
     REMOTING_CONTROL_CAPACITY       = "remoting.control-buffer-capacity"
     REMOTING_CONTROL_DEDUP_CAPACITY = "remoting.control-deduplication-capacity"
     REMOTING_SHARED_SECRET          = "remoting.shared-secret"
+    CLUSTER_ENABLED                 = "cluster.enabled"
+    CLUSTER_NAME                    = "cluster.name"
+    CLUSTER_SEED_NODES              = "cluster.seed-nodes"
+    CLUSTER_ROLES                   = "cluster.roles"
+    CLUSTER_JOIN_RETRY              = "cluster.join-retry-interval"
+    CLUSTER_GOSSIP_INTERVAL         = "cluster.gossip.interval"
+    CLUSTER_GOSSIP_FANOUT           = "cluster.gossip.fanout"
+    CLUSTER_HEARTBEAT_INTERVAL      = "cluster.heartbeat.interval"
+    CLUSTER_HEARTBEAT_TIMEOUT       = "cluster.heartbeat.timeout"
+    CLUSTER_MAX_MEMBERS             = "cluster.max-members"
     EXECUTOR_POOL_SIZE              = "executor.pool-size"
     EXECUTOR_QUEUE_CAPACITY         = "executor.queue-capacity"
     PERSISTENCE_DB_PATH             = "persistence.db-path"
@@ -952,6 +966,18 @@ module Movie
         .set(REMOTING_CONTROL_CAPACITY, 1024)
         .set(REMOTING_CONTROL_DEDUP_CAPACITY, 8192)
         .set(REMOTING_SHARED_SECRET, "")
+
+        # Cluster defaults
+        .set(CLUSTER_ENABLED, false)
+        .set(CLUSTER_NAME, "movie-cluster")
+        .set(CLUSTER_SEED_NODES, [] of String)
+        .set(CLUSTER_ROLES, [] of String)
+        .set_duration(CLUSTER_JOIN_RETRY, 1.second)
+        .set_duration(CLUSTER_GOSSIP_INTERVAL, 1.second)
+        .set(CLUSTER_GOSSIP_FANOUT, 3)
+        .set_duration(CLUSTER_HEARTBEAT_INTERVAL, 1.second)
+        .set_duration(CLUSTER_HEARTBEAT_TIMEOUT, 5.seconds)
+        .set(CLUSTER_MAX_MEMBERS, 10_000)
 
         # Executor defaults
         .set(EXECUTOR_POOL_SIZE, 4)

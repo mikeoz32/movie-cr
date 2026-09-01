@@ -55,7 +55,7 @@
 
 ## Task 19.5 - Configuration, subscriptions, and observability
 
-**Status:** In progress.
+**Status:** Completed.
 
 - Add canonical `cluster.*` settings and environment mappings.
 - Add typed subscriptions for member, reachability, and leader events.
@@ -63,7 +63,7 @@
 
 ## Task 19.6 - Multi-process resilience evidence and documentation
 
-**Status:** Planned.
+**Status:** In progress.
 
 - Cover seed startup order, idempotent join, three-node convergence, graceful leave, abrupt loss, manual downing, and same-address/new-UID restart in deterministic child-process tests.
 - Add opt-in membership convergence and heartbeat measurement harnesses without host-dependent thresholds.

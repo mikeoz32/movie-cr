@@ -1,4 +1,5 @@
 require "./cluster/model"
+require "./cluster/events"
 require "./cluster/settings"
 require "./cluster/protocol"
 require "./cluster/daemon"
