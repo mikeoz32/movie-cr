@@ -19,10 +19,6 @@ module Movie::Cluster
       raise ArgumentError.new("cluster node UID must not be empty") if @node_uid.empty?
     end
 
-    def key : String
-      to_s
-    end
-
     def to_s(io : IO) : Nil
       io << @address << '#' << @node_uid
     end
@@ -136,7 +132,7 @@ module Movie::Cluster
   # Thread-safe convergent member-record store. Reachability remains local to
   # each observer and is supplied only when a public snapshot is materialized.
   class MembershipState
-    @members = {} of String => Member
+    @members = {} of UniqueAddress => Member
     @mutex = Mutex.new
 
     def initialize(@capacity : Int32 = 10_000)
@@ -146,17 +142,20 @@ module Movie::Cluster
     def merge(incoming : Enumerable(Member)) : Int32
       records = incoming.to_a
       @mutex.synchronize do
-        additions = records.count { |candidate| !@members.has_key?(candidate.unique_address.key) }
+        additions = records
+          .map(&.unique_address)
+          .uniq
+          .count { |unique_address| !@members.has_key?(unique_address) }
         if @members.size + additions > @capacity
           raise MembershipCapacityError.new("membership capacity #{@capacity} is exhausted")
         end
 
         changes = 0
         records.each do |candidate|
-          key = candidate.unique_address.key
-          current = @members[key]?
+          unique_address = candidate.unique_address
+          current = @members[unique_address]?
           if current.nil? || supersedes?(candidate, current)
-            @members[key] = candidate
+            @members[unique_address] = candidate
             changes += 1
           end
         end
@@ -165,7 +164,7 @@ module Movie::Cluster
     end
 
     def member(unique_address : UniqueAddress) : Member?
-      @mutex.synchronize { @members[unique_address.key]? }
+      @mutex.synchronize { @members[unique_address]? }
     end
 
     def all_members : Array(Member)
@@ -176,18 +175,18 @@ module Movie::Cluster
       @mutex.synchronize { sorted(@members.values.reject(&.status.removed?)) }
     end
 
-    def snapshot(self_unique_address : UniqueAddress, unreachable_keys : Set(String)) : ClusterSnapshot
+    def snapshot(self_unique_address : UniqueAddress, unreachable : Set(UniqueAddress)) : ClusterSnapshot
       @mutex.synchronize do
         active = sorted(@members.values.reject(&.status.removed?))
-        unreachable = active
-          .select { |member| unreachable_keys.includes?(member.unique_address.key) }
+        unreachable_members = active
+          .select { |member| unreachable.includes?(member.unique_address) }
           .map(&.unique_address)
           .sort
         candidates = active.select do |member|
-          member.status.leader_candidate? && !unreachable_keys.includes?(member.unique_address.key)
+          member.status.leader_candidate? && !unreachable.includes?(member.unique_address)
         end
         leader = candidates.min_by?(&.unique_address).try(&.unique_address)
-        ClusterSnapshot.new(self_unique_address, active, unreachable, leader)
+        ClusterSnapshot.new(self_unique_address, active, unreachable_members, leader)
       end
     end
 

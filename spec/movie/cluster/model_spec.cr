@@ -58,9 +58,9 @@ describe Movie::Cluster::MembershipState do
     joining = cluster_member("node-0", 2550, "uid-0", Movie::Cluster::MemberStatus::Joining, 1)
     state = Movie::Cluster::MembershipState.new
     state.merge([local, lowest, unreachable, joining])
-    unreachable_keys = Set{unreachable.unique_address.key}
+    unreachable_addresses = Set{unreachable.unique_address}
 
-    snapshot = state.snapshot(local.unique_address, unreachable_keys)
+    snapshot = state.snapshot(local.unique_address, unreachable_addresses)
     snapshot.leader.should eq(lowest.unique_address)
     snapshot.unreachable.should eq([unreachable.unique_address])
     snapshot.members.map(&.unique_address).should eq([

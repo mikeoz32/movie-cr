@@ -27,7 +27,7 @@ module Movie::Cluster
     end
 
     def snapshot : ClusterSnapshot
-      @state.snapshot(@self_unique_address, @reachability.unreachable_keys)
+      @state.snapshot(@self_unique_address, @reachability.unreachable)
     end
 
     def self_member : Member
@@ -73,13 +73,13 @@ module Movie::Cluster
       leader.nil? || leader == @self_unique_address
     end
 
-    def converged?(seen_digests : Hash(String, String)) : Bool
+    def converged?(seen_digests : Hash(UniqueAddress, String)) : Bool
       current_digest = digest
-      unreachable = @reachability.unreachable_keys
+      unreachable = @reachability.unreachable
       active_members.select(&.status.up?).all? do |current|
         current.unique_address == @self_unique_address ||
-          unreachable.includes?(current.unique_address.key) ||
-          seen_digests[current.unique_address.key]? == current_digest
+          unreachable.includes?(current.unique_address) ||
+          seen_digests[current.unique_address]? == current_digest
       end
     end
 
@@ -91,7 +91,7 @@ module Movie::Cluster
 
       @telemetry.membership_merged(changes)
       @state.all_members.each do |current|
-        previous = before[current.unique_address.key]?
+        previous = before[current.unique_address]?
         next if previous && previous.status == current.status
         publish_member_status(current)
       end
@@ -99,11 +99,26 @@ module Movie::Cluster
       changes
     end
 
+    # Gossip may relay unchanged records, but only the locally recognized
+    # leader may author lifecycle changes. Independently formed seed members
+    # are the sole exception: they authenticate their own initial Up record.
+    def merge_gossip(records : Enumerable(Member), sender : UniqueAddress) : Int32
+      leader = snapshot.leader
+      authorized = records.select do |candidate|
+        gossip_record_authorized?(candidate, sender, leader)
+      end
+      merge(authorized)
+    end
+
     def promote_joining_if_leader : Nil
       return unless local_leader?
-      active_members.select(&.status.joining?).each do |joining|
-        merge([member_with_status(joining.unique_address, MemberStatus::Up, joining.roles)])
+      updates = all_members.compact_map do |current|
+        status = current.status.joining? ? MemberStatus::Up : current.status
+        next if current.changed_by == @self_unique_address.node_uid && status == current.status
+
+        member_with_status(current.unique_address, status, current.roles, current.revision)
       end
+      merge(updates) unless updates.empty?
     end
 
     def apply_departure(target : UniqueAddress, status : MemberStatus) : Bool
@@ -163,23 +178,49 @@ module Movie::Cluster
       @events.size
     end
 
-    private def member_with_status(unique_address : UniqueAddress, status : MemberStatus, roles : Array(String)) : Member
+    private def gossip_record_authorized?(
+      candidate : Member,
+      sender : UniqueAddress,
+      leader : UniqueAddress?,
+    ) : Bool
+      current = member(candidate.unique_address)
+      return true if current == candidate
+      return candidate.changed_by == candidate.unique_address.node_uid if candidate.status.joining?
+      return true if current.nil? &&
+                     candidate.status.up? &&
+                     candidate.unique_address == sender &&
+                     candidate.changed_by == sender.node_uid
+
+      leader == sender && candidate.changed_by == sender.node_uid
+    end
+
+    private def member_with_status(
+      unique_address : UniqueAddress,
+      status : MemberStatus,
+      roles : Array(String),
+      after_revision : Int64 = 0_i64,
+    ) : Member
       Member.new(
         unique_address,
         status,
         roles,
-        next_revision,
+        next_revision(after_revision),
         @self_unique_address.node_uid
       )
     end
 
-    private def next_revision : Int64
-      @revision.add(1) + 1
+    private def next_revision(after_revision : Int64 = 0_i64) : Int64
+      loop do
+        current = @revision.get
+        candidate = {current + 1, after_revision + 1}.max
+        _, changed = @revision.compare_and_set(current, candidate)
+        return candidate if changed
+      end
     end
 
-    private def member_index(members : Array(Member)) : Hash(String, Member)
-      members.each_with_object({} of String => Member) do |current, index|
-        index[current.unique_address.key] = current
+    private def member_index(members : Array(Member)) : Hash(UniqueAddress, Member)
+      members.each_with_object({} of UniqueAddress => Member) do |current, index|
+        index[current.unique_address] = current
       end
     end
 

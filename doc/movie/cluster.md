@@ -35,7 +35,7 @@ Joining -> Up -> Leaving -> Exiting -> Removed
 
 `Removed` records remain as bounded tombstones, so delayed gossip cannot resurrect an old UID. `cluster.max-members` bounds live records plus tombstones and fails closed before a merge can partially overflow the state.
 
-Each gossip round sends a canonical full-state snapshot to at most `gossip_fanout` peers. Member status precedence, revision, and change-origin ordering make merge deterministic. ACKs carry the receiver's deterministic digest; `cluster.converged?` becomes true when every locally reachable `Up` member has acknowledged the current digest. The lowest reachable `UniqueAddress` in `Up` or `Leaving` state is the local leader.
+Each gossip round sends a canonical full-state snapshot to at most `gossip_fanout` peers. Member status precedence, revision, and change-origin ordering make merge deterministic. Unchanged records may be relayed by any active peer, but lifecycle changes received through gossip are accepted only when authored and sent by the locally recognized leader; an independently formed seed may authenticate its own initial `Up` record. ACKs carry the receiver's deterministic digest; `cluster.converged?` becomes true when every locally reachable `Up` member has acknowledged the current digest. The lowest reachable `UniqueAddress` in `Up` or `Leaving` state is the local leader.
 
 ## Reachability is not downing
 
@@ -56,6 +56,8 @@ system.shutdown
 ```
 
 Calling `ActorSystem#shutdown` directly is an abrupt loss from the cluster's perspective. Peers will mark the UID unreachable and retain it until an operator downs it.
+
+A non-leader retries its leave request until it observes the leader-authored transition. Peers retry the final `Removed` snapshot to a gracefully leaving incarnation until its digest ACK arrives, so transient at-most-once transport loss does not strand `await_removed`. Abruptly downed members do not receive this retry treatment.
 
 ## Snapshots and events
 

@@ -24,8 +24,11 @@ module Movie::Cluster
     @seed_nodes : Array(Movie::Address)
     @seed_mutex = Mutex.new
     @remote : Movie::Remote::RemoteExtension
-    @seen_digests = {} of String => String
+    @seen_digests = {} of UniqueAddress => String
     @seen_mutex = Mutex.new
+    @pending_terminal_deliveries = Set(UniqueAddress).new
+    @terminal_mutex = Mutex.new
+    @leave_requested = Atomic(Bool).new(false)
     @heartbeat_sequence = Atomic(Int64).new(0_i64)
     @telemetry = ClusterTelemetry.new
     @transport : ClusterTransport
@@ -67,6 +70,7 @@ module Movie::Cluster
       return if @stopped.swap(true)
       @daemon.try &.send_system(Movie::STOP)
       @transport.close
+      @terminal_mutex.synchronize { @pending_terminal_deliveries.clear }
     end
 
     def snapshot : ClusterSnapshot
@@ -116,7 +120,11 @@ module Movie::Cluster
     # Graceful leave is coordinated by the current reachable leader and is
     # terminal for this process incarnation.
     def leave : Bool
-      request_departure(ProtocolMessage::Kind::LeaveRequest, @self_unique_address)
+      accepted = request_departure(ProtocolMessage::Kind::LeaveRequest, @self_unique_address)
+      if accepted && self_member.status.up?
+        @leave_requested.set(true)
+      end
+      accepted
     end
 
     # Manual downing never runs from reachability alone. The operator chooses
@@ -196,7 +204,10 @@ module Movie::Cluster
 
     private def handle_join(message : ProtocolMessage) : Nil
       candidate = message.member
-      return unless candidate && candidate.unique_address == message.sender
+      return unless candidate &&
+                    candidate.unique_address == message.sender &&
+                    candidate.status.joining? &&
+                    candidate.changed_by == message.sender.node_uid
 
       @membership.merge([candidate])
       current = @membership.member(candidate.unique_address).not_nil!
@@ -219,9 +230,15 @@ module Movie::Cluster
     private def handle_gossip(message : ProtocolMessage) : Nil
       return unless @membership.known_active?(message.sender)
       @telemetry.gossip_received
-      @membership.merge(message.members)
+      records = message.members
+      previously_exiting = records.compact_map do |candidate|
+        current = @membership.member(candidate.unique_address)
+        candidate.unique_address if current.try(&.status.exiting?) && candidate.status.removed?
+      end
+      @membership.merge_gossip(records, message.sender)
+      register_terminal_deliveries(previously_exiting)
       @membership.promote_joining_if_leader
-      round = message.round || return
+      round = message.gossip_round || return
       @transport.send_async(message.sender.address, ProtocolMessage.gossip_ack(
         @settings.cluster_name,
         @self_unique_address,
@@ -231,15 +248,20 @@ module Movie::Cluster
     end
 
     private def handle_gossip_ack(message : ProtocolMessage) : Nil
-      return unless @membership.known_active?(message.sender)
       digest = message.digest || return
+      if terminal_delivery_pending?(message.sender)
+        @telemetry.gossip_ack
+        clear_terminal_delivery(message.sender) if digest == @membership.digest
+        return
+      end
+      return unless @membership.known_active?(message.sender)
       @telemetry.gossip_ack
-      @seen_mutex.synchronize { @seen_digests[message.sender.key] = digest }
+      @seen_mutex.synchronize { @seen_digests[message.sender] = digest }
     end
 
     private def handle_heartbeat(message : ProtocolMessage) : Nil
       return unless @membership.known_active?(message.sender)
-      sequence = message.round || return
+      sequence = message.heartbeat_sequence || return
       @telemetry.heartbeat_received
       @transport.send_async(message.sender.address, ProtocolMessage.heartbeat_ack(
         @settings.cluster_name,
@@ -302,7 +324,8 @@ module Movie::Cluster
     end
 
     private def attempt_join : Nil
-      return if self_member.status.removed? || self_member.status.down?
+      status = self_member.status
+      return unless status.joining? || (status.up? && @membership.active_members.size == 1)
       seeds = @seed_mutex.synchronize { @seed_nodes.dup }
       seeds.reject { |seed| seed == @self_unique_address.address }.each { |seed| send_join(seed) }
     end
@@ -320,6 +343,7 @@ module Movie::Cluster
 
     private def gossip_round : Nil
       return unless @membership.participating?
+      retry_leave_request
       round = @telemetry.next_gossip_round
       members = @membership.all_members
       digest = @membership.digest
@@ -341,6 +365,7 @@ module Movie::Cluster
           ))
         end
       end
+      retry_terminal_deliveries(round, members, digest)
       advance_departures(round) if @membership.departure_coordinator?
     end
 
@@ -398,21 +423,72 @@ module Movie::Cluster
     end
 
     private def advance_departures(round : Int64) : Nil
+      graceful = @membership.active_members
+        .select(&.status.exiting?)
+        .map(&.unique_address)
+        .to_set
       removed = @membership.advance_departures
       return if removed.empty?
 
       final_members = @membership.all_members
       final_digest = @membership.digest
       removed.each do |member|
-        @telemetry.gossip_sent
-        @transport.send_async(member.address, ProtocolMessage.gossip(
-          @settings.cluster_name,
-          @self_unique_address,
-          final_members,
-          round,
-          final_digest
-        ))
+        register_terminal_delivery(member) if graceful.includes?(member)
+        send_terminal_delivery(member, round, final_members, final_digest)
       end
+    end
+
+    private def retry_leave_request : Nil
+      return unless @leave_requested.get
+      unless self_member.status.up?
+        @leave_requested.set(false)
+        return
+      end
+      request_departure(ProtocolMessage::Kind::LeaveRequest, @self_unique_address)
+    end
+
+    private def register_terminal_deliveries(addresses : Enumerable(UniqueAddress)) : Nil
+      addresses.each do |address|
+        register_terminal_delivery(address) if @membership.member(address).try(&.status.removed?)
+      end
+    end
+
+    private def register_terminal_delivery(address : UniqueAddress) : Nil
+      return if address == @self_unique_address
+      @terminal_mutex.synchronize { @pending_terminal_deliveries << address }
+    end
+
+    private def terminal_delivery_pending?(address : UniqueAddress) : Bool
+      @terminal_mutex.synchronize { @pending_terminal_deliveries.includes?(address) }
+    end
+
+    private def clear_terminal_delivery(address : UniqueAddress) : Nil
+      @terminal_mutex.synchronize { @pending_terminal_deliveries.delete(address) }
+    end
+
+    private def retry_terminal_deliveries(
+      round : Int64,
+      members : Array(Member),
+      digest : String,
+    ) : Nil
+      pending = @terminal_mutex.synchronize { @pending_terminal_deliveries.to_a }
+      pending.each { |address| send_terminal_delivery(address, round, members, digest) }
+    end
+
+    private def send_terminal_delivery(
+      address : UniqueAddress,
+      round : Int64,
+      members : Array(Member),
+      digest : String,
+    ) : Nil
+      @telemetry.gossip_sent
+      @transport.send_async(address.address, ProtocolMessage.gossip(
+        @settings.cluster_name,
+        @self_unique_address,
+        members,
+        round,
+        digest
+      ))
     end
   end
 end

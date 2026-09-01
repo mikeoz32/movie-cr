@@ -44,7 +44,10 @@ private def run_cluster_peer : NoReturn
     when "STATUS"
       snapshot = cluster.snapshot
       self_status = cluster.self_member.status
-      puts "MOVIE_CLUSTER_STATUS status=#{self_status} members=#{snapshot.members.size} up=#{snapshot.members.count(&.status.up?)} unreachable=#{snapshot.unreachable.size} converged=#{cluster.converged?}"
+      state = snapshot.members.map do |member|
+        "#{member.unique_address.node_uid}:#{member.status}:#{member.revision}:#{member.changed_by}"
+      end.join(';')
+      puts "MOVIE_CLUSTER_STATUS status=#{self_status} members=#{snapshot.members.size} up=#{snapshot.members.count(&.status.up?)} unreachable=#{snapshot.unreachable.size} converged=#{cluster.converged?} state=#{state}"
     when "JOIN"
       cluster.join(Movie::Address.parse(argument))
       puts "MOVIE_CLUSTER_JOIN accepted=true"
@@ -73,7 +76,8 @@ private record ClusterPeerStatus,
   members : Int32,
   up : Int32,
   unreachable : Int32,
-  converged : Bool
+  converged : Bool,
+  state : String
 
 private class ClusterPeerProcess
   getter process : Process
@@ -110,7 +114,8 @@ private class ClusterPeerProcess
       members: fields["members"].to_i,
       up: fields["up"].to_i,
       unreachable: fields["unreachable"].to_i,
-      converged: fields["converged"] == "true"
+      converged: fields["converged"] == "true",
+      state: fields["state"]
     )
   end
 
@@ -119,7 +124,9 @@ private class ClusterPeerProcess
     loop do
       current = status
       return current if yield current
-      raise "cluster peer status did not converge within #{timeout_span}" if Time.instant >= deadline
+      if Time.instant >= deadline
+        raise "cluster peer status did not converge within #{timeout_span}: #{current}"
+      end
       sleep 20.milliseconds
     end
   end
@@ -211,6 +218,18 @@ private def spawn_cluster_peer(name : String, port : Int32, seeds : Array(Movie:
   ClusterPeerProcess.new(process)
 end
 
+private def wait_for_peer_convergence(peers : Array(ClusterPeerProcess), timeout_span : Time::Span = 10.seconds) : Nil
+  deadline = Time.instant + timeout_span
+  loop do
+    statuses = peers.map(&.status)
+    return if statuses.all? { |status| status.up == peers.size && status.converged }
+    if Time.instant >= deadline
+      raise "cluster peers did not converge within #{timeout_span}: #{statuses}"
+    end
+    sleep 20.milliseconds
+  end
+end
+
 if CLUSTER_STRESS_ENABLED
   describe "Movie cluster multi-process stress" do
     it "covers seed ordering, convergence, reachability, leave, down, and restart incarnation" do
@@ -228,9 +247,7 @@ if CLUSTER_STRESS_ENABLED
         seed.wait_status { |status| status.up == 2 }
 
         third = spawn_cluster_peer("c-process-third", third_port, [seed_address])
-        [seed, joiner, third].each do |peer|
-          peer.wait_status { |status| status.up == 3 && status.converged }
-        end
+        wait_for_peer_convergence([seed, joiner, third])
 
         join_response = joiner.request("JOIN #{seed_address}", "MOVIE_CLUSTER_JOIN")
         join_response.should contain("accepted=true")

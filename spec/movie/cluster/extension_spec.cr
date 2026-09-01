@@ -135,12 +135,126 @@ describe Movie::Cluster::ClusterExtension do
       joining.self_member.roles.should eq(["worker"])
       seed.self_member.roles.should eq(["seed"])
 
+      sleep 40.milliseconds
+      settled_join_attempts = joining.stats.join_attempts
+      sleep 80.milliseconds
+      joining.stats.join_attempts.should eq(settled_join_attempts)
+
       joining.join(seed_remote.address)
       sleep 50.milliseconds
       seed.snapshot.members.count { |member| member.unique_address == joining.self_unique_address }.should eq(1)
     ensure
       joining_system.shutdown(1.second)
       seed_system.shutdown(1.second)
+    end
+  end
+
+  it "rejects terminal gossip not authored by the current leader" do
+    seed_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "a-authority-seed")
+    seed_remote = seed_system.enable_remoting("127.0.0.1", 0, 1)
+    seed = seed_system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+      join_retry_interval: 20.milliseconds,
+      gossip_interval: 20.milliseconds
+    ))
+    peer_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "z-authority-peer")
+    peer_system.enable_remoting("127.0.0.1", 0, 1)
+    peer = peer_system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+      seed_nodes: [seed_remote.address],
+      join_retry_interval: 20.milliseconds,
+      gossip_interval: 20.milliseconds
+    ))
+
+    begin
+      peer.await_up(3.seconds)
+      wait_for_cluster { seed.snapshot.members.count(&.status.up?) == 2 }
+      seed.snapshot.leader.should eq(seed.self_unique_address)
+      forged = Movie::Cluster::Member.new(
+        seed.self_unique_address,
+        Movie::Cluster::MemberStatus::Removed,
+        seed.self_member.roles,
+        seed.self_member.revision + 100,
+        peer.self_unique_address.node_uid
+      )
+      sender_path = Movie::ActorPath.new(
+        peer.self_unique_address.address,
+        ["system", Movie::Cluster::ClusterExtension::DAEMON_NAME]
+      )
+
+      seed.handle_protocol(
+        Movie::Cluster::ProtocolMessage.gossip(
+          seed.settings.cluster_name,
+          peer.self_unique_address,
+          [forged],
+          1_i64,
+          "forged"
+        ),
+        sender_path,
+        peer.self_unique_address.address,
+        peer.self_unique_address.node_uid
+      )
+
+      seed.self_member.status.up?.should be_true
+    ensure
+      peer_system.shutdown(1.second)
+      seed_system.shutdown(1.second)
+    end
+  end
+
+  it "retries a graceful terminal record until the leaving incarnation acknowledges it" do
+    system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "a-terminal-seed")
+    system.enable_remoting("127.0.0.1", 0, 1)
+    cluster = system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+      gossip_interval: 10.seconds,
+      heartbeat_interval: 10.seconds,
+      heartbeat_timeout: 20.seconds
+    ))
+    leaving = Movie::Cluster::UniqueAddress.new(
+      Movie::Address.remote("z-unavailable-leaver", "127.0.0.1", 64_998),
+      "leaving-uid"
+    )
+    joining = Movie::Cluster::Member.new(
+      leaving,
+      Movie::Cluster::MemberStatus::Joining,
+      [] of String,
+      1_i64,
+      leaving.node_uid
+    )
+    sender_path = Movie::ActorPath.new(leaving.address, ["system", Movie::Cluster::ClusterExtension::DAEMON_NAME])
+
+    begin
+      cluster.handle_protocol(
+        Movie::Cluster::ProtocolMessage.join(cluster.settings.cluster_name, leaving, joining),
+        sender_path,
+        leaving.address,
+        leaving.node_uid
+      )
+      cluster.handle_protocol(
+        Movie::Cluster::ProtocolMessage.leave_request(cluster.settings.cluster_name, leaving),
+        sender_path,
+        leaving.address,
+        leaving.node_uid
+      )
+      2.times do
+        cluster.handle_protocol(
+          Movie::Cluster::ProtocolMessage.gossip_tick(cluster.settings.cluster_name, cluster.self_unique_address),
+          nil,
+          nil,
+          nil
+        )
+      end
+      cluster.snapshot.member(leaving).should be_nil
+      terminal_send_count = cluster.stats.gossip_sent
+
+      cluster.handle_protocol(
+        Movie::Cluster::ProtocolMessage.gossip_tick(cluster.settings.cluster_name, cluster.self_unique_address),
+        nil,
+        nil,
+        nil
+      )
+
+      cluster.stats.gossip_sent.should be > terminal_send_count
+    ensure
+      system.shutdown(1.second)
     end
   end
 
@@ -226,6 +340,10 @@ describe Movie::Cluster::ClusterExtension do
           leaving.snapshot.member(leaving.self_unique_address).nil?
       end
       seed.snapshot.members.should eq([seed.self_member])
+      sleep 100.milliseconds
+      settled_gossip_sends = seed.stats.gossip_sent
+      sleep 100.milliseconds
+      seed.stats.gossip_sent.should eq(settled_gossip_sends)
     ensure
       leaving_system.shutdown(1.second)
       seed_system.shutdown(1.second)

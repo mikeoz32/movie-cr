@@ -13,28 +13,28 @@ module Movie::Cluster
   end
 
   class ReachabilityState
-    @last_heartbeat_ns = {} of String => Int64
-    @unreachable = Set(String).new
+    @last_heartbeat_ns = {} of UniqueAddress => Int64
+    @unreachable = Set(UniqueAddress).new
     @mutex = Mutex.new
 
-    def unreachable_keys : Set(String)
+    def unreachable : Set(UniqueAddress)
       @mutex.synchronize { @unreachable.dup }
     end
 
     def check(peers : Array(Member), timeout_span : Time::Span) : Array(Member)
       now = ClusterClock.now_nanoseconds
-      active_keys = peers.map(&.unique_address.key).to_set
+      active_addresses = peers.map(&.unique_address).to_set
       newly_unreachable = [] of Member
       @mutex.synchronize do
-        @last_heartbeat_ns.reject! { |key, _| !active_keys.includes?(key) }
-        @unreachable.reject! { |key| !active_keys.includes?(key) }
+        @last_heartbeat_ns.reject! { |address, _| !active_addresses.includes?(address) }
+        @unreachable.reject! { |address| !active_addresses.includes?(address) }
         peers.each do |peer|
-          key = peer.unique_address.key
-          last_seen = @last_heartbeat_ns[key]? || begin
-            @last_heartbeat_ns[key] = now
+          address = peer.unique_address
+          last_seen = @last_heartbeat_ns[address]? || begin
+            @last_heartbeat_ns[address] = now
             now
           end
-          if now - last_seen > timeout_span.total_nanoseconds && @unreachable.add?(key)
+          if now - last_seen > timeout_span.total_nanoseconds && @unreachable.add?(address)
             newly_unreachable << peer
           end
         end
@@ -44,8 +44,8 @@ module Movie::Cluster
 
     def mark_reachable(sender : UniqueAddress) : Bool
       @mutex.synchronize do
-        @last_heartbeat_ns[sender.key] = ClusterClock.now_nanoseconds
-        @unreachable.delete(sender.key)
+        @last_heartbeat_ns[sender] = ClusterClock.now_nanoseconds
+        @unreachable.delete(sender)
       end
     end
   end
