@@ -879,9 +879,14 @@ module Movie
 
     # Enables remoting on this actor system.
     # Returns the RemoteExtension for configuring remote communication.
-    def enable_remoting(host : String, port : Int32, stripe_count : Int32 = Remote::StripedConnectionPool::DEFAULT_STRIPE_COUNT) : Remote::RemoteExtension
+    def enable_remoting(
+      host : String,
+      port : Int32,
+      stripe_count : Int32 = Remote::StripedConnectionPool::DEFAULT_STRIPE_COUNT,
+      settings : Remote::AssociationSettings = Remote::AssociationSettings.new,
+    ) : Remote::RemoteExtension
       @extensions.get_or_register(Remote::RemoteExtension) do
-        Remote::RemoteExtension.new(self, host, port, stripe_count)
+        Remote::RemoteExtension.new(self, host, port, stripe_count, settings)
       end
     end
 
@@ -1130,7 +1135,19 @@ module Movie
       host = @config.get_string(ActorSystemConfig::REMOTING_HOST, "127.0.0.1")
       port = @config.get_int(ActorSystemConfig::REMOTING_PORT, 2552)
       stripe_count = @config.get_int(ActorSystemConfig::REMOTING_STRIPE_COUNT, Remote::StripedConnectionPool::DEFAULT_STRIPE_COUNT)
-      enable_remoting(host, port, stripe_count)
+      shared_secret = @config.get_string(ActorSystemConfig::REMOTING_SHARED_SECRET, "")
+      settings = Remote::AssociationSettings.new(
+        handshake_timeout: @config.get_duration(ActorSystemConfig::REMOTING_HANDSHAKE_TIMEOUT, 2.seconds),
+        reconnect_min_backoff: @config.get_duration(ActorSystemConfig::REMOTING_RECONNECT_MIN, 50.milliseconds),
+        reconnect_max_backoff: @config.get_duration(ActorSystemConfig::REMOTING_RECONNECT_MAX, 2.seconds),
+        reconnect_factor: @config.get_float(ActorSystemConfig::REMOTING_RECONNECT_FACTOR, 2.0),
+        reconnect_jitter: @config.get_float(ActorSystemConfig::REMOTING_RECONNECT_JITTER, 0.2),
+        heartbeat_interval: @config.get_duration(ActorSystemConfig::REMOTING_HEARTBEAT_INTERVAL, 1.second),
+        heartbeat_timeout: @config.get_duration(ActorSystemConfig::REMOTING_HEARTBEAT_TIMEOUT, 5.seconds),
+        control_buffer_capacity: @config.get_int(ActorSystemConfig::REMOTING_CONTROL_CAPACITY, 1024),
+        shared_secret: shared_secret.empty? ? nil : shared_secret
+      )
+      enable_remoting(host, port, stripe_count, settings)
     end
 
     protected def bootstrap_main

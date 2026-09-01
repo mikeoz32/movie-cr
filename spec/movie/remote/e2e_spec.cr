@@ -166,6 +166,13 @@ describe "Movie Remote E2E" do
         ["user", "probe"]
       )
       socket = TCPSocket.new("127.0.0.1", server_remote.local_port)
+      Movie::Remote::FrameCodec.encode(
+        Movie::Remote::WireEnvelope.handshake(
+          "malformed-payload-client",
+          "movie.tcp://malformed-payload-client@127.0.0.1:0"
+        ),
+        socket
+      )
 
       write_reordered_user_frame(
         socket,

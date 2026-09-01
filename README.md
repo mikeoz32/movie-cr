@@ -1,6 +1,6 @@
 # Movie
 
-Movie is a lightweight typed actor framework for Crystal. It provides actor lifecycle and supervision, ask/futures, scheduling, bounded execution, pluggable SQLite/PostgreSQL persistence, typed streams, and an experimental TCP remoting MVP.
+Movie is a lightweight typed actor framework for Crystal. It provides actor lifecycle and supervision, ask/futures, scheduling, bounded execution, pluggable SQLite/PostgreSQL persistence, typed streams, and restart-tolerant TCP remoting associations.
 
 ## Feature maturity
 
@@ -11,7 +11,7 @@ Movie is a lightweight typed actor framework for Crystal. It provides actor life
 | Executor | Advanced API | Bounded worker pool; task timeout does not cancel the task body. |
 | Persistence | Production beta | Versioned schemas, typed effects, atomic revisions, recovery, safe retention, projections, transactional outbox, telemetry/resilience, SQLite, and shared PostgreSQL; cluster sharding is not included. |
 | Typed streams | MVP | Manual sources, transform stages, fold/collect sinks, cancellation, backpressure, and broadcast fan-out. |
-| Remoting | Experimental MVP | Typed TCP delivery and remote ask, without production transport guarantees. |
+| Remoting | Production beta | Versioned/authenticated associations, bounded reconnect, heartbeat failure detection, reliable control traffic, and at-most-once user delivery; cluster membership is not included. |
 
 ## Requirements and installation
 
@@ -125,9 +125,9 @@ See [the streams protocol](doc/movie/streams.md), [typed blueprint example](exam
 
 ## Remoting
 
-Remoting is an experimental MVP for validating typed delivery between Movie systems. Wire messages must include `JSON::Serializable` and be registered with `Movie::Remote::MessageRegistry` on both systems.
+Remoting provides typed delivery over versioned, restart-tolerant associations. Wire messages must include `JSON::Serializable` and be registered with `Movie::Remote::MessageRegistry` on both systems.
 
-It supports typed fire-and-forget delivery, remote ask, sender paths, and remote `Stop`, `Watch`, `Unwatch`, `Terminated`, and `Failed`. It does not provide authentication, encryption, automatic reconnect, acknowledgements, version negotiation, or durable delivery.
+It supports typed fire-and-forget delivery, remote ask, sender paths, remote `Stop`, `Watch`, `Unwatch`, `Terminated`, and `Failed`, automatic reconnect, HMAC handshake authentication, heartbeat failure detection, and acknowledged/deduplicated outbound control messages. User traffic remains at-most-once and is not replayed after disconnect; use the persistence outbox for durable business delivery. TLS is installed through transport wrapping hooks because certificate ownership belongs to the application deployment.
 
 `ActorSystem#actor_for` returns `ActorRefBase`; narrow a remote result before using its typed API:
 
@@ -158,7 +158,7 @@ Advanced APIs that may change more aggressively:
 - `Promise(T)` callback bridging;
 - executor protocol types and direct executor integrations;
 - persistence entity/store internals;
-- streams and remoting while they remain MVP features.
+- streams while they remain an MVP feature, and remoting association internals while the transport remains beta.
 
 ## Development and verification
 
@@ -176,6 +176,7 @@ Benchmarks and stress scenarios are intentionally opt-in:
 
 ```bash
 MOVIE_BENCH=1 crystal spec --release spec/movie/remote/benchmark_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_BENCH=1 crystal spec --release spec/movie/remote/association_benchmark_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_STRESS=1 crystal spec spec/movie/remote/stress_spec.cr -Dpreview_mt -Dexecution_context
 ```
 

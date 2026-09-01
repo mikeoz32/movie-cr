@@ -29,6 +29,7 @@
 - [Epic 15 - Persistence contract and recovery](epics/epic-15-persistence-contract-and-recovery.md)
 - [Epic 16 - Pluggable persistence and PostgreSQL](epics/epic-16-pluggable-persistence-and-postgresql.md)
 - [Epic 17 - Persistence production hardening](epics/epic-17-persistence-production-hardening.md)
+- [Epic 18 - Reliable remoting associations](epics/epic-18-reliable-remoting-associations.md)
 
 ## How To Use This Folder
 

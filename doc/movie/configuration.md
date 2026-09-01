@@ -40,10 +40,19 @@ config = file.with_env_overrides
 | `supervision.backoff.max` | Duration | `1s` | Maximum restart delay. |
 | `supervision.backoff.factor` | Float | `2.0` | Exponential backoff multiplier. |
 | `supervision.backoff.jitter` | Float | `0.0` | Random delay factor. |
-| `remoting.enabled` | Bool | `false` | Start the experimental TCP remoting extension automatically. |
+| `remoting.enabled` | Bool | `false` | Start the TCP remoting extension automatically. |
 | `remoting.host` | String | `127.0.0.1` | Remoting bind host. |
 | `remoting.port` | Int | `2552` | Remoting bind port; `0` selects a free port. |
 | `remoting.stripe-count` | Int | `8` | Parallel outbound TCP connections per remote address. |
+| `remoting.handshake-timeout` | Duration | `2s` | Maximum wait for protocol negotiation. |
+| `remoting.reconnect.min-backoff` | Duration | `50ms` | Delay before the first reconnect attempt. |
+| `remoting.reconnect.max-backoff` | Duration | `2s` | Upper bound for reconnect delay. |
+| `remoting.reconnect.factor` | Float | `2.0` | Exponential reconnect multiplier. |
+| `remoting.reconnect.jitter` | Float | `0.2` | Reconnect randomization factor from `0.0` to `1.0`. |
+| `remoting.heartbeat.interval` | Duration | `1s` | Interval between association heartbeats. |
+| `remoting.heartbeat.timeout` | Duration | `5s` | Maximum peer silence before reconnect. |
+| `remoting.control-buffer-capacity` | Int | `1024` | Pending acknowledged system messages per stripe. |
+| `remoting.shared-secret` | String | empty | Optional HMAC handshake secret; use environment injection in deployments. |
 | `executor.pool-size` | Int | `4` | Bounded executor worker count. |
 | `executor.queue-capacity` | Int | `128` | Number of queued executor tasks. |
 | `persistence.backend` | String | `sqlite` | Registered persistence backend; `postgres` requires the PostgreSQL entrypoint. |
@@ -71,6 +80,10 @@ The default prefix is `MOVIE`. Canonical environment names use `__` between dott
 | `MOVIE_SUPERVISION__MAX_RESTARTS` | `supervision.max-restarts` |
 | `MOVIE_SUPERVISION__BACKOFF__MIN` | `supervision.backoff.min` |
 | `MOVIE_REMOTING__STRIPE_COUNT` | `remoting.stripe-count` |
+| `MOVIE_REMOTING__RECONNECT__MIN_BACKOFF` | `remoting.reconnect.min-backoff` |
+| `MOVIE_REMOTING__HEARTBEAT__TIMEOUT` | `remoting.heartbeat.timeout` |
+| `MOVIE_REMOTING__CONTROL_BUFFER_CAPACITY` | `remoting.control-buffer-capacity` |
+| `MOVIE_REMOTING__SHARED_SECRET` | `remoting.shared-secret` |
 | `MOVIE_EXECUTOR__QUEUE_CAPACITY` | `executor.queue-capacity` |
 | `MOVIE_PERSISTENCE__BACKEND` | `persistence.backend` |
 | `MOVIE_PERSISTENCE__CONNECTION_URI` | `persistence.connection-uri` |

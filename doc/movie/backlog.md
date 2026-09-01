@@ -25,6 +25,7 @@ Mandatory workflow for every task lives in [development_workflow.md](development
 | P0 | [Epic 15 - Persistence Contract and Recovery](epics/epic-15-persistence-contract-and-recovery.md) | Defines safe persistence effects, atomic recovery semantics, entity lifecycle, snapshots, and blocking-I/O isolation. | Completed (2026-08-30) |
 | P0 | [Epic 16 - Pluggable Persistence and PostgreSQL](epics/epic-16-pluggable-persistence-and-postgresql.md) | Separates persistence semantics from SQLite and adds a shared PostgreSQL backend for multi-node recovery. | Completed (2026-08-31) |
 | P0 | [Epic 17 - Persistence Production Hardening](epics/epic-17-persistence-production-hardening.md) | Adds operable schema evolution, telemetry, retention, projections, outbox delivery, resilience policies, and fault/load evidence. | Completed (2026-08-31) |
+| P0 | [Epic 18 - Reliable Remoting Associations](epics/epic-18-reliable-remoting-associations.md) | Makes remote refs restart-tolerant and adds negotiated identity, bounded reconnects, reliable control traffic, failure detection, and security hooks before cluster membership. | In progress |
 
 ## Planning Rules
 

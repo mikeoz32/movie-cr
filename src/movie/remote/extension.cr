@@ -117,11 +117,14 @@ module Movie::Remote
 
     getter address : Address
     getter stripe_count : Int32
+    getter node_uid : String
+    getter settings : AssociationSettings
 
     @server : Server
     @pools : Hash(String, StripedConnectionPool)
     @pools_mutex : Mutex
     @system : Movie::AbstractActorSystem
+    @settings : AssociationSettings
 
     # Delegate to system's path registry for unified actor lookup
     def path_registry : Movie::PathRegistry
@@ -133,9 +136,11 @@ module Movie::Remote
       bind_host : String,
       bind_port : Int32,
       @stripe_count : Int32 = StripedConnectionPool::DEFAULT_STRIPE_COUNT,
+      @settings : AssociationSettings = AssociationSettings.new,
     )
       system_name = @system.name
       @address = Address.remote(system_name, bind_host, bind_port)
+      @node_uid = UUID.random.to_s
       @pools = {} of String => StripedConnectionPool
       @pools_mutex = Mutex.new
 
@@ -144,8 +149,14 @@ module Movie::Remote
         host: bind_host,
         port: bind_port,
         path_registry: @system.path_registry,
+        local_address: -> { @address },
+        node_uid: @node_uid,
+        settings: @settings,
         on_message: ->(envelope : WireEnvelope, conn : InboundConnection) {
           handle_incoming_message(envelope, conn)
+        },
+        on_disconnect: ->(conn : InboundConnection) {
+          handle_inbound_disconnect(conn)
         }
       )
     end
@@ -181,7 +192,7 @@ module Movie::Remote
       stale_pool = nil.as(StripedConnectionPool?)
       @pools_mutex.synchronize do
         if existing = @pools[key]?
-          return existing if existing.connected?
+          return existing unless existing.stopped?
           # Pool exists but is disconnected - remove it
           stale_pool = @pools.delete(key)
         end
@@ -192,29 +203,26 @@ module Movie::Remote
         address: address,
         path_registry: path_registry,
         system: @system,
+        local_address: -> { @address },
+        node_uid: @node_uid,
         stripe_count: @stripe_count,
+        settings: @settings,
         on_message: ->(envelope : WireEnvelope) {
           handle_incoming_message(envelope, nil)
         }
       )
 
-      if pool.connect
-        # Send handshake on first stripe
-        handshake = WireEnvelope.handshake(@system.name, @address.to_s)
-        pool.stripe(0).send(handshake)
+      pool.connect
 
-        @pools_mutex.synchronize do
-          if existing = @pools[key]?
-            if existing.connected?
-              pool.close
-              return existing
-            end
-            existing.close
+      @pools_mutex.synchronize do
+        if existing = @pools[key]?
+          unless existing.stopped?
+            pool.close
+            return existing
           end
-          @pools[key] = pool
+          existing.close
         end
-      else
-        pool.close
+        @pools[key] = pool
       end
 
       pool
@@ -361,6 +369,14 @@ module Movie::Remote
       end
 
       system_message = deserialize_system_message(envelope.message_type, envelope.payload_data, conn)
+      if connection = conn
+        case system_message
+        when Movie::Watch
+          connection.track_watch(context.ref, system_message.actor)
+        when Movie::Unwatch
+          connection.untrack_watch(context.ref, system_message.actor)
+        end
+      end
       context.ref.send_system(system_message)
     rescue ex : RemoteUnsupportedSystemMessageError
       Log.error { "Unsupported remote system message #{envelope.message_type}: #{ex.message}" }
@@ -400,6 +416,14 @@ module Movie::Remote
       RemoteSystemRef.new(path_registry, conn, ActorPath.parse(actor_path))
     rescue ex : ArgumentError
       raise RemoteUnsupportedSystemMessageError.new("Invalid remote actor path #{actor_path}: #{ex.message}")
+    end
+
+    private def handle_inbound_disconnect(connection : InboundConnection) : Nil
+      connection.drain_watches.each do |(target, watcher)|
+        target.send_system(Movie::Unwatch.new(watcher).as(Movie::SystemMessage))
+      rescue ex
+        Log.warn { "Failed to purge remote watch after association loss: #{ex.message}" }
+      end
     end
   end
 

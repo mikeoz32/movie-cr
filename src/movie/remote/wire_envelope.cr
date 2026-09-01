@@ -1,11 +1,8 @@
 require "json"
+require "./association"
 require "./json_payload"
 
 module Movie::Remote
-  private record HandshakePayload, system : String, address : String do
-    include JSON::Serializable
-  end
-
   private record EmptyPayload do
     include JSON::Serializable
   end
@@ -17,12 +14,16 @@ module Movie::Remote
   struct WireEnvelope
     # The kind of message being sent.
     enum Kind
-      USER_MESSAGE   # Regular user message to an actor
-      SYSTEM_MESSAGE # System message (watch, stop, etc.)
-      ASK_REQUEST    # Request part of ask pattern
-      ASK_RESPONSE   # Response part of ask pattern
-      HANDSHAKE      # Connection handshake
-      HEARTBEAT      # Keep-alive heartbeat
+      USER_MESSAGE     # Regular user message to an actor
+      SYSTEM_MESSAGE   # System message (watch, stop, etc.)
+      ASK_REQUEST      # Request part of ask pattern
+      ASK_RESPONSE     # Response part of ask pattern
+      HANDSHAKE        # Connection handshake
+      HANDSHAKE_ACK    # Successful handshake response
+      HANDSHAKE_REJECT # Explicit handshake rejection
+      HEARTBEAT        # Keep-alive heartbeat
+      HEARTBEAT_ACK    # Keep-alive response
+      CONTROL_ACK      # Reliable system/control acknowledgement
     end
 
     property kind : Kind
@@ -31,6 +32,8 @@ module Movie::Remote
     property target_path : String
     property message_type : String
     property timestamp : Int64
+    property control_stream : String?
+    property control_sequence : Int64?
 
     @payload_data : JsonPayload
 
@@ -44,6 +47,8 @@ module Movie::Remote
       @correlation_id : String? = nil,
       @sender_path : String? = nil,
       @timestamp : Int64 = Time.utc.to_unix_ms,
+      @control_stream : String? = nil,
+      @control_sequence : Int64? = nil,
     ) forall P
       @payload_data = JsonPayload.wrap(payload)
     end
@@ -56,6 +61,8 @@ module Movie::Remote
       message_type = nil.as(String?)
       payload_data = nil.as(JsonPayload?)
       timestamp = nil.as(Int64?)
+      control_stream = nil.as(String?)
+      control_sequence = nil.as(Int64?)
 
       pull.read_object do |key|
         case key
@@ -79,6 +86,10 @@ module Movie::Remote
                          end
         when "timestamp"
           timestamp = pull.read_int
+        when "control_stream"
+          control_stream = pull.read_string_or_null
+        when "control_sequence"
+          control_sequence = pull.read_int_or_null
         else
           pull.skip
         end
@@ -91,6 +102,8 @@ module Movie::Remote
       @message_type = message_type || pull.raise("Missing JSON attribute: message_type")
       @payload_data = payload_data || pull.raise("Missing JSON attribute: payload")
       @timestamp = timestamp || pull.raise("Missing JSON attribute: timestamp")
+      @control_stream = control_stream
+      @control_sequence = control_sequence
     end
 
     # Dynamic payload access is materialized lazily. Normal registered message
@@ -117,6 +130,12 @@ module Movie::Remote
         json.field("message_type", @message_type)
         json.field("payload") { @payload_data.to_json(json) }
         json.field("timestamp", @timestamp)
+        if control_stream = @control_stream
+          json.field("control_stream", control_stream)
+        end
+        if control_sequence = @control_sequence
+          json.field("control_sequence", control_sequence)
+        end
       end
     end
 
@@ -187,12 +206,41 @@ module Movie::Remote
     end
 
     # Creates a handshake envelope.
-    def self.handshake(system_name : String, address : String) : WireEnvelope
+    def self.handshake(handshake : AssociationHandshake) : WireEnvelope
       new(
         kind: Kind::HANDSHAKE,
         target_path: "",
         message_type: "handshake",
-        payload: HandshakePayload.new(system_name, address)
+        payload: handshake
+      )
+    end
+
+    # Compatibility helper for callers that do not need custom association
+    # settings. It still emits the current versioned handshake.
+    def self.handshake(system_name : String, address : String) : WireEnvelope
+      handshake(AssociationHandshake.create(
+        system: system_name,
+        address: address,
+        node_uid: "legacy-#{system_name}",
+        association_id: UUID.random.to_s
+      ))
+    end
+
+    def self.handshake_ack(handshake : AssociationHandshake) : WireEnvelope
+      new(
+        kind: Kind::HANDSHAKE_ACK,
+        target_path: "",
+        message_type: "handshake_ack",
+        payload: handshake
+      )
+    end
+
+    def self.handshake_reject(reason : String) : WireEnvelope
+      new(
+        kind: Kind::HANDSHAKE_REJECT,
+        target_path: "",
+        message_type: "handshake_reject",
+        payload: HandshakeRejection.new(reason)
       )
     end
 
@@ -203,6 +251,26 @@ module Movie::Remote
         target_path: "",
         message_type: "heartbeat",
         payload: EmptyPayload.new
+      )
+    end
+
+    def self.heartbeat_ack : WireEnvelope
+      new(
+        kind: Kind::HEARTBEAT_ACK,
+        target_path: "",
+        message_type: "heartbeat_ack",
+        payload: EmptyPayload.new
+      )
+    end
+
+    def self.control_ack(stream : String, sequence : Int64) : WireEnvelope
+      new(
+        kind: Kind::CONTROL_ACK,
+        target_path: "",
+        message_type: "control_ack",
+        payload: EmptyPayload.new,
+        control_stream: stream,
+        control_sequence: sequence
       )
     end
   end

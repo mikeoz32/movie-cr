@@ -535,6 +535,43 @@ describe Movie::Config do
 end
 
 describe Movie::ActorSystemConfig do
+  it "builds remoting association settings for automatic startup" do
+    config = Movie::Config.builder
+      .set("name", "configured-remoting")
+      .set("remoting.enabled", true)
+      .set("remoting.host", "127.0.0.1")
+      .set("remoting.port", 0)
+      .set("remoting.stripe-count", 1)
+      .set_duration("remoting.handshake-timeout", 750.milliseconds)
+      .set_duration("remoting.reconnect.min-backoff", 25.milliseconds)
+      .set_duration("remoting.reconnect.max-backoff", 400.milliseconds)
+      .set("remoting.reconnect.factor", 1.5)
+      .set("remoting.reconnect.jitter", 0.1)
+      .set_duration("remoting.heartbeat.interval", 250.milliseconds)
+      .set_duration("remoting.heartbeat.timeout", 2.seconds)
+      .set("remoting.control-buffer-capacity", 321)
+      .set("remoting.shared-secret", "configured-secret")
+      .build
+    system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, config)
+
+    begin
+      settings = system.remote.not_nil!.settings
+      settings.handshake_timeout.should eq(750.milliseconds)
+      settings.reconnect_min_backoff.should eq(25.milliseconds)
+      settings.reconnect_max_backoff.should eq(400.milliseconds)
+      settings.reconnect_factor.should eq(1.5)
+      settings.reconnect_jitter.should eq(0.1)
+      settings.heartbeat_interval.should eq(250.milliseconds)
+      settings.heartbeat_timeout.should eq(2.seconds)
+      settings.control_buffer_capacity.should eq(321)
+      settings.shared_secret.should eq("configured-secret")
+    ensure
+      system.shutdown(1.second)
+    end
+  end
+end
+
+describe Movie::ActorSystemConfig do
   it "publishes one canonical schema for feature configuration" do
     config = Movie::ActorSystemConfig.default
 

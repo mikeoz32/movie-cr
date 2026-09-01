@@ -76,6 +76,41 @@ describe Movie::Remote::WireEnvelope do
       env.payload["system"].as_s.should eq("my-system")
       env.payload["address"].as_s.should eq("movie.tcp://my-system@127.0.0.1:2552")
     end
+
+    it "carries a signed versioned association identity" do
+      handshake = Movie::Remote::AssociationHandshake.create(
+        system: "my-system",
+        address: "movie.tcp://my-system@127.0.0.1:2552",
+        node_uid: "node-1",
+        association_id: "association-1",
+        shared_secret: "cluster-secret"
+      )
+
+      envelope = Movie::Remote::WireEnvelope.handshake(handshake)
+      decoded = Movie::Remote::WireEnvelope.from_json(envelope.to_json)
+      payload = Movie::Remote::AssociationHandshake.from_json(decoded.payload_data.json_source)
+
+      payload.protocol_version.should eq(Movie::Remote::PROTOCOL_VERSION)
+      payload.capabilities.should contain(Movie::Remote::CAPABILITY_CONTROL_ACKS)
+      payload.authenticated?("cluster-secret").should be_true
+      payload.authenticated?("wrong-secret").should be_false
+    end
+
+    it "creates explicit handshake acknowledgements and rejections" do
+      ack = Movie::Remote::WireEnvelope.handshake_ack(
+        Movie::Remote::AssociationHandshake.create(
+          system: "server",
+          address: "movie.tcp://server@127.0.0.1:2552",
+          node_uid: "server-node",
+          association_id: "association-1"
+        )
+      )
+      rejection = Movie::Remote::WireEnvelope.handshake_reject("unsupported protocol version")
+
+      ack.kind.should eq(Movie::Remote::WireEnvelope::Kind::HANDSHAKE_ACK)
+      rejection.kind.should eq(Movie::Remote::WireEnvelope::Kind::HANDSHAKE_REJECT)
+      rejection.payload["reason"].as_s.should eq("unsupported protocol version")
+    end
   end
 
   describe ".heartbeat" do

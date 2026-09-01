@@ -1,6 +1,6 @@
 # Remoting
 
-Remoting is an experimental MVP. The current implementation is suitable for validating typed message delivery between two Movie actor systems, but it is not yet a production cluster transport.
+Remoting is a production-beta association transport. It provides restart-tolerant point-to-point delivery between Movie actor systems, but it is not cluster membership, failure voting, sharding, or a durable messaging system.
 
 ## Supported Workflows
 
@@ -11,9 +11,16 @@ The current protocol supports:
 - sender path metadata for inbound user messages when the sender has a registered path;
 - remote `Stop`, `Watch`, `Unwatch`, `Terminated`, and `Failed` system messages;
 - TCP connections managed through striped connection pools;
+- versioned handshake negotiation with node UID, socket generation, and capabilities;
+- bounded exponential reconnect with jitter while existing remote refs stay valid;
+- heartbeat failure detection in both directions;
+- acknowledged, sequenced, and deduplicated outbound system/control delivery;
+- optional HMAC handshake authentication and application-owned transport wrapping hooks;
 - binding to port `0` for test or dynamically allocated local ports.
 
-The protocol does not currently provide authentication, encryption, reconnection, delivery acknowledgements, protocol version negotiation, or durable delivery guarantees. Remote watcher registrations are tied to the connection that created them; a disconnect does not currently purge those watcher references automatically, so applications must unwatch or recreate watchers after reconnecting.
+User messages deliberately remain ordered-per-stripe, at-most-once traffic. A message accepted by the current socket writer is not a delivery acknowledgement and is never replayed across a socket generation. Remote asks fail when their carrying generation is lost. Use the persistence transactional outbox when a business message must survive process or network failure.
+
+Remote watches are owned by the inbound socket generation. Disconnect cleanup sends compensating `Unwatch` messages locally, so dead remote watcher refs do not accumulate. An application that wants to continue watching after reconnect must issue a new `Watch`.
 
 ## Message Registration
 
@@ -31,7 +38,9 @@ Outgoing registered messages retain their `JSON::Serializable` value until frame
 
 Encoder/decoder buffers retain at most 1 MiB per connection. Connection-owned decoders also reuse their JSON pull parser, lexer token, object stack, string buffer, and a pool of at most 256 JSON keys. Larger frames up to the 16 MiB protocol limit use temporary storage and release oversized lexer storage so a single large message does not permanently multiply memory across all stripes.
 
-Each TCP connection owns one writer fiber and a bounded FIFO of at most 4,096 envelopes. A successful remote `tell` means the envelope was accepted into that queue; it is not a delivery acknowledgement. Producers return without performing socket IO while capacity is available and are backpressured when the queue is full. The writer drains up to 128 ready frames and emits chunks near 64 KiB without adding a timer delay, preserving the existing sequence of `[length][JSON]` frames and per-stripe FIFO order. Connection shutdown rejects new work, releases blocked producers, and discards queued envelopes that can no longer be delivered.
+Each TCP connection owns one writer fiber and a bounded FIFO of at most 4,096 envelopes. A successful remote `tell` means the envelope was accepted into the active generation's queue; it is not a delivery acknowledgement. Producers return without performing socket IO while capacity is available and are backpressured when the queue is full. The writer drains up to 128 ready frames and emits chunks near 64 KiB without adding a timer delay, preserving the existing sequence of `[length][JSON]` frames and per-stripe FIFO order. Generation loss rejects new user work, releases blocked producers, and discards queued user envelopes that can no longer be delivered.
+
+Every stripe is a long-lived logical `Connection` with `Disconnected`, `Connecting`, `Handshaking`, `Active`, `Backoff`, and `Stopped` states. The socket and writer are generation-owned and replaceable. Reconnect delay grows from `50ms` to `2s` by default, with `20%` jitter. Existing `RemoteActorRef` values retain the logical connection and resume sending when it becomes active.
 
 Inbound connections disable the Crystal socket's built-in read buffering and replace it with one connection-owned 32 KiB buffer whose ready-byte count is observable by the transport. After the first blocking frame decode, the reader decodes up to 128 complete frames already present in that buffer before handing the batch to delivery; it never waits for another frame to fill a batch. Partial headers and payloads continue through normal blocking reads into the decoder's existing bounded frame storage. This preserves one transport input buffer per connection while avoiding a new mailbox dispatch for nearly every decoded message. Canonical registered actor paths use an exact lookup cache on delivery; alternate local/remote address forms retain the normalized parsing fallback.
 
@@ -71,7 +80,7 @@ remote << Ping.new(1)
 
 `RemoteActorRef#tell_from` can include sender path metadata when the sender is registered in the local `PathRegistry`. The receiving actor reads it through `context.sender`.
 
-Remote delivery remains experimental and has no acknowledgement or retry contract. In particular, an envelope accepted by the outbound queue may still be lost if later serialization or socket IO fails; those failures are logged and the connection is closed for IO errors.
+User delivery has no acknowledgement or retry contract. In particular, an envelope accepted by the outbound queue may still be lost if later serialization or socket IO fails; those failures are logged and IO errors replace the socket generation.
 
 ## Remote Ask
 
@@ -100,7 +109,7 @@ The high-level `ActorContext#ask` and `ActorSystem#ask` overloads currently acce
 
 ## System Messages
 
-The supported remote subset is deliberately explicit:
+The supported remote subset is deliberately explicit. System messages initiated through `RemoteActorRef#send_system` receive a monotonic per-stripe control sequence, remain in a bounded pending buffer, and are replayed after reconnect until the receiver acknowledges them. The receiving node deduplicates the stable node/stream/sequence tuple before local routing.
 
 | Message | Meaning |
 |---|---|
@@ -110,9 +119,36 @@ The supported remote subset is deliberately explicit:
 | `Terminated` | Notify a remote watcher that an actor stopped. |
 | `Failed` | Forward a failure notification with remote class and message metadata. |
 
-`PreStart`, `PostStart`, `PreStop`, `PostStop`, `PreRestart`, `PostRestart`, `Restart`, and `Terminate` are not wire protocol messages. Sending an unsupported message through `RemoteActorRef#send_system` raises `RemoteUnsupportedSystemMessageError`; inbound unsupported messages are rejected and logged.
+`PreStart`, `PostStart`, `PreStop`, `PostStop`, `PreRestart`, `PostRestart`, `Restart`, and `Terminate` are not wire protocol messages. Sending an unsupported message through `RemoteActorRef#send_system` raises `RemoteUnsupportedSystemMessageError`; inbound unsupported messages are rejected and logged. The default pending-control limit is 1,024 messages per stripe; saturation rejects new control work instead of growing memory without bound.
 
 The high-level `ActorContext#watch(remote_ref)` API is not available because `ActorContext#watch` currently accepts local typed `ActorRef` values. Remote watch is exposed through the lower-level system-message API and should be used only when the watcher path is registered.
+
+## Association configuration
+
+Programmatic settings can be supplied as the fourth `enable_remoting` argument:
+
+```crystal
+settings = Movie::Remote::AssociationSettings.new(
+  reconnect_min_backoff: 50.milliseconds,
+  reconnect_max_backoff: 2.seconds,
+  heartbeat_interval: 1.second,
+  heartbeat_timeout: 5.seconds,
+  control_buffer_capacity: 1024,
+  shared_secret: ENV["MOVIE_REMOTE_SECRET"]?
+)
+
+system.enable_remoting("0.0.0.0", 2552, 8, settings)
+```
+
+The same settings are available under `remoting.*` configuration keys. Both peers must use the same non-empty shared secret when authentication is enabled. The handshake sends an HMAC-SHA256 proof over the protocol identity and nonce; it never sends the secret itself.
+
+HMAC authenticates the handshake but does not encrypt actor traffic. Deployments that need TLS supply `client_transport_factory` and `server_transport_wrapper` callbacks returning an `IO`, typically an application-configured `OpenSSL::SSL::Socket::Client` and `Server`. Certificate loading, rotation, trust roots, and server-name policy intentionally remain application responsibilities.
+
+## Failure detection and observability
+
+An active outbound generation sends heartbeats at the configured interval and reconnects after the peer has been silent for the configured timeout. Inbound generations apply the same silence timeout, so a half-open or stalled client cannot retain server-side watch state indefinitely.
+
+`RemoteActorRef#connection.stats` returns a point-in-time `ConnectionStats` snapshot with state, socket generation, connect attempts, successful connections, disconnects, heartbeat timeouts, protocol failures, last-received timestamp, pending asks, and pending control messages. `RemoteExtension#pool_stats` retains the per-address stripe summary.
 
 ## Shutdown
 
@@ -131,6 +167,15 @@ Run the focused remoting specs:
 
 ```bash
 crystal spec spec/movie/remote/integration_spec.cr spec/movie/remote/e2e_spec.cr \
+  -Dpreview_mt -Dexecution_context
+crystal spec spec/movie/remote/association_spec.cr -Dpreview_mt -Dexecution_context
+```
+
+Opt-in resilience and measurement runs:
+
+```bash
+MOVIE_STRESS=1 crystal spec spec/movie/remote/stress_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_BENCH=1 crystal spec --release spec/movie/remote/association_benchmark_spec.cr \
   -Dpreview_mt -Dexecution_context
 ```
 

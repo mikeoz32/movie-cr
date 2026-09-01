@@ -146,7 +146,7 @@ module Movie::Remote
         payload: payload
       )
 
-      unless @dedicated_connection.send(envelope)
+      unless @dedicated_connection.send_control(envelope)
         Log.warn { "Failed to send system message to #{@target_path}" }
       end
     end

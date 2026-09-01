@@ -870,6 +870,15 @@ module Movie
   #   remoting.host                  - Bind host for remoting
   #   remoting.port                  - Bind port for remoting
   #   remoting.stripe-count          - Connection pool stripe count
+  #   remoting.handshake-timeout     - Maximum handshake wait
+  #   remoting.reconnect.min-backoff - Initial reconnect delay
+  #   remoting.reconnect.max-backoff - Maximum reconnect delay
+  #   remoting.reconnect.factor      - Exponential reconnect multiplier
+  #   remoting.reconnect.jitter      - Reconnect randomization (0.0-1.0)
+  #   remoting.heartbeat.interval    - Heartbeat interval
+  #   remoting.heartbeat.timeout     - Peer silence timeout
+  #   remoting.control-buffer-capacity - Pending reliable control limit
+  #   remoting.shared-secret         - Optional HMAC handshake secret
   #
   module ActorSystemConfig
     NAME                          = "name"
@@ -886,6 +895,15 @@ module Movie
     REMOTING_HOST                 = "remoting.host"
     REMOTING_PORT                 = "remoting.port"
     REMOTING_STRIPE_COUNT         = "remoting.stripe-count"
+    REMOTING_HANDSHAKE_TIMEOUT    = "remoting.handshake-timeout"
+    REMOTING_RECONNECT_MIN        = "remoting.reconnect.min-backoff"
+    REMOTING_RECONNECT_MAX        = "remoting.reconnect.max-backoff"
+    REMOTING_RECONNECT_FACTOR     = "remoting.reconnect.factor"
+    REMOTING_RECONNECT_JITTER     = "remoting.reconnect.jitter"
+    REMOTING_HEARTBEAT_INTERVAL   = "remoting.heartbeat.interval"
+    REMOTING_HEARTBEAT_TIMEOUT    = "remoting.heartbeat.timeout"
+    REMOTING_CONTROL_CAPACITY     = "remoting.control-buffer-capacity"
+    REMOTING_SHARED_SECRET        = "remoting.shared-secret"
     EXECUTOR_POOL_SIZE            = "executor.pool-size"
     EXECUTOR_QUEUE_CAPACITY       = "executor.queue-capacity"
     PERSISTENCE_DB_PATH           = "persistence.db-path"
@@ -922,6 +940,15 @@ module Movie
         .set(REMOTING_HOST, "127.0.0.1")
         .set(REMOTING_PORT, 2552)
         .set(REMOTING_STRIPE_COUNT, 8)
+        .set_duration(REMOTING_HANDSHAKE_TIMEOUT, 2.seconds)
+        .set_duration(REMOTING_RECONNECT_MIN, 50.milliseconds)
+        .set_duration(REMOTING_RECONNECT_MAX, 2.seconds)
+        .set(REMOTING_RECONNECT_FACTOR, 2.0)
+        .set(REMOTING_RECONNECT_JITTER, 0.2)
+        .set_duration(REMOTING_HEARTBEAT_INTERVAL, 1.second)
+        .set_duration(REMOTING_HEARTBEAT_TIMEOUT, 5.seconds)
+        .set(REMOTING_CONTROL_CAPACITY, 1024)
+        .set(REMOTING_SHARED_SECRET, "")
 
         # Executor defaults
         .set(EXECUTOR_POOL_SIZE, 4)

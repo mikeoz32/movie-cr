@@ -14,6 +14,7 @@ module Movie::Remote
     getter address : Address
     getter stripe_count : Int32
     @connected : Bool = false
+    @stopped : Bool = false
 
     @stripes : Array(Connection)
     @round_robin : Atomic(Int32) = Atomic(Int32).new(0)
@@ -23,7 +24,10 @@ module Movie::Remote
       @address : Address,
       @path_registry : Movie::PathRegistry,
       @system : Movie::AbstractActorSystem,
+      @local_address : Proc(Address),
+      @node_uid : String,
       @stripe_count : Int32 = DEFAULT_STRIPE_COUNT,
+      @settings : AssociationSettings = AssociationSettings.new,
       @on_message : Proc(WireEnvelope, Nil)? = nil,
     )
       @stripes = Array(Connection).new(@stripe_count) do
@@ -31,6 +35,9 @@ module Movie::Remote
           address: @address,
           path_registry: @path_registry,
           system: @system,
+          local_address: @local_address,
+          node_uid: @node_uid,
+          settings: @settings,
           on_message: @on_message
         )
       end
@@ -62,7 +69,6 @@ module Movie::Remote
           Log.info { "Connected #{@stripe_count} stripes to #{@address}" }
         else
           Log.warn { "Only #{success_count}/#{@stripe_count} stripes connected to #{@address}" }
-          @stripes.each(&.close)
         end
 
         @connected
@@ -70,7 +76,11 @@ module Movie::Remote
     end
 
     def connected? : Bool
-      @connected && @stripes.all?(&.connected?)
+      !@stopped && @stripes.all?(&.connected?)
+    end
+
+    def stopped? : Bool
+      @stopped
     end
 
     # Returns the connection for a specific actor path.
@@ -113,6 +123,8 @@ module Movie::Remote
 
     # Closes all connections.
     def close
+      return if @stopped
+      @stopped = true
       @connected = false
       @stripes.each(&.close)
       Log.info { "Closed #{@stripe_count} stripes to #{@address}" }
