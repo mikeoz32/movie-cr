@@ -2,6 +2,8 @@ require "json"
 require "./model"
 
 module Movie::Cluster
+  CLUSTER_DAEMON_NAME = "cluster"
+
   struct ProtocolMessage
     include JSON::Serializable
 

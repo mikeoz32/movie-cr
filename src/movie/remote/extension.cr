@@ -7,6 +7,13 @@ require "./message_registry"
 require "../path"
 
 module Movie::Remote
+  # Implemented by inbound sender references whose process incarnation was
+  # authenticated by the remoting association handshake.
+  module RemotePeerIdentity
+    abstract def remote_address : Address?
+    abstract def remote_node_uid : String?
+  end
+
   record RemoteAskFailurePayload, error_class : String, message : String do
     include JSON::Serializable
   end
@@ -80,14 +87,21 @@ module Movie::Remote
     Log = ::Log.for(self)
 
     private class RemoteSystemRef < Movie::ActorRefBase
+      include RemotePeerIdentity
+
       def initialize(
         @path_registry : Movie::PathRegistry,
         @connection : InboundConnection?,
         @control_sender : Proc(WireEnvelope, Bool)?,
+        @remote_address : Address?,
+        @remote_node_uid : String?,
         path : ActorPath,
       )
         super(0, path)
       end
+
+      getter remote_address : Address?
+      getter remote_node_uid : String?
 
       def send_system(message : Movie::SystemMessage)
         path = self.path || raise RemoteDeliveryError.new("Remote system ref is missing a path")
@@ -354,7 +368,14 @@ module Movie::Remote
       if ask_request && correlation_id && conn
         RemoteAskResponseSenderRef.new(conn, correlation_id, path)
       else
-        path ? RemoteSystemRef.new(path_registry, nil, nil, path) : nil
+        path ? RemoteSystemRef.new(
+          path_registry,
+          nil,
+          nil,
+          conn.try(&.remote_address),
+          conn.try(&.remote_node_uid),
+          path
+        ) : nil
       end
     end
 
@@ -434,7 +455,14 @@ module Movie::Remote
       control_sender = if conn
                          ->(envelope : WireEnvelope) { pool_for(path.address).send_control(envelope) }
                        end
-      RemoteSystemRef.new(path_registry, conn, control_sender, path)
+      RemoteSystemRef.new(
+        path_registry,
+        conn,
+        control_sender,
+        conn.try(&.remote_address),
+        conn.try(&.remote_node_uid),
+        path
+      )
     rescue ex : ArgumentError
       raise RemoteUnsupportedSystemMessageError.new("Invalid remote actor path #{actor_path}: #{ex.message}")
     end

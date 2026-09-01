@@ -41,6 +41,44 @@ describe Movie::ExtensionRegistry do
 end
 
 describe Movie::Cluster::ClusterExtension do
+  it "rejects a protocol sender whose claimed UID differs from its remoting association" do
+    system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "identity-seed")
+    system.enable_remoting("127.0.0.1", 0, 1)
+    cluster = system.enable_cluster
+    claimed = Movie::Cluster::UniqueAddress.new(
+      Movie::Address.remote("spoofed-node", "127.0.0.1", 65_000),
+      "claimed-uid"
+    )
+    candidate = Movie::Cluster::Member.new(
+      claimed,
+      Movie::Cluster::MemberStatus::Joining,
+      [] of String,
+      1_i64,
+      claimed.node_uid
+    )
+    sender_path = Movie::ActorPath.new(claimed.address, ["system", Movie::Cluster::ClusterExtension::DAEMON_NAME])
+
+    begin
+      cluster.handle_protocol(
+        Movie::Cluster::ProtocolMessage.join(cluster.settings.cluster_name, claimed, candidate),
+        sender_path,
+        claimed.address,
+        "association-uid"
+      )
+      cluster.handle_protocol(
+        Movie::Cluster::ProtocolMessage.join(cluster.settings.cluster_name, claimed, candidate),
+        sender_path,
+        Movie::Address.remote("different-node", "127.0.0.1", 64_999),
+        claimed.node_uid
+      )
+
+      cluster.snapshot.member(claimed).should be_nil
+      cluster.stats.protocol_rejections.should eq(2)
+    ensure
+      system.shutdown(1.second)
+    end
+  end
+
   it "requires remoting and starts one idempotent seed extension" do
     unbound = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "cluster-unbound")
     expect_raises(Movie::Cluster::ClusterConfigurationError, /remoting/) do
@@ -61,6 +99,8 @@ describe Movie::Cluster::ClusterExtension do
       first.self_member.status.up?.should be_true
       first.self_member.roles.should eq(["backend"])
       first.snapshot.leader.should eq(first.self_unique_address)
+      first.down(first.self_unique_address).should be_false
+      first.self_member.status.up?.should be_true
 
       daemon_path = Movie::ActorPath.new(system.address, ["system", Movie::Cluster::ClusterExtension::DAEMON_NAME])
       system.path_registry.resolve(daemon_path).should_not be_nil
@@ -180,6 +220,7 @@ describe Movie::Cluster::ClusterExtension do
         leaving.down(seed.self_unique_address)
       end
       leaving.leave.should be_true
+      leaving.await_removed(3.seconds)
       wait_for_cluster(3.seconds) do
         seed.snapshot.member(leaving.self_unique_address).nil? &&
           leaving.snapshot.member(leaving.self_unique_address).nil?

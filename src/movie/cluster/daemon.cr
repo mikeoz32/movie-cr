@@ -6,7 +6,14 @@ module Movie::Cluster
     end
 
     def receive(message : ProtocolMessage, context : Movie::ActorContext(ProtocolMessage))
-      @extension.handle_protocol(message, context.sender.try(&.path))
+      sender = context.sender
+      remote_peer = sender.as?(Movie::Remote::RemotePeerIdentity)
+      @extension.handle_protocol(
+        message,
+        sender.try(&.path),
+        remote_peer.try(&.remote_address),
+        remote_peer.try(&.remote_node_uid)
+      )
       Movie::Behaviors(ProtocolMessage).same
     end
   end

@@ -89,6 +89,11 @@ module Movie::Remote
       @remote_address
     end
 
+    # The process incarnation authenticated by the association handshake.
+    def remote_node_uid : String?
+      @remote_node_uid
+    end
+
     # Sets the remote address (from handshake).
     def remote_address=(@remote_address : Address?)
     end
