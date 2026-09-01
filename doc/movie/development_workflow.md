@@ -107,6 +107,6 @@ Copy this checklist into task notes when executing an epic:
 ## Repository-Specific Guidance
 
 - Treat remoting associations as a production beta while preserving the at-most-once user-message contract and the cluster limitations documented in [remoting.md](remoting.md).
-- Treat cluster membership as production alpha: reachability is not downing, manual downing requires external partition resolution, and sharding/ownership remain outside its contract.
+- Treat cluster membership and sharding as production alpha: reachability is not downing, manual downing requires external partition resolution, and persistent sharding must fail closed until PostgreSQL lease ownership is unambiguous.
 - Treat persistence as stable enough to extend, but require regression tests before touching recovery or storage semantics.
 - Keep stdout noise out of default runtime paths; use structured logging instead.

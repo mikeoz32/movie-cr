@@ -31,7 +31,13 @@ module Movie
     # Unlike the legacy listener behavior, this ref does not own a mailbox or
     # consume an actor-system ID. Promise completion is the synchronization
     # point: only the first reply, timeout, or termination signal wins.
-    class LocalResponseRef(T) < ActorRefBase
+    abstract class LocalResponseRefBase < ActorRefBase
+      abstract def receive_serializable(value : JSON::Serializable) : Nil
+      abstract def receive_failure(error : Exception) : Nil
+      abstract def receive_cancelled : Nil
+    end
+
+    class LocalResponseRef(T) < LocalResponseRefBase
       getter future : Future(T)
 
       @promise : Promise(T)
@@ -66,6 +72,25 @@ module Movie
                       false
                     end
         finish if completed
+      end
+
+      def receive_serializable(value : JSON::Serializable) : Nil
+        case value
+        when T
+          receive(Success(T).new(value))
+        else
+          receive(Failure(T).new(TypeCastError.new(
+            "Expected ask response #{T}, not #{value.class}"
+          )))
+        end
+      end
+
+      def receive_failure(error : Exception) : Nil
+        receive(Failure(T).new(error))
+      end
+
+      def receive_cancelled : Nil
+        receive(Cancelled(T).new)
       end
 
       def timeout : Nil
@@ -134,6 +159,33 @@ module Movie
 
     def self.cancel(sender : ActorRefBase?, response_type : T.class) forall T
       reply(sender, Cancelled(T).new)
+    end
+
+    def self.reply_serializable_if_asked(sender : ActorRefBase?, value : JSON::Serializable) : Nil
+      return unless sender
+      if ref = sender.as?(LocalResponseRefBase)
+        ref.receive_serializable(value)
+      elsif ref = sender.as?(::Movie::Remote::RemoteAskResponseSenderRef)
+        ref.reply_success(value)
+      end
+    end
+
+    def self.fail_dynamic_if_asked(sender : ActorRefBase?, error : Exception) : Nil
+      return unless sender
+      if ref = sender.as?(LocalResponseRefBase)
+        ref.receive_failure(error)
+      elsif ref = sender.as?(::Movie::Remote::RemoteAskResponseSenderRef)
+        ref.reply_failure(error)
+      end
+    end
+
+    def self.cancel_dynamic_if_asked(sender : ActorRefBase?) : Nil
+      return unless sender
+      if ref = sender.as?(LocalResponseRefBase)
+        ref.receive_cancelled
+      elsif ref = sender.as?(::Movie::Remote::RemoteAskResponseSenderRef)
+        ref.reply_cancelled
+      end
     end
 
     # Best-effort reply that only responds when the sender is an ask endpoint.

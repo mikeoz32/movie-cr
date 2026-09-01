@@ -1,6 +1,20 @@
 require "../spec_helper"
 require "../../src/movie"
 
+private class DrainBeforeStopProbe < Movie::AbstractBehavior(Int32)
+  def initialize(@started : Channel(Nil), @release : Channel(Nil), @received : Channel(Int32))
+  end
+
+  def receive(message : Int32, context : Movie::ActorContext(Int32))
+    if message == 1
+      @started.send(nil)
+      @release.receive
+    end
+    @received.send(message)
+    Movie::Behaviors(Int32).same
+  end
+end
+
 private def boot_actor_system_stdout : {Process::Status, String}
   stdout = IO::Memory.new
   root = File.expand_path("../..", __DIR__)
@@ -270,5 +284,24 @@ describe "Movie actor lifecycle" do
     system << :probe
 
     receive_events(events, 1, 75.milliseconds).should eq(["probe_processed"])
+  end
+
+  it "drains accepted user messages before an internal graceful stop" do
+    started = Channel(Nil).new(1)
+    release = Channel(Nil).new(1)
+    received = Channel(Int32).new(151)
+    system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same)
+    actor = system.spawn(DrainBeforeStopProbe.new(started, release, received))
+
+    actor << 1
+    started.receive
+    (2..151).each { |value| actor << value }
+    actor.send_system(Movie::DRAIN_AND_STOP)
+    release.send(nil)
+
+    Array(Int32).new(151) { received.receive }.should eq((1..151).to_a)
+    eventually(1.second) { system.context(actor.id).nil? }.should be_true
+  ensure
+    system.try &.shutdown
   end
 end

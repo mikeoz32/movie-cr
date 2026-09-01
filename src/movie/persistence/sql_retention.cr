@@ -6,6 +6,7 @@ module Movie
         with_connection do |connection|
           result = connection.transaction do |transaction|
             conn = transaction.connection
+            validate_fence(conn, message.fence)
             snapshot_sequence_nr = conn.query_one?(
               bind_sql("SELECT sequence_nr FROM snapshot_store WHERE persistence_id = ?"),
               args: [message.persistence_id] of DB::Any,

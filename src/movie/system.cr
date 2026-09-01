@@ -2,12 +2,13 @@ module Movie
   abstract class SystemMessage
   end
 
-  PRE_START  = PreStart.new.as(SystemMessage)
-  POST_START = PostStart.new.as(SystemMessage)
-  STOP       = Stop.new.as(SystemMessage)
-  PRE_STOP   = PreStop.new.as(SystemMessage)
-  POST_STOP  = PostStop.new.as(SystemMessage)
-  RESUME     = Resume.new.as(SystemMessage)
+  PRE_START      = PreStart.new.as(SystemMessage)
+  POST_START     = PostStart.new.as(SystemMessage)
+  STOP           = Stop.new.as(SystemMessage)
+  DRAIN_AND_STOP = DrainAndStop.new.as(SystemMessage)
+  PRE_STOP       = PreStop.new.as(SystemMessage)
+  POST_STOP      = PostStop.new.as(SystemMessage)
+  RESUME         = Resume.new.as(SystemMessage)
 
   # Lifecycle Events
   class PreStart < SystemMessage
@@ -46,6 +47,11 @@ module Movie
   # Actor Commands
   class Stop < SystemMessage
     # request actor to stop gracefully
+  end
+
+  # Stops after user messages already accepted by the mailbox have run.
+  # New deliveries racing the empty-mailbox boundary may still be rejected.
+  class DrainAndStop < SystemMessage
   end
 
   class Terminate < SystemMessage

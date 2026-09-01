@@ -100,7 +100,7 @@ module Movie::Remote
     # Sends a message to the remote actor with sender information.
     def tell_from(sender : Movie::ActorRefBase?, message : T)
       sender_path_str = if sender
-                          @path_registry.path_for(sender).try(&.to_s)
+                          (@path_registry.path_for(sender) || sender.path).try(&.to_s)
                         else
                           nil
                         end
@@ -154,8 +154,28 @@ module Movie::Remote
     # Performs an ask (request-reply) to the remote actor.
     # Returns a Future that will be completed with the response.
     def ask(message : T, response_type : R.class, timeout : Time::Span = 30.seconds) : Movie::Future(R) forall R
-      correlation_id = UUID.random.to_s
       promise = Movie::Promise(R).new
+      response = ask_serializable(message, timeout)
+      response.on_success do |value|
+        begin
+          promise.try_success(value.as(R))
+        rescue error
+          promise.try_failure(error)
+        end
+      end
+      response.on_failure { |error| promise.try_failure(error) }
+      response.on_cancel { promise.try_cancel }
+      promise.future
+    end
+
+    # Internal dynamic ask used by protocol coordinators that must relay a
+    # registered response without knowing its concrete type at compile time.
+    def ask_serializable(
+      message : T,
+      timeout : Time::Span = 30.seconds,
+    ) : Movie::Future(JSON::Serializable)
+      correlation_id = UUID.random.to_s
+      promise = Movie::Promise(JSON::Serializable).new
 
       tag, payload = MessageRegistry.prepare(message)
 
@@ -189,8 +209,7 @@ module Movie::Remote
                 promise.cancel
               else
                 wrapper = MessageRegistry.deserialize(response.message_type, response.payload_data)
-                result = wrapper.unwrap(R)
-                promise.success(result)
+                promise.success(wrapper.value)
               end
             rescue ex
               promise.failure(ex)

@@ -159,12 +159,83 @@ module Movie
       last_error : String?
 
     record OperationId, value : String do
+      include JSON::Serializable
+
       def initialize(@value : String)
         raise ArgumentError.new("Persistence operation id cannot be empty") if @value.empty?
       end
 
       def self.random : self
         new(UUID.random.to_s)
+      end
+    end
+
+    record ShardLeaseKey, cluster_name : String, entity_type : String, shard_id : Int32 do
+      def initialize(@cluster_name : String, @entity_type : String, @shard_id : Int32)
+        raise ArgumentError.new("Shard lease cluster name cannot be empty") if @cluster_name.empty?
+        raise ArgumentError.new("Shard lease entity type cannot be empty") if @entity_type.empty?
+        raise ArgumentError.new("Shard lease id cannot be negative") if @shard_id < 0
+      end
+    end
+
+    record ShardLeaseToken,
+      key : ShardLeaseKey,
+      owner : String,
+      epoch : Int64,
+      lease_until_epoch_ms : Int64
+
+    class StaleShardOwnerError < Exception
+      getter token : ShardLeaseToken
+
+      def initialize(@token : ShardLeaseToken)
+        super(
+          "Stale shard owner #{@token.owner} for #{@token.key.cluster_name}/" +
+          "#{@token.key.entity_type}/#{@token.key.shard_id} at epoch #{@token.epoch}"
+        )
+      end
+    end
+
+    struct AcquireShardLease
+      include RetryableConnectionRequest(ShardLeaseToken?)
+      getter key : ShardLeaseKey
+      getter owner : String
+      getter lease_ms : Int64
+
+      def initialize(@key : ShardLeaseKey, @owner : String, lease : Time::Span)
+        raise ArgumentError.new("Shard lease owner cannot be empty") if @owner.empty?
+        raise ArgumentError.new("Shard lease duration must be positive") unless lease > Time::Span.zero
+        @lease_ms = lease.total_milliseconds.to_i64
+      end
+
+      def execute(connection : BackendConnection) : ShardLeaseToken?
+        connection.acquire_shard_lease(self)
+      end
+    end
+
+    struct RenewShardLease
+      include RetryableConnectionRequest(ShardLeaseToken?)
+      getter token : ShardLeaseToken
+      getter lease_ms : Int64
+
+      def initialize(@token : ShardLeaseToken, lease : Time::Span)
+        raise ArgumentError.new("Shard lease duration must be positive") unless lease > Time::Span.zero
+        @lease_ms = lease.total_milliseconds.to_i64
+      end
+
+      def execute(connection : BackendConnection) : ShardLeaseToken?
+        connection.renew_shard_lease(self)
+      end
+    end
+
+    struct ReleaseShardLease
+      include RetryableConnectionRequest(Bool)
+      getter token : ShardLeaseToken
+
+      def initialize(@token : ShardLeaseToken)
+      end
+
+      def execute(connection : BackendConnection) : Bool
+        connection.release_shard_lease(self)
       end
     end
 
@@ -254,6 +325,7 @@ module Movie
       getter operation_id : OperationId
       getter events : Array(SerializedEvent)
       getter outbox : Array(OutboxEntry)
+      getter fence : ShardLeaseToken?
 
       def initialize(
         @persistence_id : String,
@@ -261,6 +333,7 @@ module Movie
         @operation_id : OperationId,
         @events : Array(SerializedEvent),
         @outbox : Array(OutboxEntry) = [] of OutboxEntry,
+        @fence : ShardLeaseToken? = nil,
       )
       end
 
@@ -286,8 +359,13 @@ module Movie
       include RetryableConnectionRequest(Bool)
       getter persistence_id : String
       getter snapshot : SnapshotRecord
+      getter fence : ShardLeaseToken?
 
-      def initialize(@persistence_id : String, @snapshot : SnapshotRecord)
+      def initialize(
+        @persistence_id : String,
+        @snapshot : SnapshotRecord,
+        @fence : ShardLeaseToken? = nil,
+      )
       end
 
       def execute(connection : BackendConnection) : Bool
@@ -311,8 +389,9 @@ module Movie
     struct DeleteSnapshot
       include RetryableConnectionRequest(Bool)
       getter persistence_id : String
+      getter fence : ShardLeaseToken?
 
-      def initialize(@persistence_id : String)
+      def initialize(@persistence_id : String, @fence : ShardLeaseToken? = nil)
       end
 
       def execute(connection : BackendConnection) : Bool
@@ -325,8 +404,13 @@ module Movie
       include RetryableConnectionRequest(RetentionResult)
       getter persistence_id : String
       getter sequence_nr : Int64
+      getter fence : ShardLeaseToken?
 
-      def initialize(@persistence_id : String, @sequence_nr : Int64)
+      def initialize(
+        @persistence_id : String,
+        @sequence_nr : Int64,
+        @fence : ShardLeaseToken? = nil,
+      )
         raise ArgumentError.new("Retention sequence number cannot be negative") if @sequence_nr < 0_i64
       end
 
@@ -410,6 +494,7 @@ module Movie
       getter manifest : String
       getter payload : String
       getter outbox : Array(OutboxEntry)
+      getter fence : ShardLeaseToken?
 
       def initialize(
         @persistence_id : String,
@@ -418,6 +503,7 @@ module Movie
         @manifest : String,
         @payload : String,
         @outbox : Array(OutboxEntry) = [] of OutboxEntry,
+        @fence : ShardLeaseToken? = nil,
       )
       end
 
@@ -444,12 +530,14 @@ module Movie
       getter expected_revision : Int64
       getter operation_id : OperationId
       getter outbox : Array(OutboxEntry)
+      getter fence : ShardLeaseToken?
 
       def initialize(
         @persistence_id : String,
         @expected_revision : Int64,
         @operation_id : OperationId,
         @outbox : Array(OutboxEntry) = [] of OutboxEntry,
+        @fence : ShardLeaseToken? = nil,
       )
       end
 
@@ -532,6 +620,7 @@ module Movie
                               DeleteEventsTo | RunMaintenance |
                               QueryEvents | LoadProjectionOffset | SaveProjectionOffset | DeleteProjectionOffset |
                               ClaimOutbox | AcknowledgeOutbox | ReleaseOutbox |
+                              AcquireShardLease | RenewShardLease | ReleaseShardLease |
                               SaveState | LoadState | DeleteState
 
     # Backend-neutral journal contract. Implementations must preserve operation-id
@@ -634,6 +723,18 @@ module Movie
 
       def release_outbox(message : ReleaseOutbox) : Bool
         raise NotImplementedError.new("Transactional outbox is not supported by this backend")
+      end
+
+      def acquire_shard_lease(message : AcquireShardLease) : ShardLeaseToken?
+        raise NotImplementedError.new("Shard leases are not supported by this persistence backend")
+      end
+
+      def renew_shard_lease(message : RenewShardLease) : ShardLeaseToken?
+        raise NotImplementedError.new("Shard leases are not supported by this persistence backend")
+      end
+
+      def release_shard_lease(message : ReleaseShardLease) : Bool
+        raise NotImplementedError.new("Shard leases are not supported by this persistence backend")
       end
 
       # Raw SQL requests are retained for compatibility with the low-level

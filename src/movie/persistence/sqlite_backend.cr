@@ -7,6 +7,10 @@ module Movie
         connection.exec("PRAGMA journal_mode = WAL")
       end
 
+      protected def current_epoch_ms_sql : String
+        "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
+      end
+
       protected def table_exists?(connection : DB::Connection, name : String) : Bool
         !connection.query_one?(
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",

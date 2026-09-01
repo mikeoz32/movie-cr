@@ -69,6 +69,14 @@ module Movie
         ) { |row| row.read }
       end
 
+      protected def current_epoch_ms_sql : String
+        "CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT)"
+      end
+
+      protected def fence_validation_lock_sql : String
+        " FOR UPDATE"
+      end
+
       protected def table_exists?(connection : DB::Connection, name : String) : Bool
         !connection.query_one?(
           bind_sql("SELECT table_name FROM information_schema.tables " +
@@ -172,6 +180,7 @@ module Movie
         %w(
           movie_schema_migration event_journal event_feed projection_checkpoint
           snapshot_store durable_state journal_operation state_operation persistence_outbox
+          shard_lease
         ).each do |table|
           connection.exec("VACUUM (ANALYZE) #{table}")
         end

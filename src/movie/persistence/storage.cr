@@ -93,12 +93,22 @@ module Movie
 
     struct GetEntity
       getter persistence_id : Id
-      getter spawn : Proc(Movie::ActorContext(GetEntity), Id, Movie::ActorRefBase)
+      getter fence : ShardLeaseToken?
+      getter spawn : Proc(Movie::ActorContext(GetEntity), Id, ShardLeaseToken?, Movie::ActorRefBase)
 
       def initialize(
         @persistence_id : Id,
-        @spawn : Proc(Movie::ActorContext(GetEntity), Id, Movie::ActorRefBase),
+        @spawn : Proc(Movie::ActorContext(GetEntity), Id, ShardLeaseToken?, Movie::ActorRefBase),
+        @fence : ShardLeaseToken? = nil,
       )
+      end
+
+      def initialize(
+        @persistence_id : Id,
+        spawn : Proc(Movie::ActorContext(GetEntity), Id, Movie::ActorRefBase),
+      )
+        @fence = nil
+        @spawn = ->(context : Movie::ActorContext(GetEntity), id : Id, _fence : ShardLeaseToken?) { spawn.call(context, id) }
       end
     end
 
@@ -108,35 +118,53 @@ module Movie
     class EntityRegistry < Movie::AbstractBehavior(RegistryMessage)
       def initialize
         @entities = {} of Id => Movie::ActorRefBase
+        @fences = {} of Id => ShardLeaseToken?
       end
 
       def receive(message, context)
         case message
         when GetEntity
           if ref = @entities[message.persistence_id]?
-            Movie::Ask.reply_if_asked(context.sender, ref)
-          else
-            ref = message.spawn.call(context, message.persistence_id)
-            if ref.path.nil?
-              ref.path = context.path.try { |p| p / Persistence.entity_name(message.persistence_id) }
+            if @fences[message.persistence_id]? == message.fence
+              Movie::Ask.reply_if_asked(context.sender, ref)
+              return Movie::Behaviors(RegistryMessage).same
             end
-            @entities[message.persistence_id] = ref
-            Movie::Ask.reply_if_asked(context.sender, ref)
+            @entities.delete(message.persistence_id)
+            @fences.delete(message.persistence_id)
+            ref.send_system(Movie::STOP)
           end
+          ref = message.spawn.call(context, message.persistence_id, message.fence)
+          if ref.path.nil?
+            ref.path = context.path.try { |p| p / Persistence.entity_name(message.persistence_id) }
+          end
+          @entities[message.persistence_id] = ref
+          @fences[message.persistence_id] = message.fence
+          Movie::Ask.reply_if_asked(context.sender, ref)
         end
         Movie::Behaviors(RegistryMessage).same
       end
 
       def on_signal(signal : SystemMessage)
         if signal.is_a?(Terminated)
-          @entities.reject! { |_id, ref| ref == signal.actor }
+          removed = [] of Id
+          @entities.reject! do |id, ref|
+            matches = ref == signal.actor
+            removed << id if matches
+            matches
+          end
+          removed.each { |id| @fences.delete(id) }
         end
       end
     end
 
     # Shared factory and lookup contract used by persistent extensions.
     class EntityProvider
-      alias Factory = Proc(Movie::ActorContext(RegistryMessage), Id, Movie::ActorRefBase)
+      alias Factory = Proc(
+        Movie::ActorContext(RegistryMessage),
+        Id,
+        ShardLeaseToken?,
+        Movie::ActorRefBase,
+      )
 
       def initialize(
         @system : Movie::AbstractActorSystem,
@@ -154,14 +182,14 @@ module Movie
         end
       end
 
-      def resolve(persistence_id : Id) : Movie::ActorRefBase
+      def resolve(persistence_id : Id, fence : ShardLeaseToken? = nil) : Movie::ActorRefBase
         spawn_proc = @mutex.synchronize do
           @factories[persistence_id.entity_type]? ||
             raise "Entity type not registered: #{persistence_id.entity_type}"
         end
         @system.ask(
           @registry,
-          GetEntity.new(persistence_id, spawn_proc),
+          GetEntity.new(persistence_id, spawn_proc, fence),
           Movie::ActorRefBase,
           @timeout
         ).await(@timeout)
@@ -278,7 +306,15 @@ module Movie
     end
 
     class EventStoreClient
-      def initialize(@ref : Movie::ActorRef(EventStoreMessage), @timeout : Time::Span = 5.seconds)
+      def initialize(
+        @ref : Movie::ActorRef(EventStoreMessage),
+        @timeout : Time::Span = 5.seconds,
+        @fence : ShardLeaseToken? = nil,
+      )
+      end
+
+      def fenced(fence : ShardLeaseToken) : self
+        self.class.new(@ref, @timeout, fence)
       end
 
       def append(
@@ -289,7 +325,14 @@ module Movie
         events : Array(SerializedEvent),
         outbox : Array(OutboxEntry) = [] of OutboxEntry,
       ) : WriteResult forall U
-        message = AppendEvents.new(persistence_id, expected_revision, operation_id, events, outbox)
+        message = AppendEvents.new(
+          persistence_id,
+          expected_revision,
+          operation_id,
+          events,
+          outbox,
+          @fence
+        )
         ctx.ask(@ref, message, WriteResult, @timeout).await(@timeout)
       end
 
@@ -298,7 +341,12 @@ module Movie
       end
 
       def save_snapshot(ctx : Movie::ActorContext(U), persistence_id : String, snapshot : SnapshotRecord) : Bool forall U
-        ctx.ask(@ref, SaveSnapshot.new(persistence_id, snapshot), Bool, @timeout).await(@timeout)
+        ctx.ask(
+          @ref,
+          SaveSnapshot.new(persistence_id, snapshot, @fence),
+          Bool,
+          @timeout
+        ).await(@timeout)
       end
 
       def load_snapshot(ctx : Movie::ActorContext(U), persistence_id : String) : SnapshotRecord? forall U
@@ -306,7 +354,7 @@ module Movie
       end
 
       def delete_snapshot(ctx : Movie::ActorContext(U), persistence_id : String) : Bool forall U
-        ctx.ask(@ref, DeleteSnapshot.new(persistence_id), Bool, @timeout).await(@timeout)
+        ctx.ask(@ref, DeleteSnapshot.new(persistence_id, @fence), Bool, @timeout).await(@timeout)
       end
 
       def delete_events_to(
@@ -316,7 +364,7 @@ module Movie
       ) : RetentionResult forall U
         ctx.ask(
           @ref,
-          DeleteEventsTo.new(persistence_id, sequence_nr),
+          DeleteEventsTo.new(persistence_id, sequence_nr, @fence),
           RetentionResult,
           @timeout
         ).await(@timeout)
@@ -328,7 +376,15 @@ module Movie
     end
 
     class StateStoreClient
-      def initialize(@ref : Movie::ActorRef(StateStoreMessage), @timeout : Time::Span = 5.seconds)
+      def initialize(
+        @ref : Movie::ActorRef(StateStoreMessage),
+        @timeout : Time::Span = 5.seconds,
+        @fence : ShardLeaseToken? = nil,
+      )
+      end
+
+      def fenced(fence : ShardLeaseToken) : self
+        self.class.new(@ref, @timeout, fence)
       end
 
       def save(
@@ -340,7 +396,15 @@ module Movie
         payload : String,
         outbox : Array(OutboxEntry) = [] of OutboxEntry,
       ) : WriteResult forall U
-        message = SaveState.new(persistence_id, expected_revision, operation_id, manifest, payload, outbox)
+        message = SaveState.new(
+          persistence_id,
+          expected_revision,
+          operation_id,
+          manifest,
+          payload,
+          outbox,
+          @fence
+        )
         ctx.ask(@ref, message, WriteResult, @timeout).await(@timeout)
       end
 
@@ -355,7 +419,7 @@ module Movie
         operation_id : OperationId,
         outbox : Array(OutboxEntry) = [] of OutboxEntry,
       ) : WriteResult forall U
-        message = DeleteState.new(persistence_id, expected_revision, operation_id, outbox)
+        message = DeleteState.new(persistence_id, expected_revision, operation_id, outbox, @fence)
         ctx.ask(@ref, message, WriteResult, @timeout).await(@timeout)
       end
     end

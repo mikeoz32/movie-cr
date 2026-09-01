@@ -18,6 +18,11 @@ module Movie
         "transactional-outbox-schema",
         Digest::SHA256.hexdigest("movie:persistence:migration:3:transactional-outbox-schema:v1")
       ),
+      SchemaMigration.new(
+        4_i64,
+        "cluster-shard-fencing-schema",
+        Digest::SHA256.hexdigest("movie:persistence:migration:4:cluster-shard-fencing-schema:v1")
+      ),
     ]
 
     CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.last.version

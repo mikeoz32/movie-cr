@@ -43,6 +43,7 @@ module Movie
 
     @scheduled = false
     @processing = false
+    @drain_and_stop = false
 
     def initialize(@dispatcher : Dispatcher, @context : ActorContext(T))
       @inbox = MailboxQueue(MailboxEnvelope(T)).new
@@ -67,7 +68,18 @@ module Movie
             end
 
             message = @inbox.dequeue
-            break unless message
+            unless message
+              should_stop = @mutex.synchronize do
+                requested = @drain_and_stop
+                @drain_and_stop = false if requested
+                requested
+              end
+              if should_stop
+                @context.on_system_message(MailboxEnvelope(SystemMessage).new(STOP, nil))
+                next
+              end
+              break
+            end
             @context.on_message(message)
           end
 
@@ -79,7 +91,8 @@ module Movie
         @mutex.synchronize do
           @processing = false
           @scheduled = false
-          need_schedule = @system.size > 0 || (@context.accepts_user_messages? && @inbox.size > 0)
+          need_schedule = @system.size > 0 ||
+                          (@context.accepts_user_messages? && (@inbox.size > 0 || @drain_and_stop))
           @scheduled = true if need_schedule
         end
         @context.system.actor_dispatch_leave
@@ -115,6 +128,10 @@ module Movie
 
     def wake
       schedule_dispatch
+    end
+
+    def drain_and_stop : Nil
+      @mutex.synchronize { @drain_and_stop = true }
     end
 
     private def schedule_dispatch

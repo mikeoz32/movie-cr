@@ -45,6 +45,12 @@ module Movie
       protected def serialize_event_commit(connection : DB::Connection) : Nil
       end
 
+      protected abstract def current_epoch_ms_sql : String
+
+      protected def fence_validation_lock_sql : String
+        ""
+      end
+
       protected def bind_sql(statement : String) : String
         statement
       end

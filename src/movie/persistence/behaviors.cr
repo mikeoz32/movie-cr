@@ -148,6 +148,40 @@ module Movie
       ).await(@operation_timeout)
     end
 
+    def acquire_shard_lease(
+      key : Persistence::ShardLeaseKey,
+      owner : String,
+      lease : Time::Span,
+    ) : Persistence::ShardLeaseToken?
+      @system.ask(
+        @pool,
+        Persistence::AcquireShardLease.new(key, owner, lease),
+        Persistence::ShardLeaseToken?,
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
+    def renew_shard_lease(
+      token : Persistence::ShardLeaseToken,
+      lease : Time::Span,
+    ) : Persistence::ShardLeaseToken?
+      @system.ask(
+        @pool,
+        Persistence::RenewShardLease.new(token, lease),
+        Persistence::ShardLeaseToken?,
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
+    def release_shard_lease(token : Persistence::ShardLeaseToken) : Bool
+      @system.ask(
+        @pool,
+        Persistence::ReleaseShardLease.new(token),
+        Bool,
+        @operation_timeout
+      ).await(@operation_timeout)
+    end
+
     def stop
       @pool.send_system(Movie::STOP)
     end
@@ -605,16 +639,20 @@ module Movie
       &factory : Persistence::Id, S -> AbstractBehavior(C)
     ) : Persistence::EntityType(C) forall E, C
       key = entity_type.name
-      spawn = ->(ctx : Movie::ActorContext(Persistence::RegistryMessage), id : Persistence::Id) do
-        behavior = factory.call(id, @store)
+      spawn = ->(ctx : Movie::ActorContext(Persistence::RegistryMessage), id : Persistence::Id, fence : Persistence::ShardLeaseToken?) do
+        store = fence ? @store.fenced(fence) : @store
+        behavior = factory.call(id, store)
         ctx.spawn(behavior).as(Movie::ActorRefBase)
       end
       @entities.register(key, spawn)
       Persistence::EntityType(C).new(key)
     end
 
-    def get_entity_ref(persistence_id : Persistence::EntityId(T)) : ActorRef(T) forall T
-      @entities.resolve(persistence_id.value).as(ActorRef(T))
+    def get_entity_ref(
+      persistence_id : Persistence::EntityId(T),
+      fence : Persistence::ShardLeaseToken? = nil,
+    ) : ActorRef(T) forall T
+      @entities.resolve(persistence_id.value, fence).as(ActorRef(T))
     end
   end
 

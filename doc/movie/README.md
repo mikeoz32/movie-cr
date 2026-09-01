@@ -8,6 +8,7 @@
 - [Streams protocol and DSL notes](streams.md)
 - [Remoting MVP and protocol limits](remoting.md)
 - [Cluster membership and reachability](cluster.md)
+- [Cluster sharding and persistent ownership](sharding.md)
 - [Development workflow](development_workflow.md)
 - [Recovery backlog](backlog.md)
 
@@ -32,6 +33,7 @@
 - [Epic 17 - Persistence production hardening](epics/epic-17-persistence-production-hardening.md)
 - [Epic 18 - Reliable remoting associations](epics/epic-18-reliable-remoting-associations.md)
 - [Epic 19 - Cluster membership and reachability](epics/epic-19-cluster-membership-and-reachability.md)
+- [Epic 20 - Cluster sharding and persistent entity ownership](epics/epic-20-cluster-sharding-and-ownership.md)
 
 ## How To Use This Folder
 

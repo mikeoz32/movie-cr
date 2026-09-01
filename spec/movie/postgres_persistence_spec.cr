@@ -20,6 +20,7 @@ module Movie
   end
 
   struct PgAdd
+    include JSON::Serializable
     getter amount : Int32
     getter operation_id : Persistence::OperationId
 
@@ -28,11 +29,47 @@ module Movie
   end
 
   struct PgGet
+    include JSON::Serializable
+
+    def initialize
+    end
   end
 
-  alias PgCounterCommand = PgAdd | PgGet
+  struct PgCounterReply
+    include JSON::Serializable
+    getter value : Int32
+
+    def initialize(@value : Int32)
+    end
+  end
+
+  struct PgShardedAdd
+    include JSON::Serializable
+    getter amount : Int32
+    getter operation_id : Persistence::OperationId
+
+    def initialize(@amount : Int32, @operation_id : Persistence::OperationId)
+    end
+  end
+
+  struct PgShardedGet
+    include JSON::Serializable
+
+    def initialize
+    end
+  end
+
+  alias PgCounterCommand = PgAdd | PgGet | PgShardedAdd | PgShardedGet
 
   class PgCounterBehavior < EventSourcedBehavior(PgCounterCommand, PgAdded, PgCounterState)
+    def initialize(
+      persistence_id : String,
+      store : Persistence::EventStoreClient,
+      @deliveries : Channel(Int32)? = nil,
+    )
+      super(persistence_id, store)
+    end
+
     protected def empty_state : PgCounterState
       PgCounterState.new
     end
@@ -55,6 +92,73 @@ module Movie
       when PgGet
         sender = ctx.sender
         none.then_run { |current| Ask.reply_if_asked(sender, current.value) }
+      when PgShardedAdd
+        sender = ctx.sender
+        persist(PgAdded.new(command.amount), command.operation_id).then_run do |current|
+          @deliveries.try &.send(current.value)
+          Ask.reply_if_asked(sender, PgCounterReply.new(current.value))
+        end
+      when PgShardedGet
+        sender = ctx.sender
+        none.then_run { |current| Ask.reply_if_asked(sender, PgCounterReply.new(current.value)) }
+      else
+        none
+      end
+    end
+  end
+
+  struct PgProfileState
+    include JSON::Serializable
+    getter name : String
+
+    def initialize(@name : String = "")
+    end
+  end
+
+  struct PgSetProfile
+    include JSON::Serializable
+    getter name : String
+    getter operation_id : Persistence::OperationId
+
+    def initialize(@name : String, @operation_id : Persistence::OperationId)
+    end
+  end
+
+  struct PgGetProfile
+    include JSON::Serializable
+
+    def initialize
+    end
+  end
+
+  struct PgProfileReply
+    include JSON::Serializable
+    getter name : String
+
+    def initialize(@name : String)
+    end
+  end
+
+  alias PgProfileCommand = PgSetProfile | PgGetProfile
+
+  class PgProfileBehavior < DurableStateBehavior(PgProfileCommand, PgProfileState)
+    protected def empty_state : PgProfileState
+      PgProfileState.new
+    end
+
+    protected def handle_command(
+      state : PgProfileState,
+      command : PgProfileCommand,
+      ctx : ActorContext(PgProfileCommand),
+    ) : DurableEffect(PgProfileState)
+      sender = ctx.sender
+      case command
+      when PgSetProfile
+        persist(PgProfileState.new(command.name), command.operation_id).then_run do |current|
+          Ask.reply_if_asked(sender, PgProfileReply.new(current.name))
+        end
+      when PgGetProfile
+        none.then_run { |current| Ask.reply_if_asked(sender, PgProfileReply.new(current.name)) }
       else
         none
       end
@@ -109,6 +213,17 @@ module Movie
       @connections.add(1)
       CommitThenDisconnectPostgresConnection.new(DB.connect(uri), @disconnect_after_commit)
     end
+  end
+end
+
+private def wait_for_postgres_sharding(
+  timeout_span : Time::Span = 10.seconds,
+  &condition : -> Bool
+) : Nil
+  deadline = Time.instant + timeout_span
+  until condition.call
+    raise "PostgreSQL sharding condition was not met within #{timeout_span}" if Time.instant >= deadline
+    sleep 10.milliseconds
   end
 end
 
@@ -311,6 +426,421 @@ if postgres_url = ENV["MOVIE_POSTGRES_TEST_URL"]?
     ensure
       first_system.try &.shutdown
       second_system.try &.shutdown
+    end
+
+    it "preserves tell order while a persistent shard waits for its lease" do
+      suffix = UUID.random.to_s
+      cluster_name = "pg-sharding-retry-#{suffix}"
+      config = Movie::Config.builder
+        .set("name", "pg-sharding-retry")
+        .set("persistence.backend", "postgres")
+        .set("persistence.connection-uri", postgres_url)
+        .build
+      system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, config)
+      lease_system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, config)
+      system.enable_remoting("127.0.0.1", 0)
+      cluster = system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+        cluster_name: cluster_name,
+        seed_nodes: [] of Movie::Address,
+        join_retry_interval: 20.milliseconds,
+        gossip_interval: 20.milliseconds,
+        heartbeat_interval: 25.milliseconds,
+        heartbeat_timeout: 500.milliseconds
+      ))
+      wait_for_postgres_sharding { cluster.up? && cluster.converged? }
+      Movie::Remote::MessageRegistry.register(Movie::PgShardedAdd)
+
+      deliveries = Channel(Int32).new(32)
+      persistence = Movie::EventSourcing.get(system)
+      persistent_type = persistence.register_entity(Movie::PgCounterBehavior, Movie::PgCounterCommand) do |id, store|
+        Movie::PgCounterBehavior.new(id.persistence_id, store, deliveries)
+      end
+      sharding = Movie::ClusterSharding.get(system)
+      sharded_type = sharding.init_event_sourced(
+        persistent_type,
+        shard_count: 1,
+        lease_duration: 500.milliseconds,
+        lease_renew_interval: 100.milliseconds
+      )
+      wait_for_postgres_sharding { sharding.allocations(sharded_type).size == 1 }
+
+      lease_database = Movie::Database.get(lease_system)
+      key = Movie::Persistence::ShardLeaseKey.new(cluster_name, persistent_type.name, 0)
+      competing = lease_database.acquire_shard_lease(key, "competing-owner", 250.milliseconds).not_nil!
+      ref = sharding.entity_ref_for(sharded_type, "ordered-#{suffix}")
+      32.times do
+        ref << Movie::PgShardedAdd.new(1, Movie::Persistence::OperationId.random)
+      end
+      wait_for_postgres_sharding { sharding.stats.lease_retries > 0_i64 }
+      lease_database.release_shard_lease(competing).should be_true
+
+      received = [] of Int32
+      deadline = Time.instant + 2.seconds
+      while received.size < 32
+        remaining = deadline - Time.instant
+        fail("timed out draining recovered shard retry queue: #{received.size}/32") if remaining <= Time::Span.zero
+        select
+        when value = deliveries.receive
+          received << value
+        when timeout(remaining)
+          fail("timed out draining recovered shard retry queue: #{received.size}/32")
+        end
+      end
+      received.should eq((1..32).to_a)
+      sharding.stats.lease_retries.should be > 0_i64
+    ensure
+      system.try &.shutdown
+      lease_system.try &.shutdown
+    end
+
+    it "bounds a shard retry queue by one shared lease deadline" do
+      suffix = UUID.random.to_s
+      cluster_name = "pg-sharding-deadline-#{suffix}"
+      config = Movie::Config.builder
+        .set("name", "pg-sharding-deadline")
+        .set("persistence.backend", "postgres")
+        .set("persistence.connection-uri", postgres_url)
+        .build
+      system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, config)
+      lease_system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, config)
+      system.enable_remoting("127.0.0.1", 0)
+      cluster = system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+        cluster_name: cluster_name,
+        seed_nodes: [] of Movie::Address,
+        join_retry_interval: 20.milliseconds,
+        gossip_interval: 20.milliseconds,
+        heartbeat_interval: 25.milliseconds,
+        heartbeat_timeout: 500.milliseconds
+      ))
+      wait_for_postgres_sharding { cluster.up? && cluster.converged? }
+      Movie::Remote::MessageRegistry.register(Movie::PgShardedAdd)
+
+      persistence = Movie::EventSourcing.get(system)
+      persistent_type = persistence.register_entity(Movie::PgCounterBehavior, Movie::PgCounterCommand) do |id, store|
+        Movie::PgCounterBehavior.new(id.persistence_id, store)
+      end
+      sharding = Movie::ClusterSharding.get(system)
+      sharded_type = sharding.init_event_sourced(
+        persistent_type,
+        shard_count: 1,
+        lease_duration: 60.milliseconds,
+        lease_renew_interval: 20.milliseconds
+      )
+      wait_for_postgres_sharding { sharding.allocations(sharded_type).size == 1 }
+
+      lease_database = Movie::Database.get(lease_system)
+      key = Movie::Persistence::ShardLeaseKey.new(cluster_name, persistent_type.name, 0)
+      competing = lease_database.acquire_shard_lease(key, "competing-owner", 2.seconds).not_nil!
+      ref = sharding.entity_ref_for(sharded_type, "deadline-#{suffix}")
+      20.times do
+        ref << Movie::PgShardedAdd.new(1, Movie::Persistence::OperationId.random)
+      end
+
+      wait_for_postgres_sharding(1.second) do
+        sharding.stats.rejected_envelopes >= 20_i64
+      end
+      lease_database.release_shard_lease(competing).should be_true
+    ensure
+      system.try &.shutdown
+      lease_system.try &.shutdown
+    end
+
+    it "routes and relocates a fenced event-sourced entity through cluster sharding" do
+      entity_id = "sharded-counter-#{UUID.random}"
+      seed_config = Movie::Config.builder
+        .set("name", "pg-sharding-seed")
+        .set("persistence.backend", "postgres")
+        .set("persistence.connection-uri", postgres_url)
+        .build
+      peer_config = Movie::Config.builder
+        .set("name", "pg-sharding-peer")
+        .set("persistence.backend", "postgres")
+        .set("persistence.connection-uri", postgres_url)
+        .build
+      seed_system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, seed_config)
+      peer_system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, peer_config)
+      seed_remote = seed_system.enable_remoting("127.0.0.1", 0)
+      peer_system.enable_remoting("127.0.0.1", 0)
+      cluster_settings = ->(seeds : Array(Movie::Address)) do
+        Movie::Cluster::ClusterSettings.new(
+          cluster_name: "pg-sharding-spec",
+          seed_nodes: seeds,
+          join_retry_interval: 20.milliseconds,
+          gossip_interval: 20.milliseconds,
+          heartbeat_interval: 25.milliseconds,
+          heartbeat_timeout: 500.milliseconds
+        )
+      end
+      seed_cluster = seed_system.enable_cluster(cluster_settings.call([] of Movie::Address))
+      peer_cluster = peer_system.enable_cluster(cluster_settings.call([seed_remote.address]))
+      wait_for_postgres_sharding do
+        seed_cluster.snapshot.members.count(&.status.up?) == 2 &&
+          peer_cluster.snapshot.members.count(&.status.up?) == 2 &&
+          seed_cluster.converged? && peer_cluster.converged?
+      end
+      Movie::Remote::MessageRegistry.register(Movie::PgShardedAdd)
+      Movie::Remote::MessageRegistry.register(Movie::PgShardedGet)
+      Movie::Remote::MessageRegistry.register(Movie::PgCounterReply)
+      Movie::Remote::MessageRegistry.register(Movie::PgSetProfile)
+      Movie::Remote::MessageRegistry.register(Movie::PgGetProfile)
+      Movie::Remote::MessageRegistry.register(Movie::PgProfileReply)
+
+      seed_persistence = Movie::EventSourcing.get(seed_system)
+      seed_persistent_type = seed_persistence.register_entity(Movie::PgCounterBehavior, Movie::PgCounterCommand) do |id, store|
+        Movie::PgCounterBehavior.new(id.persistence_id, store)
+      end
+      peer_persistence = Movie::EventSourcing.get(peer_system)
+      peer_persistent_type = peer_persistence.register_entity(Movie::PgCounterBehavior, Movie::PgCounterCommand) do |id, store|
+        Movie::PgCounterBehavior.new(id.persistence_id, store)
+      end
+      seed_sharding = Movie::ClusterSharding.get(seed_system)
+      peer_sharding = Movie::ClusterSharding.get(peer_system)
+      seed_type = seed_sharding.init_event_sourced(
+        seed_persistent_type,
+        shard_count: 16,
+        lease_duration: 2.seconds,
+        lease_renew_interval: 500.milliseconds
+      )
+      peer_type = peer_sharding.init_event_sourced(
+        peer_persistent_type,
+        shard_count: 16,
+        lease_duration: 2.seconds,
+        lease_renew_interval: 500.milliseconds
+      )
+      seed_states = Movie::DurableState.get(seed_system)
+      seed_state_type = seed_states.register_entity(Movie::PgProfileBehavior, Movie::PgProfileCommand) do |id, store|
+        Movie::PgProfileBehavior.new(id.persistence_id, store)
+      end
+      peer_states = Movie::DurableState.get(peer_system)
+      peer_state_type = peer_states.register_entity(Movie::PgProfileBehavior, Movie::PgProfileCommand) do |id, store|
+        Movie::PgProfileBehavior.new(id.persistence_id, store)
+      end
+      seed_profile_type = seed_sharding.init_durable_state(
+        seed_state_type,
+        shard_count: 16,
+        lease_duration: 2.seconds,
+        lease_renew_interval: 500.milliseconds
+      )
+      peer_profile_type = peer_sharding.init_durable_state(
+        peer_state_type,
+        shard_count: 16,
+        lease_duration: 2.seconds,
+        lease_renew_interval: 500.milliseconds
+      )
+
+      wait_for_postgres_sharding do
+        seed_sharding.allocations(seed_type).size == 16 &&
+          seed_sharding.allocations(seed_type) == peer_sharding.allocations(peer_type) &&
+          seed_sharding.allocations(seed_profile_type).size == 16 &&
+          seed_sharding.allocations(seed_profile_type) == peer_sharding.allocations(peer_profile_type)
+      end
+
+      selected_id = (0...1_000).map { |suffix| "#{entity_id}-#{suffix}" }.find do |candidate|
+        shard_id = Movie::Cluster::StableHashPartitioner.new.shard_for(
+          seed_type.name,
+          candidate,
+          16
+        )
+        seed_sharding.allocations(seed_type)[shard_id]? == peer_cluster.self_unique_address
+      end.not_nil!
+      ref = seed_sharding.entity_ref_for(seed_type, selected_id)
+      ref.ask(
+        Movie::PgShardedAdd.new(3, Movie::Persistence::OperationId.random),
+        Movie::PgCounterReply,
+        5.seconds
+      ).await(5.seconds).value.should eq(3)
+      profile_id = (0...1_000).map { |suffix| "profile-#{entity_id}-#{suffix}" }.find do |candidate|
+        shard_id = Movie::Cluster::StableHashPartitioner.new.shard_for(
+          seed_profile_type.name,
+          candidate,
+          16
+        )
+        seed_sharding.allocations(seed_profile_type)[shard_id]? == peer_cluster.self_unique_address
+      end.not_nil!
+      profile = seed_sharding.entity_ref_for(seed_profile_type, profile_id)
+      profile.ask(
+        Movie::PgSetProfile.new("Ada", Movie::Persistence::OperationId.random),
+        Movie::PgProfileReply,
+        5.seconds
+      ).await(5.seconds).name.should eq("Ada")
+      peer_sharding.local_entity_count.should eq(2)
+
+      peer_cluster.leave.should be_true
+      peer_cluster.await_removed(5.seconds)
+      wait_for_postgres_sharding { peer_sharding.local_entity_count == 0 }
+      wait_for_postgres_sharding do
+        seed_cluster.snapshot.members.count(&.status.up?) == 1 &&
+          seed_cluster.converged? &&
+          seed_sharding.allocations(seed_type).values.all? { |owner| owner == seed_cluster.self_unique_address } &&
+          seed_sharding.allocations(seed_profile_type).values.all? { |owner| owner == seed_cluster.self_unique_address }
+      end
+      ref.ask(
+        Movie::PgShardedGet.new,
+        Movie::PgCounterReply,
+        5.seconds
+      ).await(5.seconds).value.should eq(3)
+      profile.ask(
+        Movie::PgGetProfile.new,
+        Movie::PgProfileReply,
+        5.seconds
+      ).await(5.seconds).name.should eq("Ada")
+      seed_sharding.local_entity_count.should eq(2)
+      peer_type.name.should eq(seed_type.name)
+      peer_profile_type.name.should eq(seed_profile_type.name)
+    ensure
+      peer_system.try &.shutdown
+      seed_system.try &.shutdown
+    end
+
+    it "serializes a fenced write before lease transfer" do
+      suffix = UUID.random.to_s.delete('-')
+      persistence_id = "pg-fence-race-#{suffix}"
+      function_name = "movie_fence_pause_#{suffix}"
+      trigger_name = "movie_fence_trigger_#{suffix}"
+      advisory_lock = Random.rand(Int32::MAX).to_i64
+      admin = DB.connect(postgres_url)
+      old_connection = Movie::Persistence::PostgresBackend.new(postgres_url).connect
+      new_connection = Movie::Persistence::PostgresBackend.new(postgres_url).connect
+      old_connection.ensure_schema
+      key = Movie::Persistence::ShardLeaseKey.new("fence-race", "Counter", 0)
+      old_token = old_connection.acquire_shard_lease(
+        Movie::Persistence::AcquireShardLease.new(key, "old-owner", 200.milliseconds)
+      ).not_nil!
+      admin.exec("SELECT pg_advisory_lock($1)", advisory_lock)
+      admin.exec(<<-SQL)
+        CREATE FUNCTION #{function_name}() RETURNS trigger AS $$
+        BEGIN
+          PERFORM pg_advisory_xact_lock(#{advisory_lock});
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      SQL
+      admin.exec(<<-SQL)
+        CREATE TRIGGER #{trigger_name}
+        BEFORE INSERT ON event_journal
+        FOR EACH ROW WHEN (NEW.persistence_id = '#{persistence_id}')
+        EXECUTE FUNCTION #{function_name}()
+      SQL
+      completions = Channel(String).new(2)
+
+      spawn do
+        old_connection.append_events(Movie::Persistence::AppendEvents.new(
+          persistence_id,
+          0_i64,
+          Movie::Persistence::OperationId.random,
+          [Movie::Persistence::SerializedEvent.new("Added", "old-write")],
+          fence: old_token
+        ))
+        completions.send("write")
+      rescue error
+        completions.send("write-error:#{error.class.name}")
+      end
+
+      sleep 300.milliseconds
+      spawn do
+        token = new_connection.acquire_shard_lease(
+          Movie::Persistence::AcquireShardLease.new(key, "new-owner", 1.second)
+        )
+        completions.send(token ? "transfer:#{token.epoch}" : "transfer-unavailable")
+      rescue error
+        completions.send("transfer-error:#{error.class.name}")
+      end
+
+      select
+      when early = completions.receive
+        fail("lease transfer completed before the fenced write: #{early}")
+      when timeout(100.milliseconds)
+      end
+
+      admin.query_one("SELECT pg_advisory_unlock($1)", advisory_lock, as: Bool).should be_true
+      completions.receive.should eq("write")
+      completions.receive.should eq("transfer:#{old_token.epoch + 1}")
+    ensure
+      admin.try do |connection|
+        connection.query_one("SELECT pg_advisory_unlock($1)", advisory_lock, as: Bool) rescue nil
+        connection.exec("DROP TRIGGER IF EXISTS #{trigger_name} ON event_journal") if trigger_name
+        connection.exec("DROP FUNCTION IF EXISTS #{function_name}()") if function_name
+        connection.close
+      end
+      old_connection.try &.close
+      new_connection.try &.close
+    end
+
+    it "serializes a fenced snapshot deletion before lease transfer" do
+      suffix = UUID.random.to_s.delete('-')
+      persistence_id = "pg-fence-delete-race-#{suffix}"
+      function_name = "movie_fence_delete_pause_#{suffix}"
+      trigger_name = "movie_fence_delete_trigger_#{suffix}"
+      advisory_lock = Random.rand(Int32::MAX).to_i64
+      admin = DB.connect(postgres_url)
+      old_connection = Movie::Persistence::PostgresBackend.new(postgres_url).connect
+      new_connection = Movie::Persistence::PostgresBackend.new(postgres_url).connect
+      old_connection.ensure_schema
+      key = Movie::Persistence::ShardLeaseKey.new("fence-delete-race", "Counter", 0)
+      old_token = old_connection.acquire_shard_lease(
+        Movie::Persistence::AcquireShardLease.new(key, "old-owner", 200.milliseconds)
+      ).not_nil!
+      old_connection.save_snapshot(
+        Movie::Persistence::SaveSnapshot.new(
+          persistence_id,
+          Movie::Persistence::SnapshotRecord.new(1_i64, "Counter", "1"),
+          fence: old_token
+        )
+      )
+      admin.exec("SELECT pg_advisory_lock($1)", advisory_lock)
+      admin.exec(<<-SQL)
+        CREATE FUNCTION #{function_name}() RETURNS trigger AS $$
+        BEGIN
+          PERFORM pg_advisory_xact_lock(#{advisory_lock});
+          RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql
+      SQL
+      admin.exec(<<-SQL)
+        CREATE TRIGGER #{trigger_name}
+        BEFORE DELETE ON snapshot_store
+        FOR EACH ROW WHEN (OLD.persistence_id = '#{persistence_id}')
+        EXECUTE FUNCTION #{function_name}()
+      SQL
+      completions = Channel(String).new(2)
+
+      spawn do
+        old_connection.delete_snapshot(
+          Movie::Persistence::DeleteSnapshot.new(persistence_id, fence: old_token)
+        )
+        completions.send("delete")
+      rescue error
+        completions.send("delete-error:#{error.class.name}")
+      end
+
+      sleep 300.milliseconds
+      spawn do
+        token = new_connection.acquire_shard_lease(
+          Movie::Persistence::AcquireShardLease.new(key, "new-owner", 1.second)
+        )
+        completions.send(token ? "transfer:#{token.epoch}" : "transfer-unavailable")
+      rescue error
+        completions.send("transfer-error:#{error.class.name}")
+      end
+
+      select
+      when early = completions.receive
+        fail("lease transfer completed before the fenced delete: #{early}")
+      when timeout(100.milliseconds)
+      end
+
+      admin.query_one("SELECT pg_advisory_unlock($1)", advisory_lock, as: Bool).should be_true
+      completions.receive.should eq("delete")
+      completions.receive.should eq("transfer:#{old_token.epoch + 1}")
+    ensure
+      admin.try do |connection|
+        connection.query_one("SELECT pg_advisory_unlock($1)", advisory_lock, as: Bool) rescue nil
+        connection.exec("DROP TRIGGER IF EXISTS #{trigger_name} ON snapshot_store") if trigger_name
+        connection.exec("DROP FUNCTION IF EXISTS #{function_name}()") if function_name
+        connection.close
+      end
+      old_connection.try &.close
+      new_connection.try &.close
     end
 
     it "deduplicates an ambiguous committed write after reconnect" do

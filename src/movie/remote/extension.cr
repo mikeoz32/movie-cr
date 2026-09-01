@@ -23,6 +23,8 @@ module Movie::Remote
   end
 
   class RemoteAskResponseSenderRef < Movie::ActorRefBase
+    include RemotePeerIdentity
+
     ASK_FAILURE_TAG   = "__movie_remote_ask_failure__"
     ASK_CANCELLED_TAG = "__movie_remote_ask_cancelled__"
 
@@ -68,6 +70,22 @@ module Movie::Remote
       raise "Remote ask response system messages are not supported yet"
     end
 
+    def remote_address : Address?
+      @connection.remote_address
+    end
+
+    def remote_node_uid : String?
+      @connection.remote_node_uid
+    end
+
+    def remote_peer_address : Address?
+      remote_address
+    end
+
+    def remote_peer_node_uid : String?
+      remote_node_uid
+    end
+
     private def send_response(envelope : WireEnvelope) : Nil
       unless @connection.send(envelope)
         ::Log.for(self.class).warn { "Failed to send remote ask response for correlation #{@correlation_id}" }
@@ -102,6 +120,14 @@ module Movie::Remote
 
       getter remote_address : Address?
       getter remote_node_uid : String?
+
+      def remote_peer_address : Address?
+        @remote_address
+      end
+
+      def remote_peer_node_uid : String?
+        @remote_node_uid
+      end
 
       def send_system(message : Movie::SystemMessage)
         path = self.path || raise RemoteDeliveryError.new("Remote system ref is missing a path")

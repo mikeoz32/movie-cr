@@ -300,6 +300,8 @@ module Movie
         handle_post_start
       when STOP
         handle_stop
+      when DRAIN_AND_STOP
+        @mailbox.as(Mailbox(T)).drain_and_stop
       when PRE_STOP
         handle_pre_stop
       when POST_STOP

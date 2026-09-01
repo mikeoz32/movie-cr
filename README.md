@@ -9,10 +9,11 @@ Movie is a lightweight typed actor framework for Crystal. It provides actor life
 | Typed actors and lifecycle | Stable core | Hierarchical actors, mailbox isolation, watching, restart/stop/resume supervision, and orderly shutdown. |
 | Futures, ask, scheduler | Stable public API | Thread-safe terminal futures, lightweight local ask response refs, and cancellable one-shot timers. |
 | Executor | Advanced API | Bounded worker pool; task timeout does not cancel the task body. |
-| Persistence | Production beta | Versioned schemas, typed effects, atomic revisions, recovery, safe retention, projections, transactional outbox, telemetry/resilience, SQLite, and shared PostgreSQL; cluster sharding is not included. |
+| Persistence | Production beta | Versioned schemas, typed effects, atomic revisions, recovery, safe retention, projections, transactional outbox, telemetry/resilience, SQLite, shared PostgreSQL, and PostgreSQL-fenced sharded entities. |
 | Typed streams | MVP | Manual sources, transform stages, fold/collect sinks, cancellation, backpressure, and broadcast fan-out. |
 | Remoting | Production beta | Versioned/authenticated associations, bounded reconnect, heartbeat failure detection, reliable control traffic, and at-most-once user delivery. |
-| Cluster membership | Production alpha | Static seeds, UID-safe process incarnations, convergent gossip, deterministic leadership, reachability, graceful leave, events, and manual downing; no automatic split-brain resolution or sharding. |
+| Cluster membership | Production alpha | Static seeds, UID-safe process incarnations, convergent gossip, deterministic leadership, reachability, graceful leave, events, and manual downing. |
+| Cluster sharding | Production alpha | Logical entity refs, pluggable partition/allocation/rebalance strategies, activation/passivation, relocation, and PostgreSQL lease fencing; no automatic split-brain resolution. |
 
 ## Requirements and installation
 
@@ -93,7 +94,7 @@ event_sourcing = Movie::EventSourcing.get(system)
 durable_state = Movie::DurableState.get(system)
 ```
 
-`EventSourcedBehavior` and `DurableStateBehavior` use typed effects, optimistic revisions, restart-safe recovery, and post-persist callbacks. Event batches and outbox messages are atomic; snapshots enable safe journal retention; global event offsets and durable checkpoints support projections. Backend connections run on dedicated isolated connection threads with bounded retries, circuit breaking, metrics, and active readiness probes. See the [persistence guide](doc/movie/persistence.md) for the complete API and cluster limits.
+`EventSourcedBehavior` and `DurableStateBehavior` use typed effects, optimistic revisions, restart-safe recovery, and post-persist callbacks. Event batches and outbox messages are atomic; snapshots enable safe journal retention; global event offsets and durable checkpoints support projections. Backend connections run on dedicated isolated connection threads with bounded retries, circuit breaking, metrics, and active readiness probes. PostgreSQL-backed entities can be registered with cluster sharding for fenced single-writer relocation. See the [persistence guide](doc/movie/persistence.md) for the complete API and cluster limits.
 
 Run the complete event-sourcing example with `crystal run examples/persistence_example.cr -Dpreview_mt -Dexecution_context`.
 
@@ -157,6 +158,12 @@ worker.await_up
 ```
 
 Reachability never removes a member automatically. Resolve the partition externally, then call `down` on the current leader for the exact non-local `UniqueAddress`; remote down requests additionally require the remoting shared secret. Use that secret for every non-isolated deployment. Graceful shutdown calls `leave`, waits with `await_removed`, and only then stops the actor system. See the [cluster guide](doc/movie/cluster.md) and [complete example](examples/cluster_example.cr).
+
+## Cluster sharding
+
+`Movie::ClusterSharding` is a separate extension above membership. It maps stable entity ids to shards, places those shards with a selectable least-loaded, rendezvous, weighted, and/or role-aware strategy, and advances placement through a separate no-rebalance or rate-limited rebalance policy. Logical refs support typed tell, ask, explicit passivation, idle passivation, and relocation without exposing physical actor paths.
+
+Event-sourced and durable-state entities can use the same surface with PostgreSQL leases and transactionally validated fencing epochs. During ambiguous partitions persistent sharding fails closed; reachability alone never grants ownership. See the [sharding guide](doc/movie/sharding.md) and [complete example](examples/cluster_sharding_example.cr).
 
 ## Configuration
 

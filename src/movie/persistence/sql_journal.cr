@@ -9,6 +9,7 @@ module Movie
         fingerprint = event_fingerprint(message.events, message.outbox)
         result = connection.transaction do |transaction|
           conn = transaction.connection
+          validate_fence(conn, message.fence)
           operation = conn.exec(
             bind_sql("INSERT INTO journal_operation (persistence_id, operation_id, fingerprint, revision) " +
                      "VALUES (?, ?, ?, ?) ON CONFLICT(persistence_id, operation_id) DO NOTHING"),
@@ -122,14 +123,18 @@ module Movie
       def save_snapshot(message : SaveSnapshot) : Nil
         with_connection do |connection|
           snapshot = message.snapshot
-          connection.exec(
-            bind_sql("INSERT INTO snapshot_store (persistence_id, sequence_nr, manifest, payload, updated_at) " +
-                     "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) " +
-                     "ON CONFLICT(persistence_id) DO UPDATE SET sequence_nr = excluded.sequence_nr, " +
-                     "manifest = excluded.manifest, payload = excluded.payload, updated_at = CURRENT_TIMESTAMP " +
-                     "WHERE excluded.sequence_nr >= snapshot_store.sequence_nr"),
-            args: [message.persistence_id, snapshot.sequence_nr, snapshot.manifest, snapshot.payload] of DB::Any
-          )
+          connection.transaction do |transaction|
+            conn = transaction.connection
+            validate_fence(conn, message.fence)
+            conn.exec(
+              bind_sql("INSERT INTO snapshot_store (persistence_id, sequence_nr, manifest, payload, updated_at) " +
+                       "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) " +
+                       "ON CONFLICT(persistence_id) DO UPDATE SET sequence_nr = excluded.sequence_nr, " +
+                       "manifest = excluded.manifest, payload = excluded.payload, updated_at = CURRENT_TIMESTAMP " +
+                       "WHERE excluded.sequence_nr >= snapshot_store.sequence_nr"),
+              args: [message.persistence_id, snapshot.sequence_nr, snapshot.manifest, snapshot.payload] of DB::Any
+            )
+          end
         end
       end
 
@@ -146,10 +151,14 @@ module Movie
 
       def delete_snapshot(message : DeleteSnapshot) : Nil
         with_connection do |connection|
-          connection.exec(
-            bind_sql("DELETE FROM snapshot_store WHERE persistence_id = ?"),
-            args: [message.persistence_id] of DB::Any
-          )
+          connection.transaction do |transaction|
+            conn = transaction.connection
+            validate_fence(conn, message.fence)
+            conn.exec(
+              bind_sql("DELETE FROM snapshot_store WHERE persistence_id = ?"),
+              args: [message.persistence_id] of DB::Any
+            )
+          end
         end
       end
     end

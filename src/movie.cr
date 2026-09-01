@@ -97,6 +97,15 @@ module Movie
     def path=(@path : ActorPath?)
     end
 
+    # Authenticated transport identity for inbound remote sender refs.
+    def remote_peer_address : Address?
+      nil
+    end
+
+    def remote_peer_node_uid : String?
+      nil
+    end
+
     abstract def send_system(message : SystemMessage)
   end
 
@@ -1330,5 +1339,8 @@ require "./movie/remote"
 
 # Cluster membership is layered on the public actor/remoting runtime.
 require "./movie/cluster"
+
+# Logical entity routing and ownership is a separate Akka-style extension.
+require "./movie/cluster_sharding"
 
 record MainMessage, message : String

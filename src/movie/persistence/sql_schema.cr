@@ -80,6 +80,8 @@ module Movie
           migrate_query_schema(connection)
         when 3_i64
           migrate_outbox_schema(connection)
+        when 4_i64
+          migrate_shard_fencing_schema(connection)
         else
           raise UnsupportedSchemaVersionError.new(migration.version, CURRENT_SCHEMA_VERSION)
         end
@@ -137,6 +139,21 @@ module Movie
           "CREATE INDEX IF NOT EXISTS idx_persistence_outbox_pending " +
           "ON persistence_outbox (delivered, lease_until_epoch_ms, outbox_offset)"
         )
+      end
+
+      private def migrate_shard_fencing_schema(connection : DB::Connection)
+        connection.exec(<<-SQL)
+          CREATE TABLE IF NOT EXISTS shard_lease (
+            cluster_name TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            shard_id BIGINT NOT NULL,
+            owner TEXT NOT NULL,
+            epoch BIGINT NOT NULL,
+            lease_until_epoch_ms BIGINT NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (cluster_name, entity_type, shard_id)
+          )
+        SQL
       end
 
       private def create_event_store(conn : DB::Connection)

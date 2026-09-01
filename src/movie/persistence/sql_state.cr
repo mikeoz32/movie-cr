@@ -9,7 +9,8 @@ module Movie
           message.manifest,
           message.payload,
           false,
-          message.outbox
+          message.outbox,
+          message.fence
         )
       end
 
@@ -21,7 +22,8 @@ module Movie
           "deleted",
           nil,
           true,
-          message.outbox
+          message.outbox,
+          message.fence
         )
       end
 
@@ -33,9 +35,10 @@ module Movie
         payload : String?,
         deleted : Bool,
         outbox : Array(OutboxEntry),
+        fence : ShardLeaseToken?,
       ) : WriteResult
         with_connection do |connection|
-          write_state(connection, persistence_id, expected_revision, operation_id, manifest, payload, deleted, outbox)
+          write_state(connection, persistence_id, expected_revision, operation_id, manifest, payload, deleted, outbox, fence)
         end
       end
 
@@ -48,11 +51,13 @@ module Movie
         payload : String?,
         deleted : Bool,
         outbox : Array(OutboxEntry),
+        fence : ShardLeaseToken?,
       ) : WriteResult
         revision = expected_revision + 1
         fingerprint = state_fingerprint(manifest, payload, deleted, outbox)
         result = connection.transaction do |transaction|
           conn = transaction.connection
+          validate_fence(conn, fence)
           operation = conn.exec(
             bind_sql("INSERT INTO state_operation (persistence_id, operation_id, fingerprint, revision) " +
                      "VALUES (?, ?, ?, ?) ON CONFLICT(persistence_id, operation_id) DO NOTHING"),

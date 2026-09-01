@@ -27,6 +27,7 @@ Mandatory workflow for every task lives in [development_workflow.md](development
 | P0 | [Epic 17 - Persistence Production Hardening](epics/epic-17-persistence-production-hardening.md) | Adds operable schema evolution, telemetry, retention, projections, outbox delivery, resilience policies, and fault/load evidence. | Completed (2026-08-31) |
 | P0 | [Epic 18 - Reliable Remoting Associations](epics/epic-18-reliable-remoting-associations.md) | Makes remote refs restart-tolerant and adds negotiated identity, bounded reconnects, reliable control traffic, failure detection, and security hooks before cluster membership. | Completed (2026-09-01) |
 | P0 | [Epic 19 - Cluster Membership and Reachability](epics/epic-19-cluster-membership-and-reachability.md) | Adds static-seed membership, convergent gossip, deterministic leadership, reachability, graceful leave, and explicit downing above reliable remoting. | Completed (2026-09-01) |
+| P0 | [Epic 20 - Cluster Sharding and Persistent Entity Ownership](epics/epic-20-cluster-sharding-and-ownership.md) | Adds pluggable shard placement, logical entity routing, relocation, and fenced single-writer persistence. | Completed (2026-09-01) |
 
 ## Planning Rules
 

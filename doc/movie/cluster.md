@@ -1,6 +1,6 @@
 # Cluster Membership and Reachability
 
-Movie cluster membership is a production-alpha extension layered on the normal actor and remoting runtime. It supplies static-seed discovery, process-incarnation identity, convergent membership, deterministic leadership, reachability observations, graceful leave, manual downing, typed events, and telemetry. It does not supply sharding, actor placement, distributed persistence ownership, automatic split-brain resolution, or durable application delivery.
+Movie cluster membership is a production-alpha extension layered on the normal actor and remoting runtime. It supplies static-seed discovery, process-incarnation identity, convergent membership, deterministic leadership, reachability observations, graceful leave, manual downing, typed events, and telemetry. The separate [cluster sharding extension](sharding.md) builds logical placement and PostgreSQL-fenced persistent ownership on this membership contract. Neither extension supplies automatic split-brain resolution or durable application delivery.
 
 ## Start a cluster
 
@@ -41,7 +41,7 @@ Each gossip round sends a canonical full-state snapshot to at most `gossip_fanou
 
 Cluster heartbeats run through the internal `/system/cluster` daemon over existing remoting connections. Elapsed silence uses a monotonic clock. A timeout adds the exact UID to the observer's local `snapshot.unreachable` set and can change its local leader view, but never changes the member's globally gossiped status.
 
-Movie deliberately has no automatic downing policy. During a partition, both sides can be alive, and a timeout cannot identify the side allowed to continue. Resolve that ambiguity externally with deployment/quorum/lease knowledge, then invoke `down(unique_address)` on the current leader. Self-down is rejected because it would stop the leader before it could disseminate the terminal record. A down request sent to another leader requires `remoting.shared-secret`; without HMAC, invoke it locally on the leader. Downing the wrong side can create split-brain application behavior because this epic does not provide write fencing.
+Movie deliberately has no automatic downing policy. During a partition, both sides can be alive, and a timeout cannot identify the side allowed to continue. Resolve that ambiguity externally with deployment/quorum/lease knowledge, then invoke `down(unique_address)` on the current leader. Self-down is rejected because it would stop the leader before it could disseminate the terminal record. A down request sent to another leader requires `remoting.shared-secret`; without HMAC, invoke it locally on the leader. Downing the wrong side can create split-brain behavior for ordinary actors. Persistent [cluster sharding](sharding.md) adds PostgreSQL write fencing, but still fails closed and requires an external decision about which partition may continue.
 
 Use `remoting.shared-secret` on every non-isolated deployment. Association identity is always checked for consistency, but without the shared secret a network peer is not cryptographically authenticated.
 

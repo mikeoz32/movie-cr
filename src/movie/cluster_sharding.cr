@@ -1,0 +1,8 @@
+require "./cluster/sharding/model"
+require "./cluster/sharding/telemetry"
+require "./cluster/sharding/provider"
+require "./cluster/sharding/daemon"
+require "./cluster/sharding/entity_ref"
+require "./cluster/sharding/extension"
+require "./cluster/sharding/routing"
+require "./cluster/sharding/coordination"
