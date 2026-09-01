@@ -2,7 +2,7 @@
 
 **Goal:** Build an operable cluster-membership layer above reliable remoting associations without prematurely coupling membership to sharding, actor placement, or persistence ownership.
 
-**Status:** In progress.
+**Status:** Completed (2026-09-01).
 
 **Fixed review point:** `bef87a6` (`docs(remoting): complete reliable associations epic`).
 
@@ -63,7 +63,7 @@
 
 ## Task 19.6 - Multi-process resilience evidence and documentation
 
-**Status:** In progress.
+**Status:** Completed.
 
 - Cover seed startup order, idempotent join, three-node convergence, graceful leave, abrupt loss, manual downing, and same-address/new-UID restart in deterministic child-process tests.
 - Add opt-in membership convergence and heartbeat measurement harnesses without host-dependent thresholds.
@@ -78,12 +78,21 @@
 
 ## Completion checklist
 
-- [ ] Failing tests written first.
-- [ ] Failing tests observed red.
-- [ ] Minimal implementations written.
-- [ ] Targeted verification green.
-- [ ] Broader verification green.
-- [ ] Formatting check green.
-- [ ] Docs/examples updated.
-- [ ] Review requested.
-- [ ] Review feedback addressed.
+- [x] Failing tests written first.
+- [x] Failing tests observed red.
+- [x] Minimal implementations written.
+- [x] Targeted verification green.
+- [x] Broader verification green.
+- [x] Formatting check green.
+- [x] Docs/examples updated.
+- [x] Review requested.
+- [x] Review feedback addressed.
+
+## Completion evidence
+
+- Cluster specs pass 19 examples; the cluster/configuration set passes 70 examples.
+- The complete suite passes 342 examples on Crystal 1.21.0 and the minimum supported Crystal 1.19.1.
+- Formatter and dependency checks pass, and all 10 examples build on both supported verification toolchains.
+- The opt-in real-process stress scenario passes seed startup ordering, three-node convergence, reachability recovery, graceful leave, abrupt loss, explicit downing, and same-address/new-UID restart.
+- The final release measurement converged 5 nodes in 85.33 ms, sent/received 94/93 gossip messages, and observed 472 heartbeat messages in 500.04 ms (944 msg/s aggregate). These are host observations, not thresholds.
+- Review feedback added association-bound cluster identity, leader-authorized lifecycle gossip, acknowledged terminal leave delivery, typed `UniqueAddress` state keys, authenticated leader redirect, and complete multi-seed discovery. Final Standards and Spec reviews report zero remaining actionable findings against `bef87a6`.
