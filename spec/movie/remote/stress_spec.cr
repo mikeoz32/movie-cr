@@ -306,6 +306,56 @@ if STRESS_ENABLED
     end
 
     describe "End-to-end TCP stress" do
+      it "survives repeated peer restarts with one long-lived remote ref" do
+        restart_count = ENV.fetch("MOVIE_ASSOCIATION_CHAOS_RESTARTS", "10").to_i
+        Movie::Remote::MessageRegistry.register(StressMessage)
+        settings = Movie::Remote::AssociationSettings.new(
+          reconnect_min_backoff: 5.milliseconds,
+          reconnect_max_backoff: 50.milliseconds,
+          reconnect_jitter: 0.0,
+          heartbeat_interval: 20.milliseconds,
+          heartbeat_timeout: 200.milliseconds
+        )
+        server = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "chaos-server")
+        server_remote = server.enable_remoting("127.0.0.1", 0, 1)
+        port = server_remote.local_port
+        probe = StressDeliveryProbe.new
+        server.spawn(probe, name: "actor")
+        client = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "chaos-client")
+        client_remote = client.enable_remoting("127.0.0.1", 0, 1, settings)
+        target = Movie::ActorPath.new(
+          Movie::Address.remote("chaos-server", "127.0.0.1", port),
+          ["user", "actor"]
+        )
+        remote_ref = client_remote.actor_ref(target, StressMessage)
+        delivered = 0
+
+        begin
+          restart_count.times do |cycle|
+            wait_until_stress { remote_ref.connection.active? }
+            remote_ref << StressMessage.new(cycle.to_i64, "chaos")
+            wait_until_stress { probe.received.get == 1 }
+            delivered += 1
+
+            server.shutdown(1.second)
+            wait_until_stress { !remote_ref.connection.active? }
+            next if cycle == restart_count - 1
+
+            server = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "chaos-server")
+            server.enable_remoting("127.0.0.1", port, 1)
+            probe = StressDeliveryProbe.new
+            server.spawn(probe, name: "actor")
+          end
+
+          puts "\n  Association chaos: #{delivered}/#{restart_count} restart generations delivered"
+          delivered.should eq(restart_count)
+          remote_ref.connection.stats.successful_connections.should eq(restart_count)
+        ensure
+          client.shutdown(1.second)
+          server.shutdown(1.second)
+        end
+      end
+
       it "handles high volume message exchange over TCP" do
         # Server system
         server_system = Movie::ActorSystem(String).new(

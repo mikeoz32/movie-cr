@@ -51,6 +51,7 @@ Benchmark and stress specs are opt-in and are not part of the default correctnes
 
 ```bash
 MOVIE_BENCH=1 crystal spec --release spec/movie/remote/benchmark_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_BENCH=1 crystal spec --release spec/movie/remote/association_benchmark_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_STRESS=1 crystal spec spec/movie/remote/stress_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_BENCH=1 crystal spec spec/movie/persistence_benchmark_spec.cr -Dpreview_mt -Dexecution_context
 crystal build benchmarks/actor_system.cr --release -Dpreview_mt -Dexecution_context -o /tmp/movie-actor-system-benchmark
