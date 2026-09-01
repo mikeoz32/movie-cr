@@ -46,7 +46,7 @@
 
 ## Task 19.4 - Reachability, graceful leave, and explicit downing
 
-**Status:** In progress.
+**Status:** Completed.
 
 - Exchange heartbeat/ack traffic outside user actor mailboxes where practical, while retaining one remoting transport.
 - Mark members unreachable/reachable from monotonic local observations without globally removing them.
@@ -55,7 +55,7 @@
 
 ## Task 19.5 - Configuration, subscriptions, and observability
 
-**Status:** Planned.
+**Status:** In progress.
 
 - Add canonical `cluster.*` settings and environment mappings.
 - Add typed subscriptions for member, reachability, and leader events.

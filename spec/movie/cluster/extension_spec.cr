@@ -149,4 +149,102 @@ describe Movie::Cluster::ClusterExtension do
       first_system.shutdown(1.second)
     end
   end
+
+  it "converges a graceful leave without downing another member" do
+    seed_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "a-leave-seed")
+    seed_remote = seed_system.enable_remoting("127.0.0.1", 0, 1)
+    settings = Movie::Cluster::ClusterSettings.new(
+      join_retry_interval: 20.milliseconds,
+      gossip_interval: 20.milliseconds,
+      gossip_fanout: 2,
+      heartbeat_interval: 20.milliseconds,
+      heartbeat_timeout: 120.milliseconds
+    )
+    seed = seed_system.enable_cluster(settings)
+
+    leaving_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "b-leaving-node")
+    leaving_system.enable_remoting("127.0.0.1", 0, 1)
+    leaving = leaving_system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+      seed_nodes: [seed_remote.address],
+      join_retry_interval: 20.milliseconds,
+      gossip_interval: 20.milliseconds,
+      gossip_fanout: 2,
+      heartbeat_interval: 20.milliseconds,
+      heartbeat_timeout: 120.milliseconds
+    ))
+
+    begin
+      leaving.await_up(3.seconds)
+      wait_for_cluster { seed.snapshot.members.count(&.status.up?) == 2 }
+      expect_raises(Movie::Cluster::ClusterConfigurationError, /shared secret/) do
+        leaving.down(seed.self_unique_address)
+      end
+      leaving.leave.should be_true
+      wait_for_cluster(3.seconds) do
+        seed.snapshot.member(leaving.self_unique_address).nil? &&
+          leaving.snapshot.member(leaving.self_unique_address).nil?
+      end
+      seed.snapshot.members.should eq([seed.self_member])
+    ensure
+      leaving_system.shutdown(1.second)
+      seed_system.shutdown(1.second)
+    end
+  end
+
+  it "keeps an unreachable member until manual down and accepts a new UID at the same address" do
+    seed_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "a-down-seed")
+    seed_remote = seed_system.enable_remoting("127.0.0.1", 0, 1)
+    seed = seed_system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+      join_retry_interval: 20.milliseconds,
+      gossip_interval: 20.milliseconds,
+      heartbeat_interval: 20.milliseconds,
+      heartbeat_timeout: 100.milliseconds
+    ))
+
+    failed_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "b-restarted-node")
+    failed_remote = failed_system.enable_remoting("127.0.0.1", 0, 1)
+    failed_port = failed_remote.local_port
+    failed = failed_system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+      seed_nodes: [seed_remote.address],
+      join_retry_interval: 20.milliseconds,
+      gossip_interval: 20.milliseconds,
+      heartbeat_interval: 20.milliseconds,
+      heartbeat_timeout: 100.milliseconds
+    ))
+    restarted_system = nil.as(Movie::ActorSystem(String)?)
+
+    begin
+      failed.await_up(3.seconds)
+      wait_for_cluster { seed.snapshot.members.count(&.status.up?) == 2 }
+      old_incarnation = failed.self_unique_address
+      failed_system.shutdown(1.second)
+
+      wait_for_cluster(3.seconds) { seed.snapshot.unreachable.includes?(old_incarnation) }
+      seed.snapshot.member(old_incarnation).not_nil!.status.up?.should be_true
+      sleep 150.milliseconds
+      seed.snapshot.member(old_incarnation).not_nil!.status.up?.should be_true
+
+      seed.down(old_incarnation).should be_true
+      wait_for_cluster(3.seconds) { seed.snapshot.member(old_incarnation).nil? }
+
+      restarted_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "b-restarted-node")
+      restarted_system.enable_remoting("127.0.0.1", failed_port, 1)
+      restarted = restarted_system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+        seed_nodes: [seed_remote.address],
+        join_retry_interval: 20.milliseconds,
+        gossip_interval: 20.milliseconds,
+        heartbeat_interval: 20.milliseconds,
+        heartbeat_timeout: 100.milliseconds
+      ))
+      restarted.await_up(3.seconds)
+      restarted.self_unique_address.should_not eq(old_incarnation)
+      wait_for_cluster(3.seconds) { seed.snapshot.members.count(&.status.up?) == 2 }
+      seed.snapshot.member(restarted.self_unique_address).not_nil!.status.up?.should be_true
+      seed.stats.heartbeat_timeouts.should be > 0
+    ensure
+      restarted_system.try &.shutdown(1.second)
+      failed_system.shutdown(1.second) rescue nil
+      seed_system.shutdown(1.second)
+    end
+  end
 end

@@ -12,6 +12,11 @@ module Movie::Cluster
       Gossip
       GossipAck
       GossipTick
+      Heartbeat
+      HeartbeatAck
+      HeartbeatTick
+      LeaveRequest
+      DownRequest
     end
 
     getter kind : Kind
@@ -20,6 +25,7 @@ module Movie::Cluster
     getter member : Member?
     getter round : Int64?
     getter digest : String?
+    getter target : UniqueAddress?
 
     @members : Array(Member)
 
@@ -31,6 +37,7 @@ module Movie::Cluster
       members : Array(Member) = [] of Member,
       @round : Int64? = nil,
       @digest : String? = nil,
+      @target : UniqueAddress? = nil,
     )
       @members = members.dup
     end
@@ -67,6 +74,26 @@ module Movie::Cluster
 
     def self.gossip_tick(cluster_name : String, sender : UniqueAddress) : self
       new(Kind::GossipTick, cluster_name, sender)
+    end
+
+    def self.heartbeat(cluster_name : String, sender : UniqueAddress, sequence : Int64) : self
+      new(Kind::Heartbeat, cluster_name, sender, round: sequence)
+    end
+
+    def self.heartbeat_ack(cluster_name : String, sender : UniqueAddress, sequence : Int64) : self
+      new(Kind::HeartbeatAck, cluster_name, sender, round: sequence)
+    end
+
+    def self.heartbeat_tick(cluster_name : String, sender : UniqueAddress) : self
+      new(Kind::HeartbeatTick, cluster_name, sender)
+    end
+
+    def self.leave_request(cluster_name : String, sender : UniqueAddress) : self
+      new(Kind::LeaveRequest, cluster_name, sender, target: sender)
+    end
+
+    def self.down_request(cluster_name : String, sender : UniqueAddress, target : UniqueAddress) : self
+      new(Kind::DownRequest, cluster_name, sender, target: target)
     end
   end
 end
