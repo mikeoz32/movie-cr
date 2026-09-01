@@ -1,6 +1,6 @@
 # Movie
 
-Movie is a lightweight typed actor framework for Crystal. It provides actor lifecycle and supervision, ask/futures, scheduling, bounded execution, pluggable SQLite/PostgreSQL persistence, typed streams, and restart-tolerant TCP remoting associations.
+Movie is a lightweight typed actor framework for Crystal. It provides actor lifecycle and supervision, ask/futures, scheduling, bounded execution, pluggable SQLite/PostgreSQL persistence, typed streams, restart-tolerant TCP remoting associations, and static-seed cluster membership.
 
 ## Feature maturity
 
@@ -11,7 +11,8 @@ Movie is a lightweight typed actor framework for Crystal. It provides actor life
 | Executor | Advanced API | Bounded worker pool; task timeout does not cancel the task body. |
 | Persistence | Production beta | Versioned schemas, typed effects, atomic revisions, recovery, safe retention, projections, transactional outbox, telemetry/resilience, SQLite, and shared PostgreSQL; cluster sharding is not included. |
 | Typed streams | MVP | Manual sources, transform stages, fold/collect sinks, cancellation, backpressure, and broadcast fan-out. |
-| Remoting | Production beta | Versioned/authenticated associations, bounded reconnect, heartbeat failure detection, reliable control traffic, and at-most-once user delivery; cluster membership is not included. |
+| Remoting | Production beta | Versioned/authenticated associations, bounded reconnect, heartbeat failure detection, reliable control traffic, and at-most-once user delivery. |
+| Cluster membership | Production alpha | Static seeds, UID-safe process incarnations, convergent gossip, deterministic leadership, reachability, graceful leave, events, and manual downing; no automatic split-brain resolution or sharding. |
 
 ## Requirements and installation
 
@@ -139,6 +140,24 @@ reply = remote.ask(Request.new("hello"), Response).await(2.seconds)
 
 See [the remoting contract](doc/movie/remoting.md) and [complete example](examples/remoting_example.cr).
 
+## Cluster membership
+
+Cluster membership runs through a typed daemon actor over the existing remoting associations. A seed can form a one-node cluster; other nodes retry static seeds until they join:
+
+```crystal
+seed_remote = seed_system.enable_remoting("127.0.0.1", 2551)
+seed = seed_system.enable_cluster(Movie::Cluster::ClusterSettings.new(roles: ["seed"]))
+
+worker_system.enable_remoting("127.0.0.1", 2552)
+worker = worker_system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+  seed_nodes: [seed_remote.address],
+  roles: ["worker"]
+))
+worker.await_up
+```
+
+Reachability never removes a member automatically. Resolve the partition externally, then call `down` on the current leader for the exact non-local `UniqueAddress`; remote down requests additionally require the remoting shared secret. Use that secret for every non-isolated deployment. Graceful shutdown calls `leave`, waits with `await_removed`, and only then stops the actor system. See the [cluster guide](doc/movie/cluster.md) and [complete example](examples/cluster_example.cr).
+
 ## Configuration
 
 Configuration supports YAML, JSON, builders, fallbacks, and environment overrides. Public keys use dotted sections and hyphenated compound names, for example `supervision.max-restarts` and `remoting.stripe-count`.
@@ -158,7 +177,7 @@ Advanced APIs that may change more aggressively:
 - `Promise(T)` callback bridging;
 - executor protocol types and direct executor integrations;
 - persistence entity/store internals;
-- streams while they remain an MVP feature, and remoting association internals while the transport remains beta.
+- streams while they remain an MVP feature, remoting association internals while the transport remains beta, and cluster membership APIs while they remain production alpha.
 
 ## Development and verification
 
@@ -178,6 +197,8 @@ Benchmarks and stress scenarios are intentionally opt-in:
 MOVIE_BENCH=1 crystal spec --release spec/movie/remote/benchmark_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_BENCH=1 crystal spec --release spec/movie/remote/association_benchmark_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_STRESS=1 crystal spec spec/movie/remote/stress_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_CLUSTER_STRESS=1 crystal spec spec/movie/cluster/stress_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_CLUSTER_BENCH=1 crystal spec --release spec/movie/cluster/benchmark_spec.cr -Dpreview_mt -Dexecution_context
 ```
 
 Benchmark output is measurement-only because absolute throughput and relative speedup depend on the host, Crystal version, and scheduler. Correctness remains enforced by the default and stress suites.

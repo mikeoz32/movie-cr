@@ -54,6 +54,16 @@ config = file.with_env_overrides
 | `remoting.control-buffer-capacity` | Int | `1024` | Pending acknowledged system messages per stripe. |
 | `remoting.control-deduplication-capacity` | Int | `8192` | Receiver-side node/stream cursors retained for control deduplication. |
 | `remoting.shared-secret` | String | empty | Optional HMAC handshake secret; use environment injection in deployments. |
+| `cluster.enabled` | Bool | `false` | Start cluster membership after remoting. Requires `remoting.enabled = true`. |
+| `cluster.name` | String | `movie-cluster` | Logical cluster boundary; messages with another name are rejected. |
+| `cluster.seed-nodes` | String array | empty | Static `movie.tcp://system@host:port` seed addresses; empty forms a one-node seed. |
+| `cluster.roles` | String array | empty | Sorted, unique roles advertised by this member. |
+| `cluster.join-retry-interval` | Duration | `1s` | Retry interval for static-seed join messages. |
+| `cluster.gossip.interval` | Duration | `1s` | Full-state gossip interval. |
+| `cluster.gossip.fanout` | Int | `3` | Maximum peers selected per gossip round. |
+| `cluster.heartbeat.interval` | Duration | `1s` | Cluster reachability heartbeat interval. |
+| `cluster.heartbeat.timeout` | Duration | `5s` | Monotonic silence threshold before a member becomes unreachable. |
+| `cluster.max-members` | Int | `10000` | Bound for active records plus anti-resurrection tombstones. |
 | `executor.pool-size` | Int | `4` | Bounded executor worker count. |
 | `executor.queue-capacity` | Int | `128` | Number of queued executor tasks. |
 | `persistence.backend` | String | `sqlite` | Registered persistence backend; `postgres` requires the PostgreSQL entrypoint. |
@@ -86,6 +96,11 @@ The default prefix is `MOVIE`. Canonical environment names use `__` between dott
 | `MOVIE_REMOTING__CONTROL_BUFFER_CAPACITY` | `remoting.control-buffer-capacity` |
 | `MOVIE_REMOTING__CONTROL_DEDUPLICATION_CAPACITY` | `remoting.control-deduplication-capacity` |
 | `MOVIE_REMOTING__SHARED_SECRET` | `remoting.shared-secret` |
+| `MOVIE_CLUSTER__ENABLED` | `cluster.enabled` |
+| `MOVIE_CLUSTER__SEED_NODES` | `cluster.seed-nodes` |
+| `MOVIE_CLUSTER__ROLES` | `cluster.roles` |
+| `MOVIE_CLUSTER__GOSSIP__INTERVAL` | `cluster.gossip.interval` |
+| `MOVIE_CLUSTER__HEARTBEAT__TIMEOUT` | `cluster.heartbeat.timeout` |
 | `MOVIE_EXECUTOR__QUEUE_CAPACITY` | `executor.queue-capacity` |
 | `MOVIE_PERSISTENCE__BACKEND` | `persistence.backend` |
 | `MOVIE_PERSISTENCE__CONNECTION_URI` | `persistence.connection-uri` |

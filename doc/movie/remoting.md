@@ -1,6 +1,6 @@
 # Remoting
 
-Remoting is a production-beta association transport. It provides restart-tolerant point-to-point delivery between Movie actor systems, but it is not cluster membership, failure voting, sharding, or a durable messaging system.
+Remoting is a production-beta association transport. It provides restart-tolerant point-to-point delivery between Movie actor systems, but it is not itself cluster membership, failure voting, sharding, or a durable messaging system. The production-alpha [cluster module](cluster.md) builds membership and reachability above these associations.
 
 ## Supported Workflows
 
