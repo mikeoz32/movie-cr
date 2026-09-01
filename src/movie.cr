@@ -1280,4 +1280,7 @@ require "./movie/executor"
 # Require remote module after base types are defined
 require "./movie/remote"
 
+# Cluster membership is layered on the public actor/remoting runtime.
+require "./movie/cluster"
+
 record MainMessage, message : String

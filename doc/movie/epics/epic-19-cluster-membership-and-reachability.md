@@ -21,7 +21,7 @@
 
 ## Task 19.1 - Membership model and convergent merge
 
-**Status:** In progress.
+**Status:** Completed.
 
 - Add `UniqueAddress`, member roles, ordered member statuses, versioned records, and immutable snapshots.
 - Merge newer member records deterministically and retain `Removed` tombstones so stale gossip cannot resurrect a node incarnation.
@@ -29,7 +29,7 @@
 
 ## Task 19.2 - Cluster extension, daemon, and static-seed join
 
-**Status:** Planned.
+**Status:** In progress.
 
 - Add a typed internal cluster daemon actor at one well-known path.
 - Add idempotent `enable_cluster`, `cluster`, `join`, `leave`, and snapshot APIs.
