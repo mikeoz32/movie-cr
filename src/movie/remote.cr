@@ -6,6 +6,9 @@
 
 require "./path"
 require "./remote/wire_envelope"
+require "./remote/association_negotiator"
+require "./remote/control_delivery"
+require "./remote/pending_asks"
 require "./remote/message_registry"
 require "./remote/frame_codec"
 require "./remote/outbound_writer"

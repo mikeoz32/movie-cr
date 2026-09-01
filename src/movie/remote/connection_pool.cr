@@ -121,6 +121,10 @@ module Movie::Remote
       conn.send(envelope)
     end
 
+    def send_control(envelope : WireEnvelope) : Bool
+      connection_for(envelope.target_path).send_control(envelope)
+    end
+
     # Closes all connections.
     def close
       return if @stopped

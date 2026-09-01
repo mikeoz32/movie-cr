@@ -4,6 +4,22 @@ require "socket"
 require "uuid"
 
 module Movie::Remote
+  class AssociationProtocolError < Exception
+  end
+
+  private module AuthenticationProof
+    extend self
+
+    def matches?(left : String, right : String) : Bool
+      return false unless left.bytesize == right.bytesize
+
+      difference = 0_u8
+      right_bytes = right.to_slice
+      left.to_slice.each_with_index { |byte, index| difference |= byte ^ right_bytes[index] }
+      difference == 0
+    end
+  end
+
   PROTOCOL_VERSION        = 1
   CAPABILITY_CONTROL_ACKS = "control-acks-v1"
   CAPABILITY_HEARTBEATS   = "heartbeats-v1"
@@ -116,7 +132,7 @@ module Movie::Remote
 
     def authenticated?(shared_secret : String?) : Bool
       return @auth_proof.empty? unless shared_secret
-      secure_equals?(@auth_proof, signature(shared_secret))
+      AuthenticationProof.matches?(@auth_proof, signature(shared_secret))
     end
 
     protected def signature(shared_secret : String) : String
@@ -134,80 +150,61 @@ module Movie::Remote
         io << '\n' << @nonce
       end
     end
-
-    private def secure_equals?(left : String, right : String) : Bool
-      return false unless left.bytesize == right.bytesize
-
-      difference = 0_u8
-      left.to_slice.each_with_index do |byte, index|
-        difference |= byte ^ right.to_slice[index]
-      end
-      difference == 0
-    end
   end
 
   record HandshakeRejection, reason : String do
     include JSON::Serializable
   end
 
-  enum ControlObservation
-    New
-    Duplicate
-    Gap
+  # Completes the server-challenge round trip. A captured confirmation cannot
+  # authenticate a second socket because each server response has a fresh
+  # nonce.
+  record AssociationConfirmation,
+    association_id : String,
+    node_uid : String,
+    client_nonce : String,
+    server_nonce : String,
+    auth_proof : String do
+    include JSON::Serializable
+
+    def self.create(client : AssociationHandshake, server : AssociationHandshake, shared_secret : String?) : self
+      unsigned = new(
+        association_id: client.association_id,
+        node_uid: client.node_uid,
+        client_nonce: client.nonce,
+        server_nonce: server.nonce,
+        auth_proof: ""
+      )
+      proof = shared_secret ? unsigned.signature(shared_secret) : ""
+      new(
+        association_id: unsigned.association_id,
+        node_uid: unsigned.node_uid,
+        client_nonce: unsigned.client_nonce,
+        server_nonce: unsigned.server_nonce,
+        auth_proof: proof
+      )
+    end
+
+    def authenticated?(shared_secret : String?) : Bool
+      return @auth_proof.empty? unless shared_secret
+      AuthenticationProof.matches?(@auth_proof, signature(shared_secret))
+    end
+
+    protected def signature(shared_secret : String) : String
+      OpenSSL::HMAC.hexdigest(:sha256, shared_secret, canonical_challenge)
+    end
+
+    private def canonical_challenge : String
+      String.build do |io|
+        io << @association_id << '\n'
+        io << @node_uid << '\n'
+        io << @client_nonce << '\n'
+        io << @server_nonce
+      end
+    end
   end
 
-  # Tracks the last contiguous sequence for each stable node/connection stream.
-  # The server owns one instance so reconnecting sockets share deduplication.
-  class ControlDeduplicator
-    @sequences = {} of String => Int64
-    @mutex = Mutex.new
-
-    def initialize(@max_streams : Int32 = 8192)
-      raise ArgumentError.new("maximum control streams must be positive") unless @max_streams > 0
-    end
-
-    def observe(node_uid : String, stream : String, sequence : Int64) : ControlObservation
-      @mutex.synchronize do
-        key = "#{node_uid}\0#{stream}"
-        observation = classify(key, sequence)
-        remember(key, sequence) if observation.new?
-        observation
-      end
-    end
-
-    # Advances the deduplication cursor only after the delivery callback
-    # succeeds, so a transient routing failure cannot turn a retry into a
-    # falsely acknowledged duplicate.
-    def deliver(node_uid : String, stream : String, sequence : Int64, &) : ControlObservation
-      @mutex.synchronize do
-        key = "#{node_uid}\0#{stream}"
-        observation = classify(key, sequence)
-        if observation.new?
-          yield
-          remember(key, sequence)
-        end
-        observation
-      end
-    end
-
-    def forget(node_uid : String) : Nil
-      prefix = "#{node_uid}\0"
-      @mutex.synchronize { @sequences.reject! { |key, _| key.starts_with?(prefix) } }
-    end
-
-    private def classify(key : String, sequence : Int64) : ControlObservation
-      previous = @sequences[key]? || 0_i64
-      return ControlObservation::Duplicate if sequence <= previous
-      return ControlObservation::Gap if sequence != previous + 1
-
-      ControlObservation::New
-    end
-
-    private def remember(key : String, sequence : Int64) : Nil
-      unless @sequences.has_key?(key)
-        @sequences.shift if @sequences.size >= @max_streams
-      end
-      @sequences[key] = sequence
-    end
+  record HandshakeReady, association_id : String do
+    include JSON::Serializable
   end
 end

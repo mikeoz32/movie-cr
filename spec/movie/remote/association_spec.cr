@@ -222,6 +222,7 @@ describe "Movie remote associations" do
     )
     client = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "replay-client")
     client_remote = client.enable_remoting("127.0.0.1", 0, 1, settings)
+    watcher = client.spawn(AssociationWatcher.new, name: "watcher")
     target = Movie::ActorPath.new(
       Movie::Address.remote("replay-server", "127.0.0.1", port),
       ["user", "probe"]
@@ -231,6 +232,8 @@ describe "Movie remote associations" do
 
     begin
       wait_for_association { remote_ref.connection.active? }
+      remote_ref.send_system(Movie::Watch.new(watcher).as(Movie::SystemMessage))
+      wait_for_association { remote_ref.connection.pending_control_count == 0 }
       first_server.shutdown(1.second)
       wait_for_association { !remote_ref.connection.active? }
 
@@ -244,7 +247,12 @@ describe "Movie remote associations" do
       second_server.enable_remoting("127.0.0.1", port, 1)
       second_server.spawn(AssociationProbeWithStop.new(deliveries, stopped), name: "probe")
 
-      stopped.receive.should eq("stopped")
+      select
+      when signal = stopped.receive
+        signal.should eq("stopped")
+      when timeout(2.seconds)
+        fail "replayed control message was not delivered after peer restart"
+      end
       wait_for_association { remote_ref.connection.pending_control_count == 0 }
       select
       when value = deliveries.receive
@@ -278,6 +286,31 @@ describe "Movie remote associations" do
 
     observation.should eq(Movie::Remote::ControlObservation::New)
     delivered.should be_true
+  end
+
+  it "raises explicitly when the pending control buffer is saturated" do
+    settings = Movie::Remote::AssociationSettings.new(
+      reconnect_min_backoff: 1.second,
+      reconnect_max_backoff: 1.second,
+      reconnect_jitter: 0.0,
+      control_buffer_capacity: 1
+    )
+    client = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "saturation-client")
+    client_remote = client.enable_remoting("127.0.0.1", 0, 1, settings)
+    target = Movie::ActorPath.new(
+      Movie::Address.remote("missing-server", "127.0.0.1", 1),
+      ["user", "target"]
+    )
+    remote_ref = client_remote.actor_ref(target, String)
+
+    begin
+      remote_ref.send_system(Movie::STOP)
+      expect_raises(Movie::Remote::RemoteDeliveryError, /control buffer is full/) do
+        remote_ref.send_system(Movie::STOP)
+      end
+    ensure
+      client.shutdown(1.second)
+    end
   end
 
   it "acknowledges control messages and purges watches when their inbound generation closes" do
@@ -374,6 +407,54 @@ describe "Movie remote associations" do
     end
   end
 
+  it "rejects a captured handshake confirmation against a fresh server challenge" do
+    secret = "replay-secret"
+    settings = Movie::Remote::AssociationSettings.new(shared_secret: secret)
+    server = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "replay-auth-server")
+    remote = server.enable_remoting("127.0.0.1", 0, 1, settings)
+    first = TCPSocket.new("127.0.0.1", remote.local_port)
+    second = nil.as(TCPSocket?)
+
+    begin
+      hello = Movie::Remote::AssociationHandshake.create(
+        system: "replay-auth-client",
+        address: "movie.tcp://replay-auth-client@127.0.0.1:9000",
+        node_uid: "captured-node",
+        association_id: "captured-association",
+        shared_secret: secret,
+        nonce: "captured-client-nonce"
+      )
+      Movie::Remote::FrameCodec.encode(Movie::Remote::WireEnvelope.handshake(hello), first)
+      first_ack = Movie::Remote::FrameCodec.decode(first).not_nil!
+      first_challenge = Movie::Remote::AssociationHandshake.from_json(first_ack.payload_data.json_source)
+      captured_confirmation = Movie::Remote::AssociationConfirmation.create(hello, first_challenge, secret)
+      Movie::Remote::FrameCodec.encode(
+        Movie::Remote::WireEnvelope.handshake_confirm(captured_confirmation),
+        first
+      )
+      Movie::Remote::FrameCodec.decode(first).not_nil!.kind.handshake_ready?.should be_true
+      first.close
+
+      second = TCPSocket.new("127.0.0.1", remote.local_port)
+      Movie::Remote::FrameCodec.encode(Movie::Remote::WireEnvelope.handshake(hello), second)
+      second_ack = Movie::Remote::FrameCodec.decode(second).not_nil!
+      second_challenge = Movie::Remote::AssociationHandshake.from_json(second_ack.payload_data.json_source)
+      second_challenge.nonce.should_not eq(first_challenge.nonce)
+      Movie::Remote::FrameCodec.encode(
+        Movie::Remote::WireEnvelope.handshake_confirm(captured_confirmation),
+        second
+      )
+
+      rejection = Movie::Remote::FrameCodec.decode(second).not_nil!
+      rejection.kind.handshake_reject?.should be_true
+      rejection.payload["reason"].as_s.should contain("confirmation")
+    ensure
+      first.close rescue nil
+      second.try &.close
+      server.shutdown(1.second)
+    end
+  end
+
   it "closes an inbound association when the peer stops heartbeating" do
     settings = Movie::Remote::AssociationSettings.new(
       heartbeat_interval: 10.milliseconds,
@@ -391,8 +472,7 @@ describe "Movie remote associations" do
         node_uid: "silent-node",
         association_id: "silent-association"
       )
-      Movie::Remote::FrameCodec.encode(Movie::Remote::WireEnvelope.handshake(handshake), socket)
-      Movie::Remote::FrameCodec.decode(socket).not_nil!.kind.handshake_ack?.should be_true
+      Movie::Remote::AssociationNegotiator.connect(socket, handshake, "heartbeat-server", nil)
 
       sleep 100.milliseconds
       Movie::Remote::FrameCodec.decode(socket).should be_nil

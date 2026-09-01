@@ -14,16 +14,18 @@ module Movie::Remote
   struct WireEnvelope
     # The kind of message being sent.
     enum Kind
-      USER_MESSAGE     # Regular user message to an actor
-      SYSTEM_MESSAGE   # System message (watch, stop, etc.)
-      ASK_REQUEST      # Request part of ask pattern
-      ASK_RESPONSE     # Response part of ask pattern
-      HANDSHAKE        # Connection handshake
-      HANDSHAKE_ACK    # Successful handshake response
-      HANDSHAKE_REJECT # Explicit handshake rejection
-      HEARTBEAT        # Keep-alive heartbeat
-      HEARTBEAT_ACK    # Keep-alive response
-      CONTROL_ACK      # Reliable system/control acknowledgement
+      USER_MESSAGE      # Regular user message to an actor
+      SYSTEM_MESSAGE    # System message (watch, stop, etc.)
+      ASK_REQUEST       # Request part of ask pattern
+      ASK_RESPONSE      # Response part of ask pattern
+      HANDSHAKE         # Connection handshake
+      HANDSHAKE_ACK     # Successful handshake response
+      HANDSHAKE_CONFIRM # Client proof over the fresh server challenge
+      HANDSHAKE_READY   # Association may now carry actor traffic
+      HANDSHAKE_REJECT  # Explicit handshake rejection
+      HEARTBEAT         # Keep-alive heartbeat
+      HEARTBEAT_ACK     # Keep-alive response
+      CONTROL_ACK       # Reliable system/control acknowledgement
     end
 
     property kind : Kind
@@ -241,6 +243,24 @@ module Movie::Remote
         target_path: "",
         message_type: "handshake_reject",
         payload: HandshakeRejection.new(reason)
+      )
+    end
+
+    def self.handshake_confirm(confirmation : AssociationConfirmation) : WireEnvelope
+      new(
+        kind: Kind::HANDSHAKE_CONFIRM,
+        target_path: "",
+        message_type: "handshake_confirm",
+        payload: confirmation
+      )
+    end
+
+    def self.handshake_ready(association_id : String) : WireEnvelope
+      new(
+        kind: Kind::HANDSHAKE_READY,
+        target_path: "",
+        message_type: "handshake_ready",
+        payload: HandshakeReady.new(association_id)
       )
     end
 

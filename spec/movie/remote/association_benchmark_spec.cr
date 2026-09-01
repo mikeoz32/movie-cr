@@ -34,6 +34,10 @@ if ASSOCIATION_BENCH_ENABLED
       remote_ref = client_remote.actor_ref(target, String)
 
       begin
+        remote_ref.send_system(Movie::Watch.new(watcher).as(Movie::SystemMessage))
+        remote_ref.send_system(Movie::Unwatch.new(watcher).as(Movie::SystemMessage))
+        wait_for_association_benchmark { remote_ref.connection.pending_control_count == 0 }
+
         elapsed = Time.measure do
           iterations.times do |index|
             message = index.even? ? Movie::Watch.new(watcher) : Movie::Unwatch.new(watcher)

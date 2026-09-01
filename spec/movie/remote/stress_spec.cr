@@ -1,5 +1,6 @@
 require "../../spec_helper"
 require "../../../src/movie"
+require "process/executable_path"
 
 STRESS_ENABLED = ENV["MOVIE_STRESS"]? == "1"
 
@@ -32,6 +33,111 @@ private class StressDeliveryProbe < Movie::AbstractBehavior(StressMessage)
   def ids : Array(Int64)
     @ids_mutex.synchronize { @ids.dup }
   end
+end
+
+private class StressAskProbe < Movie::AbstractBehavior(StressMessage)
+  def receive(message : StressMessage, context : Movie::ActorContext(StressMessage))
+    unless message.payload == "no-reply"
+      Movie::Ask.reply_if_asked(context.sender, CounterMessage.new(message.id.to_i32))
+    end
+    Movie::Behaviors(StressMessage).same
+  end
+end
+
+private class StressControlProbe < Movie::AbstractBehavior(String)
+  def receive(message : String, context : Movie::ActorContext(String))
+    Movie::Behaviors(String).same
+  end
+
+  def on_signal(signal : Movie::SystemMessage)
+    if signal.is_a?(Movie::PostStop)
+      puts "MOVIE_ASSOCIATION_CONTROL_STOPPED"
+      STDOUT.flush
+    end
+  end
+end
+
+private class StressWatcher < Movie::AbstractBehavior(String)
+  def receive(message : String, context : Movie::ActorContext(String))
+    Movie::Behaviors(String).same
+  end
+end
+
+private def run_association_peer : NoReturn
+  port = ENV["MOVIE_ASSOCIATION_PEER_PORT"].to_i
+  Movie::Remote::MessageRegistry.register(StressMessage)
+  Movie::Remote::MessageRegistry.register(CounterMessage)
+  system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "process-chaos-server")
+  system.spawn(StressAskProbe.new, name: "actor")
+  system.spawn(StressControlProbe.new, name: "control")
+  system.enable_remoting("127.0.0.1", port, 1)
+  puts "MOVIE_ASSOCIATION_PEER_READY"
+  STDOUT.flush
+  STDIN.gets
+  system.shutdown(1.second)
+  exit
+end
+
+private def wait_for_peer_line(child : Process, expected : String, timeout_span : Time::Span = 5.seconds) : Nil
+  found = Channel(Bool).new(1)
+  spawn do
+    matched = false
+    while line = child.output.gets
+      if line == expected
+        matched = true
+        break
+      end
+    end
+    found.send(matched)
+  end
+  select
+  when matched = found.receive
+    raise "association peer exited before #{expected}" unless matched
+  when timeout(timeout_span)
+    raise "association peer did not emit #{expected}"
+  end
+end
+
+run_association_peer if ENV["MOVIE_ASSOCIATION_PEER_MODE"]? == "1"
+
+private def spawn_association_peer(port : Int32) : Process
+  executable = Process.executable_path || raise "cannot resolve stress executable path"
+  child = Process.new(
+    executable,
+    env: {
+      "MOVIE_ASSOCIATION_PEER_MODE" => "1",
+      "MOVIE_ASSOCIATION_PEER_PORT" => port.to_s,
+    },
+    input: Process::Redirect::Pipe,
+    output: Process::Redirect::Pipe,
+    error: Process::Redirect::Inherit
+  )
+  ready = Channel(Bool).new(1)
+  spawn do
+    found = false
+    while line = child.output.gets
+      if line == "MOVIE_ASSOCIATION_PEER_READY"
+        found = true
+        break
+      end
+    end
+    ready.send(found)
+  end
+  select
+  when found = ready.receive
+    raise "association peer exited before readiness" unless found
+  when timeout(5.seconds)
+    child.terminate(graceful: false)
+    raise "association peer readiness timed out"
+  end
+  child
+end
+
+private def unused_tcp_port : Int32
+  server = TCPServer.new("127.0.0.1", 0)
+  port = server.local_address.port
+  server.close
+  port
 end
 
 # Helper to wait with timeout
@@ -306,6 +412,73 @@ if STRESS_ENABLED
     end
 
     describe "End-to-end TCP stress" do
+      it "reconnects one remote ref across an abrupt two-process peer restart" do
+        port = unused_tcp_port
+        first_peer = spawn_association_peer(port)
+        second_peer = nil.as(Process?)
+        settings = Movie::Remote::AssociationSettings.new(
+          reconnect_min_backoff: 10.milliseconds,
+          reconnect_max_backoff: 100.milliseconds,
+          reconnect_jitter: 0.0,
+          heartbeat_interval: 20.milliseconds,
+          heartbeat_timeout: 200.milliseconds
+        )
+        client = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "process-chaos-client")
+        client_remote = client.enable_remoting("127.0.0.1", 0, 1, settings)
+        target = Movie::ActorPath.new(
+          Movie::Address.remote("process-chaos-server", "127.0.0.1", port),
+          ["user", "actor"]
+        )
+        remote_ref = client_remote.actor_ref(target, StressMessage)
+        control_path = Movie::ActorPath.new(
+          Movie::Address.remote("process-chaos-server", "127.0.0.1", port),
+          ["user", "control"]
+        )
+        control_ref = client_remote.actor_ref(control_path, String)
+        watcher = client.spawn(StressWatcher.new, name: "watcher")
+
+        begin
+          control_ref.send_system(Movie::Watch.new(watcher).as(Movie::SystemMessage))
+          wait_until_stress { control_ref.connection.pending_control_count == 0 }
+          first = remote_ref.ask(StressMessage.new(1_i64, "first"), CounterMessage, 1.second).await(2.seconds)
+          first.count.should eq(1)
+          first_generation = remote_ref.connection.generation
+
+          interrupted = remote_ref.ask(
+            StressMessage.new(99_i64, "no-reply"),
+            CounterMessage,
+            5.seconds
+          )
+          first_peer.signal(Signal::STOP)
+          wait_until_stress { !remote_ref.connection.active? }
+          expect_raises(Movie::Remote::RemoteDeliveryError) { interrupted.await(1.second) }
+
+          first_peer.terminate(graceful: false)
+          first_peer.wait
+          control_ref.send_system(Movie::STOP)
+
+          second_peer = spawn_association_peer(port)
+          wait_until_stress do
+            remote_ref.connection.active? && remote_ref.connection.generation > first_generation
+          end
+          wait_for_peer_line(second_peer, "MOVIE_ASSOCIATION_CONTROL_STOPPED")
+          wait_until_stress { control_ref.connection.pending_control_count == 0 }
+          second = remote_ref.ask(StressMessage.new(2_i64, "second"), CounterMessage, 1.second).await(2.seconds)
+          second.count.should eq(2)
+        ensure
+          client.shutdown(1.second)
+          unless first_peer.terminated?
+            first_peer.input.close rescue nil
+            first_peer.wait
+          end
+          if peer = second_peer
+            peer.input.close rescue nil
+            status = peer.wait
+            status.success?.should be_true
+          end
+        end
+      end
+
       it "survives repeated peer restarts with one long-lived remote ref" do
         restart_count = ENV.fetch("MOVIE_ASSOCIATION_CHAOS_RESTARTS", "10").to_i
         Movie::Remote::MessageRegistry.register(StressMessage)
@@ -375,8 +548,17 @@ if STRESS_ENABLED
         sent = Atomic(Int32).new(0)
         errors = Atomic(Int32).new(0)
 
-        handshake = Movie::Remote::WireEnvelope.handshake("tcp-client", "movie.tcp://tcp-client@127.0.0.1:0")
-        Movie::Remote::FrameCodec.encode(handshake, client_socket)
+        Movie::Remote::AssociationNegotiator.connect(
+          client_socket,
+          Movie::Remote::AssociationHandshake.create(
+            system: "tcp-client",
+            address: "movie.tcp://tcp-client@127.0.0.1:0",
+            node_uid: "tcp-client-node",
+            association_id: UUID.random.to_s
+          ),
+          "tcp-server",
+          nil
+        )
 
         elapsed = Time.measure do
           num_messages.times do |i|
@@ -421,9 +603,17 @@ if STRESS_ENABLED
         client_socket = TCPSocket.new("127.0.0.1", server_port)
         client_socket.tcp_nodelay = true
 
-        # Send handshake
-        handshake = Movie::Remote::WireEnvelope.handshake("bidir-client", "movie.tcp://bidir-client@127.0.0.1:0")
-        Movie::Remote::FrameCodec.encode(handshake, client_socket)
+        Movie::Remote::AssociationNegotiator.connect(
+          client_socket,
+          Movie::Remote::AssociationHandshake.create(
+            system: "bidir-client",
+            address: "movie.tcp://bidir-client@127.0.0.1:0",
+            node_uid: "bidir-client-node",
+            association_id: UUID.random.to_s
+          ),
+          "bidir-server",
+          nil
+        )
 
         # Send heartbeats
         num_heartbeats = 100

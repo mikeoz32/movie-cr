@@ -15,7 +15,7 @@ The current protocol supports:
 - bounded exponential reconnect with jitter while existing remote refs stay valid;
 - heartbeat failure detection in both directions;
 - acknowledged, sequenced, and deduplicated outbound system/control delivery;
-- optional HMAC handshake authentication and application-owned transport wrapping hooks;
+- replay-resistant HMAC challenge-response authentication and application-owned transport wrapping hooks;
 - binding to port `0` for test or dynamically allocated local ports.
 
 User messages deliberately remain ordered-per-stripe, at-most-once traffic. A message accepted by the current socket writer is not a delivery acknowledgement and is never replayed across a socket generation. Remote asks fail when their carrying generation is lost. Use the persistence transactional outbox when a business message must survive process or network failure.
@@ -109,7 +109,9 @@ The high-level `ActorContext#ask` and `ActorSystem#ask` overloads currently acce
 
 ## System Messages
 
-The supported remote subset is deliberately explicit. System messages initiated through `RemoteActorRef#send_system` receive a monotonic per-stripe control sequence, remain in a bounded pending buffer, and are replayed after reconnect until the receiver acknowledges them. The receiving node deduplicates the stable node/stream/sequence tuple before local routing.
+The supported remote subset is deliberately explicit. System messages initiated through `RemoteActorRef#send_system` receive a monotonic per-stripe control sequence, remain in a bounded pending buffer, and are replayed after reconnect until the receiver acknowledges them. The receiving node deduplicates the stable node/stream/sequence tuple before local routing. When a peer process restart changes its node UID, remaining control work is moved to a fresh stream and resequenced from one rather than being mistaken for a gap in the new process.
+
+Reverse `Terminated` and `Failed` notifications use a prewarmed outbound control association to the watcher's published address, so they receive the same sequence/ACK/dedup contract instead of being written at-most-once through the inbound socket. The watch itself remains owned by the inbound generation and is removed if that generation closes.
 
 | Message | Meaning |
 |---|---|
@@ -140,7 +142,7 @@ settings = Movie::Remote::AssociationSettings.new(
 system.enable_remoting("0.0.0.0", 2552, 8, settings)
 ```
 
-The same settings are available under `remoting.*` configuration keys. Both peers must use the same non-empty shared secret when authentication is enabled. The handshake sends an HMAC-SHA256 proof over the protocol identity and nonce; it never sends the secret itself.
+The same settings are available under `remoting.*` configuration keys. Both peers must use the same non-empty shared secret when authentication is enabled. The client first proves its versioned identity, the server returns a signed fresh challenge, and the client confirms both nonces before either side accepts actor traffic. A captured confirmation is invalid on the next socket generation, and the secret itself is never sent over the wire.
 
 HMAC authenticates the handshake but does not encrypt actor traffic. Deployments that need TLS supply `client_transport_factory` and `server_transport_wrapper` callbacks returning an `IO`, typically an application-configured `OpenSSL::SSL::Socket::Client` and `Server`. Certificate loading, rotation, trust roots, and server-name policy intentionally remain application responsibilities.
 
@@ -178,6 +180,8 @@ MOVIE_STRESS=1 crystal spec spec/movie/remote/stress_spec.cr -Dpreview_mt -Dexec
 MOVIE_BENCH=1 crystal spec --release spec/movie/remote/association_benchmark_spec.cr \
   -Dpreview_mt -Dexecution_context
 ```
+
+The stress executable re-execs itself as a real peer process and covers a stopped/silent process, interruption of an in-flight ask, replay of queued control work after a new peer UID, and reuse of the same remote ref after restart.
 
 Build the example:
 

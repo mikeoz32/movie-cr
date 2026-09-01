@@ -111,6 +111,22 @@ describe Movie::Remote::WireEnvelope do
       rejection.kind.should eq(Movie::Remote::WireEnvelope::Kind::HANDSHAKE_REJECT)
       rejection.payload["reason"].as_s.should eq("unsupported protocol version")
     end
+
+    it "creates handshake confirmation and ready frames" do
+      confirmation = Movie::Remote::AssociationConfirmation.new(
+        association_id: "association-1",
+        node_uid: "client-node",
+        client_nonce: "client-nonce",
+        server_nonce: "server-nonce",
+        auth_proof: "proof"
+      )
+
+      confirm = Movie::Remote::WireEnvelope.handshake_confirm(confirmation)
+      ready = Movie::Remote::WireEnvelope.handshake_ready("association-1")
+
+      confirm.kind.handshake_confirm?.should be_true
+      ready.kind.handshake_ready?.should be_true
+    end
   end
 
   describe ".heartbeat" do

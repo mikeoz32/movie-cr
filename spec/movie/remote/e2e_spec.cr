@@ -166,12 +166,16 @@ describe "Movie Remote E2E" do
         ["user", "probe"]
       )
       socket = TCPSocket.new("127.0.0.1", server_remote.local_port)
-      Movie::Remote::FrameCodec.encode(
-        Movie::Remote::WireEnvelope.handshake(
-          "malformed-payload-client",
-          "movie.tcp://malformed-payload-client@127.0.0.1:0"
+      Movie::Remote::AssociationNegotiator.connect(
+        socket,
+        Movie::Remote::AssociationHandshake.create(
+          system: "malformed-payload-client",
+          address: "movie.tcp://malformed-payload-client@127.0.0.1:0",
+          node_uid: "malformed-payload-client-node",
+          association_id: UUID.random.to_s
         ),
-        socket
+        server_system.name,
+        nil
       )
 
       write_reordered_user_frame(
@@ -442,6 +446,7 @@ describe "Movie Remote E2E" do
       end
 
       received_path.should eq(target_path)
+      server_remote.pool_stats.any? { |stats| stats.address == client_remote.address.to_s }.should be_true
     ensure
       client_system.try &.shutdown(1.second)
       server_system.try &.shutdown(1.second)

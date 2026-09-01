@@ -80,22 +80,32 @@ module Movie::Remote
     Log = ::Log.for(self)
 
     private class RemoteSystemRef < Movie::ActorRefBase
-      def initialize(@path_registry : Movie::PathRegistry, @connection : InboundConnection?, path : ActorPath)
+      def initialize(
+        @path_registry : Movie::PathRegistry,
+        @connection : InboundConnection?,
+        @control_sender : Proc(WireEnvelope, Bool)?,
+        path : ActorPath,
+      )
         super(0, path)
       end
 
       def send_system(message : Movie::SystemMessage)
         path = self.path || raise RemoteDeliveryError.new("Remote system ref is missing a path")
-        connection = @connection || raise RemoteDeliveryError.new("No remote connection is available for #{path}")
         tag, payload = SystemMessageCodec.serialize(message, @path_registry)
+        envelope = WireEnvelope.system_message(
+          target_path: path.to_s,
+          message_type: tag,
+          payload: payload
+        )
+        sent = if control_sender = @control_sender
+                 control_sender.call(envelope)
+               elsif connection = @connection
+                 connection.send(envelope)
+               else
+                 false
+               end
 
-        unless connection.send(WireEnvelope.system_message(
-                 target_path: path.to_s,
-                 message_type: tag,
-                 payload: payload
-               ))
-          Log.warn { "Failed to send system message to #{path}" }
-        end
+        Log.error { "Failed to queue reliable system message to #{path}" } unless sent
       end
 
       def ==(other : Movie::ActorRefBase) : Bool
@@ -189,16 +199,6 @@ module Movie::Remote
     def pool_for(address : Address) : StripedConnectionPool
       key = address.to_s
 
-      stale_pool = nil.as(StripedConnectionPool?)
-      @pools_mutex.synchronize do
-        if existing = @pools[key]?
-          return existing unless existing.stopped?
-          # Pool exists but is disconnected - remove it
-          stale_pool = @pools.delete(key)
-        end
-      end
-      stale_pool.try &.close
-
       pool = StripedConnectionPool.new(
         address: address,
         path_registry: path_registry,
@@ -212,18 +212,22 @@ module Movie::Remote
         }
       )
 
-      pool.connect
-
-      @pools_mutex.synchronize do
+      stale_pool = nil.as(StripedConnectionPool?)
+      selected = @pools_mutex.synchronize do
         if existing = @pools[key]?
-          unless existing.stopped?
-            pool.close
-            return existing
-          end
-          existing.close
+          next existing unless existing.stopped?
+          stale_pool = @pools.delete(key)
         end
         @pools[key] = pool
+        pool
       end
+      unless selected.same?(pool)
+        pool.close
+        return selected
+      end
+
+      stale_pool.try &.close
+      pool.connect
 
       pool
     end
@@ -338,7 +342,7 @@ module Movie::Remote
       if ask_request && correlation_id && conn
         RemoteAskResponseSenderRef.new(conn, correlation_id, path)
       else
-        path ? RemoteSystemRef.new(path_registry, nil, path) : nil
+        path ? RemoteSystemRef.new(path_registry, nil, nil, path) : nil
       end
     end
 
@@ -373,6 +377,7 @@ module Movie::Remote
         case system_message
         when Movie::Watch
           connection.track_watch(context.ref, system_message.actor)
+          prewarm_control_association(system_message.actor)
         when Movie::Unwatch
           connection.untrack_watch(context.ref, system_message.actor)
         end
@@ -413,7 +418,11 @@ module Movie::Remote
       actor_path = payload["actor_path"]?.try(&.as_s)
       raise RemoteUnsupportedSystemMessageError.new("Remote system message is missing actor_path") unless actor_path
 
-      RemoteSystemRef.new(path_registry, conn, ActorPath.parse(actor_path))
+      path = ActorPath.parse(actor_path)
+      control_sender = if conn
+                         ->(envelope : WireEnvelope) { pool_for(path.address).send_control(envelope) }
+                       end
+      RemoteSystemRef.new(path_registry, conn, control_sender, path)
     rescue ex : ArgumentError
       raise RemoteUnsupportedSystemMessageError.new("Invalid remote actor path #{actor_path}: #{ex.message}")
     end
@@ -424,6 +433,17 @@ module Movie::Remote
       rescue ex
         Log.warn { "Failed to purge remote watch after association loss: #{ex.message}" }
       end
+    end
+
+    private def prewarm_control_association(watcher : Movie::ActorRefBase) : Nil
+      path = watcher.path
+      return unless path
+      address = path.address
+      return unless address.remote?
+      return unless port = address.port
+      return unless port > 0
+
+      spawn { pool_for(address) }
     end
   end
 

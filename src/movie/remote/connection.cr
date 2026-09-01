@@ -1,6 +1,9 @@
 require "socket"
 require "sync/mutex"
 require "./association"
+require "./association_negotiator"
+require "./control_delivery"
+require "./pending_asks"
 require "./wire_envelope"
 require "./frame_codec"
 require "./outbound_writer"
@@ -28,12 +31,8 @@ module Movie::Remote
     @last_received_ms = Atomic(Int64).new(0_i64)
     @socket : IO?
     @outbound_writer : OutboundWriter?
-    @pending_asks : Hash(String, Channel(WireEnvelope))
-    @pending_asks_mutex : Mutex
-    @control_stream = UUID.random.to_s
-    @control_sequence = 0_i64
-    @pending_control : Hash(Int64, WireEnvelope)
-    @control_mutex : Mutex
+    @pending_asks : PendingAskRegistry
+    @pending_control : PendingControlBuffer
     @lifecycle_mutex : Mutex
     @reconnect_running = Atomic(Bool).new(false)
     @connect_attempts = Atomic(Int64).new(0_i64)
@@ -41,6 +40,7 @@ module Movie::Remote
     @disconnects = Atomic(Int64).new(0_i64)
     @heartbeat_timeouts = Atomic(Int64).new(0_i64)
     @protocol_failures = Atomic(Int64).new(0_i64)
+    @remote_node_uid : String?
 
     def initialize(
       @address : Address,
@@ -51,10 +51,8 @@ module Movie::Remote
       @settings : AssociationSettings = AssociationSettings.new,
       @on_message : Proc(WireEnvelope, Nil)? = nil,
     )
-      @pending_asks = {} of String => Channel(WireEnvelope)
-      @pending_asks_mutex = Mutex.new
-      @pending_control = {} of Int64 => WireEnvelope
-      @control_mutex = Mutex.new
+      @pending_asks = PendingAskRegistry.new
+      @pending_control = PendingControlBuffer.new(@settings.control_buffer_capacity)
       @lifecycle_mutex = Mutex.new
     end
 
@@ -99,17 +97,15 @@ module Movie::Remote
     end
 
     def register_pending_ask(correlation_id : String) : Channel(WireEnvelope)
-      channel = Channel(WireEnvelope).new(1)
-      @pending_asks_mutex.synchronize { @pending_asks[correlation_id] = channel }
-      channel
+      @pending_asks.register(correlation_id)
     end
 
     def remove_pending_ask(correlation_id : String)
-      @pending_asks_mutex.synchronize { @pending_asks.delete(correlation_id) }
+      @pending_asks.remove(correlation_id)
     end
 
     def pending_control_count : Int32
-      @control_mutex.synchronize { @pending_control.size }
+      @pending_control.size
     end
 
     def stats : ConnectionStats
@@ -122,7 +118,7 @@ module Movie::Remote
         heartbeat_timeouts: @heartbeat_timeouts.get,
         protocol_failures: @protocol_failures.get,
         last_received_at_ms: @last_received_ms.get,
-        pending_asks: @pending_asks_mutex.synchronize { @pending_asks.size },
+        pending_asks: @pending_asks.size,
         pending_control: pending_control_count
       )
     end
@@ -130,16 +126,15 @@ module Movie::Remote
     # Reliable system/control messages remain pending until acknowledged and
     # are replayed in sequence after a new socket generation is active.
     def send_control(envelope : WireEnvelope) : Bool
-      writer = @lifecycle_mutex.synchronize { active? ? @outbound_writer : nil }
-      @control_mutex.synchronize do
-        return false if closed? || @pending_control.size >= @settings.control_buffer_capacity
-        @control_sequence += 1
-        envelope.control_stream = @control_stream
-        envelope.control_sequence = @control_sequence
-        @pending_control[@control_sequence] = envelope
+      writer = nil.as(OutboundWriter?)
+      ready = @lifecycle_mutex.synchronize do
+        return false if closed?
+        writer = @outbound_writer if active?
+        @pending_control.offer(envelope)
       end
+      return false unless ready
 
-      writer.try &.enqueue(envelope)
+      writer.try &.enqueue(ready)
       true
     end
 
@@ -157,7 +152,7 @@ module Movie::Remote
       writer.try &.close
       socket.try &.close rescue nil
       fail_pending_asks
-      @control_mutex.synchronize { @pending_control.clear }
+      @pending_control.clear
       Log.info { "Association to #{@address} stopped" }
     end
 
@@ -193,9 +188,16 @@ module Movie::Remote
             association_id: association_id,
             shared_secret: @settings.shared_secret
           )
-          FrameCodec.encode(WireEnvelope.handshake(handshake), transport.not_nil!)
-          response = FrameCodec::Decoder.new.decode(transport.not_nil!)
-          validate_handshake_response(response, association_id)
+          peer_handshake = AssociationNegotiator.connect(
+            transport.not_nil!,
+            handshake,
+            @address.system,
+            @settings.shared_secret
+          )
+          if remote_node_uid = @remote_node_uid
+            @pending_control.rebase if remote_node_uid != peer_handshake.node_uid
+          end
+          @remote_node_uid = peer_handshake.node_uid
           transport.as?(TCPSocket).try { |tcp| tcp.read_timeout = nil }
 
           generation = @generation.add(1) + 1
@@ -210,6 +212,7 @@ module Movie::Remote
           writer.start
           resend_pending_control(writer)
         rescue ex : Exception
+          @protocol_failures.add(1) if ex.is_a?(AssociationProtocolError)
           transport.try &.close rescue nil
           @socket = nil
           @outbound_writer = nil
@@ -223,25 +226,6 @@ module Movie::Remote
       start_heartbeat(generation)
       Log.info { "Association generation #{generation} connected to #{@address}" }
       true
-    end
-
-    private def validate_handshake_response(response : WireEnvelope?, association_id : String) : Nil
-      raise RemoteDeliveryError.new("peer closed during association handshake") unless response
-      if response.kind.handshake_reject?
-        rejection = HandshakeRejection.from_json(response.payload_data.json_source)
-        protocol_failure("association rejected: #{rejection.reason}")
-      end
-      protocol_failure("expected handshake acknowledgement") unless response.kind.handshake_ack?
-
-      handshake = AssociationHandshake.from_json(response.payload_data.json_source)
-      protocol_failure("peer protocol version mismatch") unless handshake.protocol_version == PROTOCOL_VERSION
-      protocol_failure("peer system mismatch") unless handshake.system == @address.system
-      protocol_failure("association acknowledgement mismatch") unless handshake.association_id == association_id
-      protocol_failure("peer authentication failed") unless handshake.authenticated?(@settings.shared_secret)
-      missing_capabilities = DEFAULT_CAPABILITIES.reject { |capability| handshake.capabilities.includes?(capability) }
-      unless missing_capabilities.empty?
-        protocol_failure("peer capabilities are missing: #{missing_capabilities.join(", ")}")
-      end
     end
 
     private def start_reader(socket : IO, generation : Int64) : Nil
@@ -286,7 +270,7 @@ module Movie::Remote
       case envelope.kind
       when .ask_response?
         if correlation_id = envelope.correlation_id
-          channel = @pending_asks_mutex.synchronize { @pending_asks.delete(correlation_id) }
+          channel = @pending_asks.remove(correlation_id)
           channel.try &.send(envelope)
         end
       when .heartbeat?
@@ -294,13 +278,10 @@ module Movie::Remote
       when .heartbeat_ack?
         # last-received activity was updated before dispatch
       when .control_ack?
-        stream = envelope.control_stream
-        sequence = envelope.control_sequence
-        if stream == @control_stream && sequence
-          @control_mutex.synchronize { @pending_control.delete(sequence) }
-        end
-      when .handshake?, .handshake_ack?, .handshake_reject?
-        protocol_failure("unexpected handshake frame on active generation #{generation}")
+        @pending_control.acknowledge(envelope.control_stream, envelope.control_sequence)
+      when .handshake?, .handshake_ack?, .handshake_confirm?, .handshake_ready?, .handshake_reject?
+        @protocol_failures.add(1)
+        raise AssociationProtocolError.new("unexpected handshake frame on active generation #{generation}")
       else
         @on_message.try &.call(envelope)
       end
@@ -369,17 +350,12 @@ module Movie::Remote
     end
 
     private def fail_pending_asks : Nil
-      @pending_asks_mutex.synchronize do
-        @pending_asks.each_value(&.close)
-        @pending_asks.clear
-      end
+      @pending_asks.fail_all
     end
 
     private def resend_pending_control(writer : OutboundWriter) : Nil
-      @control_mutex.synchronize do
-        @pending_control.keys.sort.each do |sequence|
-          break unless writer.enqueue(@pending_control[sequence])
-        end
+      @pending_control.pending.each do |envelope|
+        break unless writer.enqueue(envelope)
       end
     end
 
@@ -393,11 +369,6 @@ module Movie::Remote
         transition(State::Backoff)
         true
       end
-    end
-
-    private def protocol_failure(message : String) : NoReturn
-      @protocol_failures.add(1)
-      raise RemoteDeliveryError.new(message)
     end
 
     private def transition(state : State) : Nil

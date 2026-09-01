@@ -6,7 +6,7 @@
 
 **Fixed point:** `49768eb`.
 
-**Status:** In progress.
+**Status:** Completed (2026-09-01).
 
 **Delivery contract:**
 
@@ -18,7 +18,7 @@
 
 ## Task 18.1: Versioned association handshake
 
-**Status:** In progress.
+**Status:** Completed.
 
 - Give every actor-system process a stable runtime node UID and every socket a generation ID.
 - Negotiate protocol version and capabilities before accepting application frames.
@@ -26,7 +26,7 @@
 
 ## Task 18.2: Reconnect lifecycle
 
-**Status:** Planned.
+**Status:** Completed.
 
 - Model disconnected, connecting, handshaking, active, backoff, and stopped states.
 - Reconnect with bounded exponential backoff and jitter while preserving existing remote refs.
@@ -34,7 +34,7 @@
 
 ## Task 18.3: Reliable control delivery
 
-**Status:** Planned.
+**Status:** Completed.
 
 - Sequence and acknowledge system messages without acknowledging user traffic.
 - Deduplicate retransmitted control frames and bound pending control state.
@@ -42,7 +42,7 @@
 
 ## Task 18.4: Association cleanup
 
-**Status:** Planned.
+**Status:** Completed.
 
 - Fail pending asks from a lost socket generation.
 - Purge remote watch registrations owned by a closed inbound generation.
@@ -50,7 +50,7 @@
 
 ## Task 18.5: Heartbeat and failure detection
 
-**Status:** Planned.
+**Status:** Completed.
 
 - Exchange lightweight heartbeats outside the actor mailbox path.
 - Close and reconnect associations whose peer is silent beyond the configured timeout.
@@ -58,7 +58,7 @@
 
 ## Task 18.6: Authentication and transport hooks
 
-**Status:** Planned.
+**Status:** Completed.
 
 - Support a fail-closed shared-secret handshake authenticator without sending the secret on the wire.
 - Expose client/server socket wrapping hooks so deployments can install TLS or another secured transport.
@@ -66,7 +66,7 @@
 
 ## Task 18.7: Chaos and performance evidence
 
-**Status:** Planned.
+**Status:** Completed.
 
 - Cover peer restart, half-open/silent peer, ask interruption, and control retransmission with deterministic two-process tests.
 - Add opt-in reconnect/control benchmarks and a configurable soak scenario.
@@ -74,12 +74,22 @@
 
 ## Completion checklist
 
-- [ ] Failing tests written first.
-- [ ] Failing tests observed red.
-- [ ] Minimal implementations written.
-- [ ] Targeted verification green.
-- [ ] Broader verification green.
-- [ ] Formatting check green.
-- [ ] Docs/examples updated.
-- [ ] Review requested.
-- [ ] Review feedback addressed.
+- [x] Failing tests written first.
+- [x] Failing tests observed red.
+- [x] Minimal implementations written.
+- [x] Targeted verification green.
+- [x] Broader verification green.
+- [x] Formatting check green.
+- [x] Docs/examples updated.
+- [x] Review requested.
+- [x] Review feedback addressed.
+
+## Completion notes
+
+- The three-flight handshake negotiates protocol/capabilities and uses a fresh server challenge for replay-resistant optional HMAC authentication. Client/server `IO` hooks keep TLS certificate policy outside Movie.
+- Logical connections survive socket loss with bounded exponential backoff, heartbeat timeout detection, generation-safe ask failure, and observable counters. A stopped connection remains terminal under reconnect races.
+- User messages remain at-most-once. Outbound and reverse lifecycle control traffic uses bounded sequence/ACK/dedup state; a changed peer node UID rebases pending control onto a new stream.
+- Inbound watch ownership is generation-scoped and disconnect cleanup sends local compensating `Unwatch` messages.
+- The opt-in stress harness uses a separate OS process to cover silent-process detection, interrupted asks, control replay, peer restart, and reuse of one remote ref. The release benchmark reports acknowledged control throughput and peer-restart reconnect latency without thresholds.
+- The first implementation commit grouped tasks 18.1-18.6 more broadly than the repository's preferred one-task commit shape. Review-driven protocol, concurrency, and decomposition corrections are isolated in follow-up commits; future distributed epics should retain task-sized commits from the start.
+- Final verification passes 318 examples on both Crystal 1.21 and the minimum supported Crystal 1.19.1, 159 focused remoting/config examples, 12 opt-in stress examples, formatting/dependency checks, and all 9 examples. The final host observation at 1,000 acknowledged controls and three restarts is 49,252 control messages/s with reconnect p50 10.15ms and p95 10.51ms; these are measurements, not thresholds.

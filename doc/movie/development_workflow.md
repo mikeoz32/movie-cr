@@ -104,6 +104,6 @@ Copy this checklist into task notes when executing an epic:
 
 ## Repository-Specific Guidance
 
-- Treat remoting as an experimental MVP and follow [remoting.md](remoting.md) for its supported protocol and limitations.
+- Treat remoting associations as a production beta while preserving the at-most-once user-message contract and the cluster limitations documented in [remoting.md](remoting.md).
 - Treat persistence as stable enough to extend, but require regression tests before touching recovery or storage semantics.
 - Keep stdout noise out of default runtime paths; use structured logging instead.

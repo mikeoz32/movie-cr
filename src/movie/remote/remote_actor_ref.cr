@@ -147,7 +147,7 @@ module Movie::Remote
       )
 
       unless @dedicated_connection.send_control(envelope)
-        Log.warn { "Failed to send system message to #{@target_path}" }
+        raise RemoteDeliveryError.new("Remote control buffer is full for #{@target_path}")
       end
     end
 
