@@ -348,7 +348,7 @@ module Movie::Remote
         delay = @settings.reconnect_min_backoff
         begin
           until closed? || active?
-            transition(State::Backoff)
+            break unless enter_backoff?
             sleep jittered(delay)
             break if closed? || attempt_connect
             next_delay = delay.total_nanoseconds * @settings.reconnect_factor
@@ -385,6 +385,14 @@ module Movie::Remote
 
     private def current_generation?(generation : Int64) : Bool
       active? && @generation.get == generation
+    end
+
+    private def enter_backoff? : Bool
+      @lifecycle_mutex.synchronize do
+        return false if closed? || active?
+        transition(State::Backoff)
+        true
+      end
     end
 
     private def protocol_failure(message : String) : NoReturn
