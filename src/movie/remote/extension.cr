@@ -284,6 +284,18 @@ module Movie::Remote
       end
     end
 
+    # Receiver-side reliable-control state for operational capacity alerts.
+    def control_deduplication_stats : ControlDeduplicationStats
+      @server.control_deduplication_stats
+    end
+
+    # Reclaims reliable-control cursors for a process incarnation that has
+    # been confirmed permanently stopped. Retiring a live node breaks its
+    # sequence continuity and is therefore deliberately never automatic.
+    def retire_control_node(node_uid : String) : Int32
+      @server.retire_control_node(node_uid)
+    end
+
     private def handle_incoming_message(envelope : WireEnvelope, conn : InboundConnection?)
       case envelope.kind
       when .user_message?, .ask_request?

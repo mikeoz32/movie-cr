@@ -550,6 +550,7 @@ describe Movie::ActorSystemConfig do
       .set_duration("remoting.heartbeat.interval", 250.milliseconds)
       .set_duration("remoting.heartbeat.timeout", 2.seconds)
       .set("remoting.control-buffer-capacity", 321)
+      .set("remoting.control-deduplication-capacity", 654)
       .set("remoting.shared-secret", "configured-secret")
       .build
     system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, config)
@@ -564,6 +565,7 @@ describe Movie::ActorSystemConfig do
       settings.heartbeat_interval.should eq(250.milliseconds)
       settings.heartbeat_timeout.should eq(2.seconds)
       settings.control_buffer_capacity.should eq(321)
+      settings.control_deduplication_capacity.should eq(654)
       settings.shared_secret.should eq("configured-secret")
     ensure
       system.shutdown(1.second)
@@ -577,6 +579,7 @@ describe Movie::ActorSystemConfig do
 
     config.get_int("executor.pool-size").should eq(4)
     config.get_int("executor.queue-capacity").should eq(128)
+    config.get_int("remoting.control-deduplication-capacity").should eq(8192)
     config.get_string("persistence.backend").should eq("sqlite")
     config.get_string("persistence.connection-uri").should eq("")
     config.get_string("persistence.db-path").should eq("data/movie_persistence.sqlite3")

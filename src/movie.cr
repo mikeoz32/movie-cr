@@ -1145,6 +1145,7 @@ module Movie
         heartbeat_interval: @config.get_duration(ActorSystemConfig::REMOTING_HEARTBEAT_INTERVAL, 1.second),
         heartbeat_timeout: @config.get_duration(ActorSystemConfig::REMOTING_HEARTBEAT_TIMEOUT, 5.seconds),
         control_buffer_capacity: @config.get_int(ActorSystemConfig::REMOTING_CONTROL_CAPACITY, 1024),
+        control_deduplication_capacity: @config.get_int(ActorSystemConfig::REMOTING_CONTROL_DEDUP_CAPACITY, 8192),
         shared_secret: shared_secret.empty? ? nil : shared_secret
       )
       enable_remoting(host, port, stripe_count, settings)

@@ -215,6 +215,27 @@ private def spawn_ack_loss_peer(port : Int32) : Process
   child
 end
 
+private def stop_peer_bounded(child : Process, timeout_span : Time::Span = 1.second) : Process::Status
+  child.input.close rescue nil
+  stopped = Channel(Process::Status).new(1)
+  spawn do
+    stopped.send(child.wait)
+  end
+
+  select
+  when status = stopped.receive
+    status
+  when timeout(timeout_span)
+    child.terminate(graceful: false) unless child.terminated?
+    select
+    when status = stopped.receive
+      status
+    when timeout(timeout_span)
+      raise "association peer did not terminate after forced shutdown"
+    end
+  end
+end
+
 private def unused_tcp_port : Int32
   server = TCPServer.new("127.0.0.1", 0)
   port = server.local_address.port
@@ -523,8 +544,7 @@ if STRESS_ENABLED
           end
         ensure
           client.shutdown(1.second)
-          peer.input.close rescue nil
-          status = peer.wait
+          status = stop_peer_bounded(peer)
           status.success?.should be_true
         end
       end

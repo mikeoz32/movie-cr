@@ -109,7 +109,7 @@ The high-level `ActorContext#ask` and `ActorSystem#ask` overloads currently acce
 
 ## System Messages
 
-The supported remote subset is deliberately explicit. System messages initiated through `RemoteActorRef#send_system` receive a monotonic per-stripe control sequence, remain in a bounded pending buffer, and are replayed after reconnect until the receiver acknowledges them. The receiving node deduplicates the stable node/stream/sequence tuple before local routing. Deduplication state is bounded to 8,192 streams and fails closed for a new stream at capacity rather than evicting an established stream and turning its next frame into a permanent sequence gap. When a peer process restart changes its node UID, remaining control work is moved to a fresh stream and resequenced from one rather than being mistaken for a gap in the new process.
+The supported remote subset is deliberately explicit. System messages initiated through `RemoteActorRef#send_system` receive a monotonic per-stripe control sequence, remain in a bounded pending buffer, and are replayed after reconnect until the receiver acknowledges them. The receiving node deduplicates the stable node/stream/sequence tuple before local routing. Deduplication state defaults to 8,192 streams and fails closed for a new stream at capacity rather than evicting a tracked stream and turning its next frame into a permanent sequence gap. When a peer process restart changes its node UID, remaining control work is moved to a fresh stream and resequenced from one rather than being mistaken for a gap in the new process.
 
 Reverse `Terminated` and `Failed` notifications use a prewarmed outbound control association to the watcher's published address, so they receive the same sequence/ACK/dedup contract instead of being written at-most-once through the inbound socket. The watch itself remains owned by the inbound generation and is removed if that generation closes.
 
@@ -136,6 +136,7 @@ settings = Movie::Remote::AssociationSettings.new(
   heartbeat_interval: 1.second,
   heartbeat_timeout: 5.seconds,
   control_buffer_capacity: 1024,
+  control_deduplication_capacity: 8192,
   shared_secret: ENV["MOVIE_REMOTE_SECRET"]?
 )
 
@@ -145,6 +146,8 @@ system.enable_remoting("0.0.0.0", 2552, 8, settings)
 The same settings are available under `remoting.*` configuration keys. Both peers must use the same non-empty shared secret when authentication is enabled. The client first proves its versioned identity, the server returns a signed fresh challenge, and the client confirms both nonces before either side accepts actor traffic. A captured confirmation is invalid on the next socket generation, and the secret itself is never sent over the wire.
 
 HMAC authenticates the handshake but does not encrypt actor traffic. Deployments that need TLS supply `client_transport_factory` and `server_transport_wrapper` callbacks returning an `IO`, typically an application-configured `OpenSSL::SSL::Socket::Client` and `Server`. Certificate loading, rotation, trust roots, and server-name policy intentionally remain application responsibilities.
+
+`RemoteExtension#control_deduplication_stats` reports tracked streams, configured capacity, rejected admissions, and the node UIDs currently retaining cursors. Alert before the receiver approaches capacity. Once an operator has independently confirmed that a specific process incarnation is permanently stopped, `RemoteExtension#retire_control_node(node_uid)` releases all of its cursors and returns the number removed. Never retire a live or reconnectable node: its next control sequence will no longer have a valid deduplication history. This lifecycle is deliberately explicit because an elapsed-time heuristic cannot prove that a distributed peer is permanently dead. Authenticate associations in exposed deployments so an unknown peer cannot consume receiver-side stream capacity anonymously.
 
 ## Failure detection and observability
 

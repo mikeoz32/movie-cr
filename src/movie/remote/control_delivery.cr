@@ -5,6 +5,12 @@ module Movie::Remote
   class ControlDeduplicationCapacityError < Exception
   end
 
+  record ControlDeduplicationStats,
+    tracked_streams : Int32,
+    capacity : Int32,
+    capacity_rejections : Int64,
+    node_uids : Array(String)
+
   enum ControlObservation
     New
     Duplicate
@@ -22,6 +28,7 @@ module Movie::Remote
   class ControlDeduplicator
     @streams = {} of String => ControlStreamState
     @mutex = Mutex.new
+    @capacity_rejections = Atomic(Int64).new(0_i64)
 
     def initialize(@max_streams : Int32 = 8192)
       raise ArgumentError.new("maximum control streams must be positive") unless @max_streams > 0
@@ -48,9 +55,30 @@ module Movie::Remote
       end
     end
 
-    def forget(node_uid : String) : Nil
+    # Retires all streams for a process incarnation. Callers must only use this
+    # after confirming that the node UID cannot reconnect.
+    def retire_node(node_uid : String) : Int32
       prefix = "#{node_uid}\0"
-      @mutex.synchronize { @streams.reject! { |key, _| key.starts_with?(prefix) } }
+      @mutex.synchronize do
+        keys = @streams.keys.select(&.starts_with?(prefix))
+        keys.each { |key| @streams.delete(key) }
+        keys.size
+      end
+    end
+
+    def stats : ControlDeduplicationStats
+      @mutex.synchronize do
+        node_uids = @streams.keys.map do |key|
+          separator = key.index('\0') || key.bytesize
+          key.byte_slice(0, separator)
+        end.uniq.sort
+        ControlDeduplicationStats.new(
+          tracked_streams: @streams.size,
+          capacity: @max_streams,
+          capacity_rejections: @capacity_rejections.get,
+          node_uids: node_uids
+        )
+      end
     end
 
     private def state_for(node_uid : String, stream : String) : ControlStreamState
@@ -60,6 +88,7 @@ module Movie::Remote
           return state
         end
         if @streams.size >= @max_streams
+          @capacity_rejections.add(1)
           raise ControlDeduplicationCapacityError.new(
             "control deduplication capacity #{@max_streams} is exhausted"
           )

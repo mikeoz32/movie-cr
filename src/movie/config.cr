@@ -878,45 +878,47 @@ module Movie
   #   remoting.heartbeat.interval    - Heartbeat interval
   #   remoting.heartbeat.timeout     - Peer silence timeout
   #   remoting.control-buffer-capacity - Pending reliable control limit
+  #   remoting.control-deduplication-capacity - Receiver-side control stream limit
   #   remoting.shared-secret         - Optional HMAC handshake secret
   #
   module ActorSystemConfig
-    NAME                          = "name"
-    ROOT_RESTART_STRATEGY         = "root.restart-strategy"
-    SUPERVISION_STRATEGY          = "supervision.strategy"
-    SUPERVISION_SCOPE             = "supervision.scope"
-    SUPERVISION_MAX_RESTARTS      = "supervision.max-restarts"
-    SUPERVISION_WITHIN            = "supervision.within"
-    SUPERVISION_BACKOFF_MIN       = "supervision.backoff.min"
-    SUPERVISION_BACKOFF_MAX       = "supervision.backoff.max"
-    SUPERVISION_BACKOFF_FACTOR    = "supervision.backoff.factor"
-    SUPERVISION_BACKOFF_JITTER    = "supervision.backoff.jitter"
-    REMOTING_ENABLED              = "remoting.enabled"
-    REMOTING_HOST                 = "remoting.host"
-    REMOTING_PORT                 = "remoting.port"
-    REMOTING_STRIPE_COUNT         = "remoting.stripe-count"
-    REMOTING_HANDSHAKE_TIMEOUT    = "remoting.handshake-timeout"
-    REMOTING_RECONNECT_MIN        = "remoting.reconnect.min-backoff"
-    REMOTING_RECONNECT_MAX        = "remoting.reconnect.max-backoff"
-    REMOTING_RECONNECT_FACTOR     = "remoting.reconnect.factor"
-    REMOTING_RECONNECT_JITTER     = "remoting.reconnect.jitter"
-    REMOTING_HEARTBEAT_INTERVAL   = "remoting.heartbeat.interval"
-    REMOTING_HEARTBEAT_TIMEOUT    = "remoting.heartbeat.timeout"
-    REMOTING_CONTROL_CAPACITY     = "remoting.control-buffer-capacity"
-    REMOTING_SHARED_SECRET        = "remoting.shared-secret"
-    EXECUTOR_POOL_SIZE            = "executor.pool-size"
-    EXECUTOR_QUEUE_CAPACITY       = "executor.queue-capacity"
-    PERSISTENCE_DB_PATH           = "persistence.db-path"
-    PERSISTENCE_BACKEND           = "persistence.backend"
-    PERSISTENCE_CONNECTION_URI    = "persistence.connection-uri"
-    PERSISTENCE_POOL_SIZE         = "persistence.pool-size"
-    PERSISTENCE_IO_QUEUE_CAPACITY = "persistence.io-queue-capacity"
-    PERSISTENCE_OPERATION_TIMEOUT = "persistence.operation-timeout"
-    PERSISTENCE_RETRY_MAX_RETRIES = "persistence.retry.max-retries"
-    PERSISTENCE_RETRY_MIN_BACKOFF = "persistence.retry.min-backoff"
-    PERSISTENCE_RETRY_MAX_BACKOFF = "persistence.retry.max-backoff"
-    PERSISTENCE_CIRCUIT_THRESHOLD = "persistence.circuit-breaker.failure-threshold"
-    PERSISTENCE_CIRCUIT_RESET     = "persistence.circuit-breaker.reset-timeout"
+    NAME                            = "name"
+    ROOT_RESTART_STRATEGY           = "root.restart-strategy"
+    SUPERVISION_STRATEGY            = "supervision.strategy"
+    SUPERVISION_SCOPE               = "supervision.scope"
+    SUPERVISION_MAX_RESTARTS        = "supervision.max-restarts"
+    SUPERVISION_WITHIN              = "supervision.within"
+    SUPERVISION_BACKOFF_MIN         = "supervision.backoff.min"
+    SUPERVISION_BACKOFF_MAX         = "supervision.backoff.max"
+    SUPERVISION_BACKOFF_FACTOR      = "supervision.backoff.factor"
+    SUPERVISION_BACKOFF_JITTER      = "supervision.backoff.jitter"
+    REMOTING_ENABLED                = "remoting.enabled"
+    REMOTING_HOST                   = "remoting.host"
+    REMOTING_PORT                   = "remoting.port"
+    REMOTING_STRIPE_COUNT           = "remoting.stripe-count"
+    REMOTING_HANDSHAKE_TIMEOUT      = "remoting.handshake-timeout"
+    REMOTING_RECONNECT_MIN          = "remoting.reconnect.min-backoff"
+    REMOTING_RECONNECT_MAX          = "remoting.reconnect.max-backoff"
+    REMOTING_RECONNECT_FACTOR       = "remoting.reconnect.factor"
+    REMOTING_RECONNECT_JITTER       = "remoting.reconnect.jitter"
+    REMOTING_HEARTBEAT_INTERVAL     = "remoting.heartbeat.interval"
+    REMOTING_HEARTBEAT_TIMEOUT      = "remoting.heartbeat.timeout"
+    REMOTING_CONTROL_CAPACITY       = "remoting.control-buffer-capacity"
+    REMOTING_CONTROL_DEDUP_CAPACITY = "remoting.control-deduplication-capacity"
+    REMOTING_SHARED_SECRET          = "remoting.shared-secret"
+    EXECUTOR_POOL_SIZE              = "executor.pool-size"
+    EXECUTOR_QUEUE_CAPACITY         = "executor.queue-capacity"
+    PERSISTENCE_DB_PATH             = "persistence.db-path"
+    PERSISTENCE_BACKEND             = "persistence.backend"
+    PERSISTENCE_CONNECTION_URI      = "persistence.connection-uri"
+    PERSISTENCE_POOL_SIZE           = "persistence.pool-size"
+    PERSISTENCE_IO_QUEUE_CAPACITY   = "persistence.io-queue-capacity"
+    PERSISTENCE_OPERATION_TIMEOUT   = "persistence.operation-timeout"
+    PERSISTENCE_RETRY_MAX_RETRIES   = "persistence.retry.max-retries"
+    PERSISTENCE_RETRY_MIN_BACKOFF   = "persistence.retry.min-backoff"
+    PERSISTENCE_RETRY_MAX_BACKOFF   = "persistence.retry.max-backoff"
+    PERSISTENCE_CIRCUIT_THRESHOLD   = "persistence.circuit-breaker.failure-threshold"
+    PERSISTENCE_CIRCUIT_RESET       = "persistence.circuit-breaker.reset-timeout"
 
     # Returns the default configuration for an ActorSystem.
     def self.default : Config
@@ -948,6 +950,7 @@ module Movie
         .set_duration(REMOTING_HEARTBEAT_INTERVAL, 1.second)
         .set_duration(REMOTING_HEARTBEAT_TIMEOUT, 5.seconds)
         .set(REMOTING_CONTROL_CAPACITY, 1024)
+        .set(REMOTING_CONTROL_DEDUP_CAPACITY, 8192)
         .set(REMOTING_SHARED_SECRET, "")
 
         # Executor defaults

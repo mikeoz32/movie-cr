@@ -57,6 +57,7 @@ module Movie::Remote
     getter heartbeat_interval : Time::Span
     getter heartbeat_timeout : Time::Span
     getter control_buffer_capacity : Int32
+    getter control_deduplication_capacity : Int32
     getter shared_secret : String?
     getter client_transport_factory : ClientTransportFactory?
     getter server_transport_wrapper : ServerTransportWrapper?
@@ -70,6 +71,7 @@ module Movie::Remote
       @heartbeat_interval : Time::Span = 1.second,
       @heartbeat_timeout : Time::Span = 5.seconds,
       @control_buffer_capacity : Int32 = 1024,
+      @control_deduplication_capacity : Int32 = 8192,
       @shared_secret : String? = nil,
       @client_transport_factory : ClientTransportFactory? = nil,
       @server_transport_wrapper : ServerTransportWrapper? = nil,
@@ -82,6 +84,7 @@ module Movie::Remote
       raise ArgumentError.new("heartbeat interval must be positive") unless @heartbeat_interval > Time::Span.zero
       raise ArgumentError.new("heartbeat timeout must exceed heartbeat interval") unless @heartbeat_timeout > @heartbeat_interval
       raise ArgumentError.new("control buffer capacity must be positive") unless @control_buffer_capacity > 0
+      raise ArgumentError.new("control deduplication capacity must be positive") unless @control_deduplication_capacity > 0
       raise ArgumentError.new("shared secret must not be empty") if @shared_secret.try(&.empty?)
     end
 

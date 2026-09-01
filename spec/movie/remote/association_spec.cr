@@ -297,7 +297,30 @@ describe "Movie remote associations" do
       deduplicator.observe("node-c", "stream-c", 1_i64)
     end
 
+    saturated = deduplicator.stats
+    saturated.tracked_streams.should eq(2)
+    saturated.capacity.should eq(2)
+    saturated.capacity_rejections.should eq(1)
+    saturated.node_uids.should eq(["node-a", "node-b"])
     deduplicator.observe("node-a", "stream-a", 2_i64).should eq(Movie::Remote::ControlObservation::New)
+    deduplicator.retire_node("node-a").should eq(1)
+    deduplicator.observe("node-c", "stream-c", 1_i64).should eq(Movie::Remote::ControlObservation::New)
+    deduplicator.stats.node_uids.should eq(["node-b", "node-c"])
+  end
+
+  it "exposes deduplication capacity and explicit node retirement to operators" do
+    settings = Movie::Remote::AssociationSettings.new(control_deduplication_capacity: 2)
+    system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "dedup-operator-server")
+    remote = system.enable_remoting("127.0.0.1", 0, 1, settings)
+
+    begin
+      stats = remote.control_deduplication_stats
+      stats.capacity.should eq(2)
+      stats.tracked_streams.should eq(0)
+      remote.retire_control_node("retired-node").should eq(0)
+    ensure
+      system.shutdown(1.second)
+    end
   end
 
   it "keeps jittered reconnect delays within the configured maximum" do

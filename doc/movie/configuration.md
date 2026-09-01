@@ -52,6 +52,7 @@ config = file.with_env_overrides
 | `remoting.heartbeat.interval` | Duration | `1s` | Interval between association heartbeats. |
 | `remoting.heartbeat.timeout` | Duration | `5s` | Maximum peer silence before reconnect. |
 | `remoting.control-buffer-capacity` | Int | `1024` | Pending acknowledged system messages per stripe. |
+| `remoting.control-deduplication-capacity` | Int | `8192` | Receiver-side node/stream cursors retained for control deduplication. |
 | `remoting.shared-secret` | String | empty | Optional HMAC handshake secret; use environment injection in deployments. |
 | `executor.pool-size` | Int | `4` | Bounded executor worker count. |
 | `executor.queue-capacity` | Int | `128` | Number of queued executor tasks. |
@@ -83,6 +84,7 @@ The default prefix is `MOVIE`. Canonical environment names use `__` between dott
 | `MOVIE_REMOTING__RECONNECT__MIN_BACKOFF` | `remoting.reconnect.min-backoff` |
 | `MOVIE_REMOTING__HEARTBEAT__TIMEOUT` | `remoting.heartbeat.timeout` |
 | `MOVIE_REMOTING__CONTROL_BUFFER_CAPACITY` | `remoting.control-buffer-capacity` |
+| `MOVIE_REMOTING__CONTROL_DEDUPLICATION_CAPACITY` | `remoting.control-deduplication-capacity` |
 | `MOVIE_REMOTING__SHARED_SECRET` | `remoting.shared-secret` |
 | `MOVIE_EXECUTOR__QUEUE_CAPACITY` | `executor.queue-capacity` |
 | `MOVIE_PERSISTENCE__BACKEND` | `persistence.backend` |

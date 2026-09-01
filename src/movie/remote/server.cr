@@ -20,7 +20,7 @@ module Movie::Remote
     @accept_fiber : Fiber?
     @connections : Array(InboundConnection)
     @connections_mutex : Mutex
-    @control_deduplicator = ControlDeduplicator.new
+    @control_deduplicator : ControlDeduplicator
 
     def initialize(
       @system : Movie::AbstractActorSystem,
@@ -35,6 +35,7 @@ module Movie::Remote
     )
       @connections = [] of InboundConnection
       @connections_mutex = Mutex.new
+      @control_deduplicator = ControlDeduplicator.new(@settings.control_deduplication_capacity)
     end
 
     # Starts the server.
@@ -78,6 +79,17 @@ module Movie::Remote
     # Returns the actual bound port (useful when binding to port 0).
     def local_port : Int32
       @tcp_server.try(&.local_address.port) || @port
+    end
+
+    def control_deduplication_stats : ControlDeduplicationStats
+      @control_deduplicator.stats
+    end
+
+    # Releases receiver-side cursors only for a node incarnation that the
+    # operator has independently confirmed will never reconnect.
+    def retire_control_node(node_uid : String) : Int32
+      raise ArgumentError.new("control node UID must not be empty") if node_uid.empty?
+      @control_deduplicator.retire_node(node_uid)
     end
 
     private def start_accept_loop
