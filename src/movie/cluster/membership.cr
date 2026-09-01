@@ -185,7 +185,7 @@ module Movie::Cluster
     ) : Bool
       current = member(candidate.unique_address)
       return true if current == candidate
-      return candidate.changed_by == candidate.unique_address.node_uid if candidate.status.joining?
+      return false if candidate.status.joining?
       return true if current.nil? &&
                      candidate.status.up? &&
                      candidate.unique_address == sender &&

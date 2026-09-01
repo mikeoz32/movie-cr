@@ -206,12 +206,12 @@ module Movie::Cluster
       candidate = message.member
       return unless candidate &&
                     candidate.unique_address == message.sender &&
-                    candidate.status.joining? &&
+                    (candidate.status.joining? ||
+                    (candidate.status.up? && seed_address?(candidate.unique_address.address))) &&
                     candidate.changed_by == message.sender.node_uid
 
-      @membership.merge([candidate])
-      current = @membership.member(candidate.unique_address).not_nil!
-      if current.status.joining? && @membership.local_leader?
+      if @membership.local_leader?
+        @membership.merge([candidate])
         @membership.promote_joining_if_leader
       end
       @transport.send(candidate.unique_address.address, ProtocolMessage.welcome(
@@ -225,6 +225,11 @@ module Movie::Cluster
       return unless seed_address?(message.sender.address)
       @membership.merge(message.members)
       @membership.promote_joining_if_leader
+      if self_member.status.joining?
+        if leader = snapshot.leader
+          send_join(leader.address) unless leader == @self_unique_address
+        end
+      end
     end
 
     private def handle_gossip(message : ProtocolMessage) : Nil

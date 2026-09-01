@@ -22,7 +22,7 @@ worker = worker_system.enable_cluster(Movie::Cluster::ClusterSettings.new(
 worker.await_up(10.seconds)
 ```
 
-An empty seed list forms a one-node cluster immediately. A non-seed starts as `Joining` and retries every `join_retry_interval` until a configured seed returns membership containing that exact address and node UID as `Up`. Repeated `enable_cluster`, join, welcome, and gossip messages are idempotent.
+An empty seed list forms a one-node cluster immediately. A configured seed whose list contains its own address also starts as `Up` and retries the other configured seeds until their independently formed memberships converge. A non-seed starts as `Joining` and retries every `join_retry_interval` until the leader returns membership containing that exact address and node UID as `Up`. A non-leader seed returns its current state so the joining process can contact the leader directly; it never relays an unauthenticated `Joining` identity through gossip. Repeated `enable_cluster`, join, welcome, and gossip messages are idempotent.
 
 ## Identity and membership
 

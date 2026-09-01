@@ -9,6 +9,13 @@ private def wait_for_cluster(timeout_span : Time::Span = 3.seconds, &block : -> 
   end
 end
 
+private def reserve_cluster_test_ports(count : Int32) : Array(Int32)
+  servers = Array(TCPServer).new(count) { TCPServer.new("127.0.0.1", 0) }
+  servers.map(&.local_address.port)
+ensure
+  servers.try &.each(&.close)
+end
+
 private class RemoteStopOrderProbe < Movie::Extension
   def initialize(@events : Array(String), @mutex : Mutex)
   end
@@ -149,6 +156,35 @@ describe Movie::Cluster::ClusterExtension do
     end
   end
 
+  it "converges two configured seed nodes that both initialize as up" do
+    first_port, second_port = reserve_cluster_test_ports(2)
+    first_address = Movie::Address.remote("a-static-seed", "127.0.0.1", first_port)
+    second_address = Movie::Address.remote("b-static-seed", "127.0.0.1", second_port)
+    seeds = [first_address, second_address]
+    settings = -> { Movie::Cluster::ClusterSettings.new(
+      seed_nodes: seeds,
+      join_retry_interval: 20.milliseconds,
+      gossip_interval: 20.milliseconds
+    ) }
+    first_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "a-static-seed")
+    first_system.enable_remoting("127.0.0.1", first_port, 1)
+    first = first_system.enable_cluster(settings.call)
+    second_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "b-static-seed")
+    second_system.enable_remoting("127.0.0.1", second_port, 1)
+    second = second_system.enable_cluster(settings.call)
+
+    begin
+      wait_for_cluster(5.seconds) do
+        [first, second].all? do |cluster|
+          cluster.snapshot.members.count(&.status.up?) == 2 && cluster.converged?
+        end
+      end
+    ensure
+      second_system.shutdown(1.second)
+      first_system.shutdown(1.second)
+    end
+  end
+
   it "rejects terminal gossip not authored by the current leader" do
     seed_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "a-authority-seed")
     seed_remote = seed_system.enable_remoting("127.0.0.1", 0, 1)
@@ -194,6 +230,31 @@ describe Movie::Cluster::ClusterExtension do
       )
 
       seed.self_member.status.up?.should be_true
+
+      phantom = Movie::Cluster::UniqueAddress.new(
+        Movie::Address.remote("phantom-node", "127.0.0.1", 64_997),
+        "phantom-uid"
+      )
+      phantom_joining = Movie::Cluster::Member.new(
+        phantom,
+        Movie::Cluster::MemberStatus::Joining,
+        [] of String,
+        1_i64,
+        phantom.node_uid
+      )
+      seed.handle_protocol(
+        Movie::Cluster::ProtocolMessage.gossip(
+          seed.settings.cluster_name,
+          peer.self_unique_address,
+          [phantom_joining],
+          2_i64,
+          "phantom"
+        ),
+        sender_path,
+        peer.self_unique_address.address,
+        peer.self_unique_address.node_uid
+      )
+      seed.snapshot.member(phantom).should be_nil
     ensure
       peer_system.shutdown(1.second)
       seed_system.shutdown(1.second)
