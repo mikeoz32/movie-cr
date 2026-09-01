@@ -78,6 +78,71 @@ private def run_association_peer : NoReturn
   exit
 end
 
+private def complete_ack_loss_handshake(socket : TCPSocket, decoder : Movie::Remote::FrameCodec::Decoder, port : Int32) : Nil
+  request = decoder.decode(socket) || raise "ack-loss peer closed before handshake"
+  raise "ack-loss peer expected handshake" unless request.kind.handshake?
+  client = Movie::Remote::AssociationHandshake.from_json(request.payload_data.json_source)
+  challenge = Movie::Remote::AssociationHandshake.create(
+    system: "process-ack-server",
+    address: "movie.tcp://process-ack-server@127.0.0.1:#{port}",
+    node_uid: "stable-ack-loss-node",
+    association_id: client.association_id
+  )
+  Movie::Remote::FrameCodec.encode(Movie::Remote::WireEnvelope.handshake_ack(challenge), socket)
+
+  confirmation = decoder.decode(socket) || raise "ack-loss peer closed before confirmation"
+  raise "ack-loss peer expected handshake confirmation" unless confirmation.kind.handshake_confirm?
+  Movie::Remote::FrameCodec.encode(Movie::Remote::WireEnvelope.handshake_ready(client.association_id), socket)
+end
+
+private def next_ack_loss_control(socket : TCPSocket, decoder : Movie::Remote::FrameCodec::Decoder) : Movie::Remote::WireEnvelope
+  loop do
+    envelope = decoder.decode(socket) || raise "ack-loss peer closed before control frame"
+    if envelope.kind.heartbeat?
+      Movie::Remote::FrameCodec.encode(Movie::Remote::WireEnvelope.heartbeat_ack, socket)
+    elsif envelope.kind.system_message?
+      return envelope
+    end
+  end
+end
+
+private def run_ack_loss_peer : NoReturn
+  port = ENV["MOVIE_ASSOCIATION_PEER_PORT"].to_i
+  server = TCPServer.new("127.0.0.1", port)
+  puts "MOVIE_ASSOCIATION_ACK_LOSS_READY"
+  STDOUT.flush
+
+  first = nil.as(Movie::Remote::WireEnvelope?)
+  2.times do |generation|
+    socket = server.accept
+    socket.tcp_nodelay = true
+    decoder = Movie::Remote::FrameCodec::Decoder.new
+    complete_ack_loss_handshake(socket, decoder, port)
+    control = next_ack_loss_control(socket, decoder)
+
+    if generation == 0
+      first = control
+      puts "MOVIE_ASSOCIATION_CONTROL_ACK_WITHHELD"
+      STDOUT.flush
+      socket.close
+    else
+      original = first.not_nil!
+      raise "control stream changed across ACK-loss reconnect" unless control.control_stream == original.control_stream
+      raise "control sequence changed across ACK-loss reconnect" unless control.control_sequence == original.control_sequence
+      Movie::Remote::FrameCodec.encode(
+        Movie::Remote::WireEnvelope.control_ack(control.control_stream.not_nil!, control.control_sequence.not_nil!),
+        socket
+      )
+      puts "MOVIE_ASSOCIATION_CONTROL_RETRANSMITTED"
+      STDOUT.flush
+      STDIN.gets
+      socket.close
+    end
+  end
+  server.close
+  exit
+end
+
 private def wait_for_peer_line(child : Process, expected : String, timeout_span : Time::Span = 5.seconds) : Nil
   found = Channel(Bool).new(1)
   spawn do
@@ -99,6 +164,7 @@ private def wait_for_peer_line(child : Process, expected : String, timeout_span 
 end
 
 run_association_peer if ENV["MOVIE_ASSOCIATION_PEER_MODE"]? == "1"
+run_ack_loss_peer if ENV["MOVIE_ASSOCIATION_ACK_LOSS_MODE"]? == "1"
 
 private def spawn_association_peer(port : Int32) : Process
   executable = Process.executable_path || raise "cannot resolve stress executable path"
@@ -130,6 +196,22 @@ private def spawn_association_peer(port : Int32) : Process
     child.terminate(graceful: false)
     raise "association peer readiness timed out"
   end
+  child
+end
+
+private def spawn_ack_loss_peer(port : Int32) : Process
+  executable = Process.executable_path || raise "cannot resolve stress executable path"
+  child = Process.new(
+    executable,
+    env: {
+      "MOVIE_ASSOCIATION_ACK_LOSS_MODE" => "1",
+      "MOVIE_ASSOCIATION_PEER_PORT"     => port.to_s,
+    },
+    input: Process::Redirect::Pipe,
+    output: Process::Redirect::Pipe,
+    error: Process::Redirect::Inherit
+  )
+  wait_for_peer_line(child, "MOVIE_ASSOCIATION_ACK_LOSS_READY")
   child
 end
 
@@ -412,6 +494,41 @@ if STRESS_ENABLED
     end
 
     describe "End-to-end TCP stress" do
+      it "retransmits an unacknowledged control frame across a two-process reconnect" do
+        port = unused_tcp_port
+        peer = spawn_ack_loss_peer(port)
+        settings = Movie::Remote::AssociationSettings.new(
+          reconnect_min_backoff: 10.milliseconds,
+          reconnect_max_backoff: 100.milliseconds,
+          reconnect_jitter: 0.0,
+          heartbeat_interval: 20.milliseconds,
+          heartbeat_timeout: 200.milliseconds
+        )
+        client = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "process-ack-client")
+        client_remote = client.enable_remoting("127.0.0.1", 0, 1, settings)
+        target = Movie::ActorPath.new(
+          Movie::Address.remote("process-ack-server", "127.0.0.1", port),
+          ["user", "control"]
+        )
+        remote_ref = client_remote.actor_ref(target, String)
+        first_generation = remote_ref.connection.generation
+
+        begin
+          remote_ref.send_system(Movie::STOP)
+          wait_for_peer_line(peer, "MOVIE_ASSOCIATION_CONTROL_ACK_WITHHELD")
+          wait_for_peer_line(peer, "MOVIE_ASSOCIATION_CONTROL_RETRANSMITTED")
+          wait_until_stress do
+            remote_ref.connection.generation > first_generation &&
+              remote_ref.connection.pending_control_count == 0
+          end
+        ensure
+          client.shutdown(1.second)
+          peer.input.close rescue nil
+          status = peer.wait
+          status.success?.should be_true
+        end
+      end
+
       it "reconnects one remote ref across an abrupt two-process peer restart" do
         port = unused_tcp_port
         first_peer = spawn_association_peer(port)

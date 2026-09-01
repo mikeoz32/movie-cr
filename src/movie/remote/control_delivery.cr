@@ -2,6 +2,9 @@ require "uuid"
 require "./wire_envelope"
 
 module Movie::Remote
+  class ControlDeduplicationCapacityError < Exception
+  end
+
   enum ControlObservation
     New
     Duplicate
@@ -56,7 +59,11 @@ module Movie::Remote
         if state = @streams[key]?
           return state
         end
-        @streams.shift if @streams.size >= @max_streams
+        if @streams.size >= @max_streams
+          raise ControlDeduplicationCapacityError.new(
+            "control deduplication capacity #{@max_streams} is exhausted"
+          )
+        end
         @streams[key] = ControlStreamState.new
       end
     end

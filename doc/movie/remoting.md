@@ -40,7 +40,7 @@ Encoder/decoder buffers retain at most 1 MiB per connection. Connection-owned de
 
 Each TCP connection owns one writer fiber and a bounded FIFO of at most 4,096 envelopes. A successful remote `tell` means the envelope was accepted into the active generation's queue; it is not a delivery acknowledgement. Producers return without performing socket IO while capacity is available and are backpressured when the queue is full. The writer drains up to 128 ready frames and emits chunks near 64 KiB without adding a timer delay, preserving the existing sequence of `[length][JSON]` frames and per-stripe FIFO order. Generation loss rejects new user work, releases blocked producers, and discards queued user envelopes that can no longer be delivered.
 
-Every stripe is a long-lived logical `Connection` with `Disconnected`, `Connecting`, `Handshaking`, `Active`, `Backoff`, and `Stopped` states. The socket and writer are generation-owned and replaceable. Reconnect delay grows from `50ms` to `2s` by default, with `20%` jitter. Existing `RemoteActorRef` values retain the logical connection and resume sending when it becomes active.
+Every stripe is a long-lived logical `Connection` with `Disconnected`, `Connecting`, `Handshaking`, `Active`, `Backoff`, and `Stopped` states. The socket and writer are generation-owned and replaceable. Reconnect delay grows from `50ms` to `2s` by default, with `20%` jitter; the jittered result never exceeds the configured maximum. Existing `RemoteActorRef` values retain the logical connection and resume sending when it becomes active.
 
 Inbound connections disable the Crystal socket's built-in read buffering and replace it with one connection-owned 32 KiB buffer whose ready-byte count is observable by the transport. After the first blocking frame decode, the reader decodes up to 128 complete frames already present in that buffer before handing the batch to delivery; it never waits for another frame to fill a batch. Partial headers and payloads continue through normal blocking reads into the decoder's existing bounded frame storage. This preserves one transport input buffer per connection while avoiding a new mailbox dispatch for nearly every decoded message. Canonical registered actor paths use an exact lookup cache on delivery; alternate local/remote address forms retain the normalized parsing fallback.
 
@@ -109,7 +109,7 @@ The high-level `ActorContext#ask` and `ActorSystem#ask` overloads currently acce
 
 ## System Messages
 
-The supported remote subset is deliberately explicit. System messages initiated through `RemoteActorRef#send_system` receive a monotonic per-stripe control sequence, remain in a bounded pending buffer, and are replayed after reconnect until the receiver acknowledges them. The receiving node deduplicates the stable node/stream/sequence tuple before local routing. When a peer process restart changes its node UID, remaining control work is moved to a fresh stream and resequenced from one rather than being mistaken for a gap in the new process.
+The supported remote subset is deliberately explicit. System messages initiated through `RemoteActorRef#send_system` receive a monotonic per-stripe control sequence, remain in a bounded pending buffer, and are replayed after reconnect until the receiver acknowledges them. The receiving node deduplicates the stable node/stream/sequence tuple before local routing. Deduplication state is bounded to 8,192 streams and fails closed for a new stream at capacity rather than evicting an established stream and turning its next frame into a permanent sequence gap. When a peer process restart changes its node UID, remaining control work is moved to a fresh stream and resequenced from one rather than being mistaken for a gap in the new process.
 
 Reverse `Terminated` and `Failed` notifications use a prewarmed outbound control association to the watcher's published address, so they receive the same sequence/ACK/dedup contract instead of being written at-most-once through the inbound socket. The watch itself remains owned by the inbound generation and is removed if that generation closes.
 
@@ -148,7 +148,7 @@ HMAC authenticates the handshake but does not encrypt actor traffic. Deployments
 
 ## Failure detection and observability
 
-An active outbound generation sends heartbeats at the configured interval and reconnects after the peer has been silent for the configured timeout. Inbound generations apply the same silence timeout, so a half-open or stalled client cannot retain server-side watch state indefinitely.
+An active outbound generation sends heartbeats at the configured interval and reconnects after the peer has been silent for the configured timeout. Inbound generations apply the same silence timeout, so a half-open or stalled client cannot retain server-side watch state indefinitely. Both directions measure elapsed silence with the monotonic clock, so wall-clock corrections cannot create or postpone a timeout.
 
 `RemoteActorRef#connection.stats` returns a point-in-time `ConnectionStats` snapshot with state, socket generation, connect attempts, successful connections, disconnects, heartbeat timeouts, protocol failures, last-received timestamp, pending asks, and pending control messages. `RemoteExtension#pool_stats` retains the per-address stripe summary.
 
@@ -181,7 +181,7 @@ MOVIE_BENCH=1 crystal spec --release spec/movie/remote/association_benchmark_spe
   -Dpreview_mt -Dexecution_context
 ```
 
-The stress executable re-execs itself as a real peer process and covers a stopped/silent process, interruption of an in-flight ask, replay of queued control work after a new peer UID, and reuse of the same remote ref after restart.
+The stress executable re-execs itself as a real peer process and covers a stopped/silent process, interruption of an in-flight ask, replay of queued control work after a new peer UID, reuse of the same remote ref after restart, and retransmission of the same control sequence after a real peer deliberately closes before sending its first ACK.
 
 Build the example:
 

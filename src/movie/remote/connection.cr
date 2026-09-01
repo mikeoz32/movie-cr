@@ -28,7 +28,7 @@ module Movie::Remote
 
     @state = Atomic(Int32).new(State::Disconnected.value)
     @generation = Atomic(Int64).new(0_i64)
-    @last_received_ms = Atomic(Int64).new(0_i64)
+    @last_received_monotonic_ns = Atomic(Int64).new(0_i64)
     @socket : IO?
     @outbound_writer : OutboundWriter?
     @pending_asks : PendingAskRegistry
@@ -109,6 +109,7 @@ module Movie::Remote
     end
 
     def stats : ConnectionStats
+      last_received_ns = @last_received_monotonic_ns.get
       ConnectionStats.new(
         state: state,
         generation: generation,
@@ -117,7 +118,7 @@ module Movie::Remote
         disconnects: @disconnects.get,
         heartbeat_timeouts: @heartbeat_timeouts.get,
         protocol_failures: @protocol_failures.get,
-        last_received_at_ms: @last_received_ms.get,
+        last_received_at_ms: last_received_ns == 0 ? 0_i64 : AssociationClock.wall_milliseconds(last_received_ns),
         pending_asks: @pending_asks.size,
         pending_control: pending_control_count
       )
@@ -206,7 +207,7 @@ module Movie::Remote
           end
           @socket = transport
           @outbound_writer = writer
-          @last_received_ms.set(Time.utc.to_unix_ms)
+          record_activity
           @successful_connections.add(1)
           transition(State::Active)
           writer.start
@@ -235,7 +236,7 @@ module Movie::Remote
           break unless current_generation?(generation)
           envelope = decoder.decode(socket)
           break unless envelope
-          @last_received_ms.set(Time.utc.to_unix_ms)
+          record_activity
           handle_incoming(envelope, generation)
         end
       rescue ex : Exception
@@ -251,10 +252,10 @@ module Movie::Remote
           sleep @settings.heartbeat_interval
           break unless current_generation?(generation)
 
-          silence = Time.utc.to_unix_ms - @last_received_ms.get
-          if silence > @settings.heartbeat_timeout.total_milliseconds
+          silence_ns = AssociationClock.now_nanoseconds - @last_received_monotonic_ns.get
+          if silence_ns > @settings.heartbeat_timeout.total_nanoseconds
             @heartbeat_timeouts.add(1)
-            Log.warn { "Association #{@address} timed out after #{silence}ms" }
+            Log.warn { "Association #{@address} timed out after #{silence_ns / 1_000_000}ms" }
             handle_disconnect(generation)
             break
           end
@@ -330,7 +331,7 @@ module Movie::Remote
         begin
           until closed? || active?
             break unless enter_backoff?
-            sleep jittered(delay)
+            sleep @settings.reconnect_delay(delay)
             break if closed? || attempt_connect
             next_delay = delay.total_nanoseconds * @settings.reconnect_factor
             delay = {Time::Span.new(nanoseconds: next_delay.to_i64), @settings.reconnect_max_backoff}.min
@@ -342,11 +343,8 @@ module Movie::Remote
       end
     end
 
-    private def jittered(delay : Time::Span) : Time::Span
-      jitter = @settings.reconnect_jitter
-      return delay if jitter == 0.0
-      factor = 1.0 - jitter + Random.rand * jitter * 2.0
-      Time::Span.new(nanoseconds: (delay.total_nanoseconds * factor).to_i64)
+    private def record_activity : Nil
+      @last_received_monotonic_ns.set(AssociationClock.now_nanoseconds)
     end
 
     private def fail_pending_asks : Nil

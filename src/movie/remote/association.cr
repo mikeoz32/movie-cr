@@ -20,6 +20,23 @@ module Movie::Remote
     end
   end
 
+  # Elapsed-time source for liveness decisions. Wall-clock timestamps remain
+  # available in telemetry, but clock corrections cannot affect timeouts.
+  private module AssociationClock
+    extend self
+
+    EPOCH         = Time.instant
+    EPOCH_WALL_MS = Time.utc.to_unix_ms
+
+    def now_nanoseconds : Int64
+      (Time.instant - EPOCH).total_nanoseconds.to_i64
+    end
+
+    def wall_milliseconds(monotonic_nanoseconds : Int64) : Int64
+      EPOCH_WALL_MS + monotonic_nanoseconds // 1_000_000
+    end
+  end
+
   PROTOCOL_VERSION        = 1
   CAPABILITY_CONTROL_ACKS = "control-acks-v1"
   CAPABILITY_HEARTBEATS   = "heartbeats-v1"
@@ -80,6 +97,15 @@ module Movie::Remote
 
     def wrap(socket : TCPSocket) : IO
       @server_transport_wrapper.try(&.call(socket)) || socket
+    end
+
+    # Applies symmetric jitter while preserving reconnect_max_backoff as a
+    # hard upper bound. The sample argument makes boundary behavior testable.
+    def reconnect_delay(delay : Time::Span, random : Float64 = Random.rand) : Time::Span
+      raise ArgumentError.new("reconnect random sample must be between 0 and 1") unless random.in?(0.0..1.0)
+      factor = 1.0 - @reconnect_jitter + random * @reconnect_jitter * 2.0
+      jittered = Time::Span.new(nanoseconds: (delay.total_nanoseconds * factor).to_i64)
+      {jittered, @reconnect_max_backoff}.min
     end
   end
 

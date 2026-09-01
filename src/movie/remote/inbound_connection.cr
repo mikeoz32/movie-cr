@@ -25,7 +25,7 @@ module Movie::Remote
     @server_challenge : AssociationHandshake?
     @handshake_complete = false
     @batch_decoder : InboundFrameBatchDecoder
-    @last_received_ms = Atomic(Int64).new(Time.utc.to_unix_ms)
+    @last_received_monotonic_ns = Atomic(Int64).new(AssociationClock.now_nanoseconds)
     @watches = {} of String => {Movie::ActorRefBase, Movie::ActorRefBase}
     @watches_mutex = Mutex.new
 
@@ -138,7 +138,7 @@ module Movie::Remote
     end
 
     private def handle_incoming(envelope : WireEnvelope)
-      @last_received_ms.set(Time.utc.to_unix_ms)
+      @last_received_monotonic_ns.set(AssociationClock.now_nanoseconds)
       case envelope.kind
       when .handshake?
         handle_handshake(envelope)
@@ -175,9 +175,9 @@ module Movie::Remote
         loop do
           sleep @heartbeat_interval
           break unless @connected
-          silence = Time.utc.to_unix_ms - @last_received_ms.get
-          if silence > @heartbeat_timeout.total_milliseconds
-            Log.warn { "Inbound association timed out after #{silence}ms" }
+          silence_ns = AssociationClock.now_nanoseconds - @last_received_monotonic_ns.get
+          if silence_ns > @heartbeat_timeout.total_nanoseconds
+            Log.warn { "Inbound association timed out after #{silence_ns / 1_000_000}ms" }
             close
             break
           end

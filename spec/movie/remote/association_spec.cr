@@ -288,6 +288,29 @@ describe "Movie remote associations" do
     delivered.should be_true
   end
 
+  it "fails closed at deduplication capacity without evicting active streams" do
+    deduplicator = Movie::Remote::ControlDeduplicator.new(max_streams: 2)
+
+    deduplicator.observe("node-a", "stream-a", 1_i64).should eq(Movie::Remote::ControlObservation::New)
+    deduplicator.observe("node-b", "stream-b", 1_i64).should eq(Movie::Remote::ControlObservation::New)
+    expect_raises(Movie::Remote::ControlDeduplicationCapacityError, /capacity/) do
+      deduplicator.observe("node-c", "stream-c", 1_i64)
+    end
+
+    deduplicator.observe("node-a", "stream-a", 2_i64).should eq(Movie::Remote::ControlObservation::New)
+  end
+
+  it "keeps jittered reconnect delays within the configured maximum" do
+    settings = Movie::Remote::AssociationSettings.new(
+      reconnect_min_backoff: 100.milliseconds,
+      reconnect_max_backoff: 2.seconds,
+      reconnect_jitter: 0.2
+    )
+
+    settings.reconnect_delay(2.seconds, random: 1.0).should eq(2.seconds)
+    settings.reconnect_delay(2.seconds, random: 0.0).should eq(1.6.seconds)
+  end
+
   it "raises explicitly when the pending control buffer is saturated" do
     settings = Movie::Remote::AssociationSettings.new(
       reconnect_min_backoff: 1.second,
