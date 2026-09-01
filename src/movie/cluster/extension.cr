@@ -227,7 +227,7 @@ module Movie::Cluster
       @membership.promote_joining_if_leader
       if self_member.status.joining?
         if leader = snapshot.leader
-          send_join(leader.address) unless leader == @self_unique_address
+          join(leader.address) unless leader == @self_unique_address
         end
       end
     end
@@ -330,17 +330,32 @@ module Movie::Cluster
 
     private def attempt_join : Nil
       status = self_member.status
-      return unless status.joining? || (status.up? && @membership.active_members.size == 1)
+      return unless status.joining? || status.up?
       seeds = @seed_mutex.synchronize { @seed_nodes.dup }
-      seeds.reject { |seed| seed == @self_unique_address.address }.each { |seed| send_join(seed) }
+      known_addresses = if status.up?
+                          @membership.active_members.map(&.unique_address.address).to_set
+                        else
+                          Set(Movie::Address).new
+                        end
+      seeds
+        .reject { |seed| seed == @self_unique_address.address || known_addresses.includes?(seed) }
+        .each { |seed| send_join(seed) }
     end
 
     private def send_join(seed : Movie::Address) : Nil
       @telemetry.join_attempt
+      current = self_member
+      candidate = Member.new(
+        @self_unique_address,
+        current.status,
+        current.roles,
+        current.revision,
+        @self_unique_address.node_uid
+      )
       @transport.send(seed, ProtocolMessage.join(
         @settings.cluster_name,
         @self_unique_address,
-        self_member
+        candidate
       ))
     rescue ex : Exception
       Log.debug { "Cluster join attempt to #{seed} failed: #{ex.message}" }

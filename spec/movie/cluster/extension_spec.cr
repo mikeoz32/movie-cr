@@ -1,10 +1,14 @@
 require "../../spec_helper"
 require "../../../src/movie"
 
-private def wait_for_cluster(timeout_span : Time::Span = 3.seconds, &block : -> Bool) : Nil
+private def wait_for_cluster(
+  timeout_span : Time::Span = 3.seconds,
+  label : String = "cluster condition",
+  &block : -> Bool
+) : Nil
   deadline = Time.instant + timeout_span
   until yield
-    fail "cluster condition was not met within #{timeout_span}" if Time.instant >= deadline
+    fail "#{label} was not met within #{timeout_span}" if Time.instant >= deadline
     sleep 5.milliseconds
   end
 end
@@ -174,7 +178,7 @@ describe Movie::Cluster::ClusterExtension do
     second = second_system.enable_cluster(settings.call)
 
     begin
-      wait_for_cluster(5.seconds) do
+      wait_for_cluster(5.seconds, "early seed convergence") do
         [first, second].all? do |cluster|
           cluster.snapshot.members.count(&.status.up?) == 2 && cluster.converged?
         end
@@ -182,6 +186,55 @@ describe Movie::Cluster::ClusterExtension do
     ensure
       second_system.shutdown(1.second)
       first_system.shutdown(1.second)
+    end
+  end
+
+  it "keeps discovering configured seeds after partial seed convergence" do
+    first_port, second_port, third_port = reserve_cluster_test_ports(3)
+    addresses = [
+      Movie::Address.remote("a-late-seed", "127.0.0.1", first_port),
+      Movie::Address.remote("b-early-seed", "127.0.0.1", second_port),
+      Movie::Address.remote("c-early-seed", "127.0.0.1", third_port),
+    ]
+    settings = -> { Movie::Cluster::ClusterSettings.new(
+      seed_nodes: addresses,
+      join_retry_interval: 20.milliseconds,
+      gossip_interval: 20.milliseconds
+    ) }
+    second_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "b-early-seed")
+    second_system.enable_remoting("127.0.0.1", second_port, 1)
+    second = second_system.enable_cluster(settings.call)
+    third_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "c-early-seed")
+    third_system.enable_remoting("127.0.0.1", third_port, 1)
+    third = third_system.enable_cluster(settings.call)
+    first_system = nil.as(Movie::ActorSystem(String)?)
+
+    begin
+      wait_for_cluster(5.seconds, "early seed membership") do
+        [second, third].all? { |cluster| cluster.snapshot.members.count(&.status.up?) == 2 }
+      end
+      first_system = Movie::ActorSystem(String).new(Movie::Behaviors(String).same, name: "a-late-seed")
+      first_system.enable_remoting("127.0.0.1", first_port, 1)
+      first = first_system.enable_cluster(settings.call)
+
+      deadline = Time.instant + 5.seconds
+      loop do
+        counts = [first, second, third].map { |cluster| cluster.snapshot.members.count(&.status.up?) }
+        break if counts.all?(3)
+        if Time.instant >= deadline
+          details = [first, second, third].map do |cluster|
+            systems = cluster.snapshot.members.map(&.unique_address.address.system)
+            {systems, cluster.stats.join_attempts}
+          end
+          fail "late seed membership counts did not converge: #{details}"
+        end
+        sleep 5.milliseconds
+      end
+      wait_for_cluster(5.seconds, "late seed digest convergence") { [first, second, third].all?(&.converged?) }
+    ensure
+      first_system.try &.shutdown(1.second)
+      third_system.shutdown(1.second)
+      second_system.shutdown(1.second)
     end
   end
 
