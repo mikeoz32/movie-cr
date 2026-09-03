@@ -90,6 +90,9 @@ module Movie
         restart_strategy: RestartStrategy::STOP
       )
       @cluster.subscribe(@event_listener.not_nil!)
+      @cluster.register_departure_guard("cluster-sharding") do |member|
+        ready_for_departure?(member)
+      end
       true
     end
 
@@ -106,6 +109,7 @@ module Movie
         listener.send_system(STOP)
       end
       @daemon.try &.send_system(STOP)
+      @cluster.unregister_departure_guard("cluster-sharding")
       @remote_refs_mutex.synchronize { @remote_refs.clear }
       @plans_mutex.synchronize do
         @plans.clear
@@ -246,6 +250,13 @@ module Movie
       snapshot = @cluster.snapshot
       return nil unless snapshot.unreachable.empty? && @cluster.converged?
       snapshot.members.select(&.status.up?).min_by?(&.unique_address).try(&.unique_address)
+    end
+
+    private def ready_for_departure?(member : Cluster::UniqueAddress) : Bool
+      providers = @providers_mutex.synchronize { @providers.values }
+      providers.all? do |provider|
+        plan_for(provider.name).try { |plan| !plan.values.includes?(member) } != false
+      end
     end
 
     private def routing_coordinator : Cluster::UniqueAddress

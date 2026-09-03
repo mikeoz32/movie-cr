@@ -107,6 +107,58 @@ module Movie
     end
   end
 
+  class PgStaleSingletonBehavior < EventSourcedBehavior(PgCounterCommand, PgAdded, PgCounterState)
+    def initialize(
+      persistence_id : String,
+      store : Persistence::EventStoreClient,
+      @node : String,
+      @started : Channel(String),
+      @entered : Channel(Nil)? = nil,
+      @release : Channel(Nil)? = nil,
+      @failures : Channel(String)? = nil,
+    )
+      super(persistence_id, store)
+    end
+
+    def on_signal(signal : SystemMessage)
+      @started.send(@node) if signal.is_a?(PreStart)
+    end
+
+    protected def empty_state : PgCounterState
+      PgCounterState.new
+    end
+
+    protected def apply_event(state : PgCounterState, event : PgAdded) : PgCounterState
+      PgCounterState.new(state.value + event.amount)
+    end
+
+    protected def handle_command(
+      state : PgCounterState,
+      command : PgCounterCommand,
+      context : ActorContext(PgCounterCommand),
+    ) : EventEffect(PgAdded, PgCounterState)
+      sender = context.sender
+      case command
+      when PgShardedAdd
+        if command.amount == 100 && @entered && @release
+          @entered.not_nil!.send(nil)
+          @release.not_nil!.receive
+        end
+        persist(PgAdded.new(command.amount), command.operation_id).then_run do |current|
+          Ask.reply_if_asked(sender, PgCounterReply.new(current.value))
+        end
+      when PgShardedGet
+        none.then_run { |current| Ask.reply_if_asked(sender, PgCounterReply.new(current.value)) }
+      else
+        none
+      end
+    end
+
+    protected def on_persist_failure(error : Exception)
+      @failures.try &.send(error.class.name)
+    end
+  end
+
   struct PgProfileState
     include JSON::Serializable
     getter name : String
@@ -491,6 +543,327 @@ if postgres_url = ENV["MOVIE_POSTGRES_TEST_URL"]?
     ensure
       system.try &.shutdown
       lease_system.try &.shutdown
+    end
+
+    it "eagerly owns and fences an event-sourced cluster singleton" do
+      suffix = UUID.random.to_s
+      cluster_name = "pg-singleton-#{suffix}"
+      config = Movie::Config.builder
+        .set("name", "pg-singleton")
+        .set("persistence.backend", "postgres")
+        .set("persistence.connection-uri", postgres_url)
+        .build
+      system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, config)
+      competing_system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, config)
+      system.enable_remoting("127.0.0.1", 0)
+      cluster = system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+        cluster_name: cluster_name,
+        seed_nodes: [] of Movie::Address,
+        gossip_interval: 20.milliseconds,
+        heartbeat_interval: 25.milliseconds,
+        heartbeat_timeout: 500.milliseconds
+      ))
+      wait_for_postgres_sharding { cluster.up? && cluster.converged? }
+      Movie::Remote::MessageRegistry.register(Movie::PgShardedAdd)
+      Movie::Remote::MessageRegistry.register(Movie::PgCounterReply)
+
+      persistence = Movie::EventSourcing.get(system)
+      entity_type = persistence.register_entity(Movie::PgCounterBehavior, Movie::PgCounterCommand) do |id, store|
+        Movie::PgCounterBehavior.new(id.persistence_id, store)
+      end
+      singleton = Movie::ClusterSingleton.get(system)
+      ref = singleton.init_event_sourced(
+        "counter-#{suffix}",
+        entity_type,
+        entity_id: "counter-#{suffix}",
+        lease_duration: 1.second,
+        lease_renew_interval: 250.milliseconds,
+        activation_interval: 20.milliseconds
+      )
+      expect_raises(Movie::Cluster::ClusterSingletonConfigurationError) do
+        singleton.init_event_sourced(
+          "counter-#{suffix}",
+          entity_type,
+          entity_id: "different-#{suffix}",
+          lease_duration: 1.second,
+          lease_renew_interval: 250.milliseconds,
+          activation_interval: 20.milliseconds
+        )
+      end
+
+      sharding = Movie::ClusterSharding.get(system)
+      begin
+        wait_for_postgres_sharding { sharding.local_entity_count == 1 }
+      rescue error
+        fail("event singleton did not activate: owner=#{ref.owner}; last_error=#{singleton.last_activation_error("counter-#{suffix}")}; singleton=#{singleton.stats}; sharding=#{sharding.stats}; cause=#{error.message}")
+      end
+      ref.owner.should eq(cluster.self_unique_address)
+      competing_database = Movie::Database.get(competing_system)
+      lease_key = Movie::Persistence::ShardLeaseKey.new(
+        cluster_name,
+        "#{Movie::ClusterSingletonExtension::INTERNAL_PREFIX}counter-#{suffix}",
+        0
+      )
+      competing_database.acquire_shard_lease(lease_key, "competing-owner", 1.second).should be_nil
+      reply = ref.ask(
+        Movie::PgShardedAdd.new(3, Movie::Persistence::OperationId.random),
+        Movie::PgCounterReply,
+        2.seconds
+      ).await(2.seconds)
+      reply.value.should eq(3)
+    ensure
+      system.try &.shutdown
+      competing_system.try &.shutdown
+    end
+
+    it "eagerly owns and fences a durable-state cluster singleton" do
+      suffix = UUID.random.to_s
+      cluster_name = "pg-state-singleton-#{suffix}"
+      config = Movie::Config.builder
+        .set("name", "pg-state-singleton")
+        .set("persistence.backend", "postgres")
+        .set("persistence.connection-uri", postgres_url)
+        .build
+      system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, config)
+      competing_system = Movie::ActorSystem(Nil).new(Movie::Behaviors(Nil).same, config)
+      system.enable_remoting("127.0.0.1", 0)
+      cluster = system.enable_cluster(Movie::Cluster::ClusterSettings.new(
+        cluster_name: cluster_name,
+        seed_nodes: [] of Movie::Address,
+        gossip_interval: 20.milliseconds,
+        heartbeat_interval: 25.milliseconds,
+        heartbeat_timeout: 500.milliseconds
+      ))
+      wait_for_postgres_sharding { cluster.up? && cluster.converged? }
+      Movie::Remote::MessageRegistry.register(Movie::PgSetProfile)
+      Movie::Remote::MessageRegistry.register(Movie::PgGetProfile)
+      Movie::Remote::MessageRegistry.register(Movie::PgProfileReply)
+
+      persistence = Movie::DurableState.get(system)
+      entity_type = persistence.register_entity(Movie::PgProfileBehavior, Movie::PgProfileCommand) do |id, store|
+        Movie::PgProfileBehavior.new(id.persistence_id, store)
+      end
+      singleton = Movie::ClusterSingleton.get(system)
+      ref = singleton.init_durable_state(
+        "profile-#{suffix}",
+        entity_type,
+        entity_id: "profile-#{suffix}",
+        lease_duration: 1.second,
+        lease_renew_interval: 250.milliseconds,
+        activation_interval: 20.milliseconds
+      )
+
+      sharding = Movie::ClusterSharding.get(system)
+      begin
+        wait_for_postgres_sharding { sharding.local_entity_count == 1 }
+      rescue error
+        fail("state singleton did not activate: owner=#{ref.owner}; last_error=#{singleton.last_activation_error("profile-#{suffix}")}; singleton=#{singleton.stats}; sharding=#{sharding.stats}; cause=#{error.message}")
+      end
+      ref.owner.should eq(cluster.self_unique_address)
+      singleton.stats.shared_sharding_lease_acquisitions.should be >= 1_i64
+      lease_key = Movie::Persistence::ShardLeaseKey.new(
+        cluster_name,
+        "#{Movie::ClusterSingletonExtension::INTERNAL_PREFIX}profile-#{suffix}",
+        0
+      )
+      Movie::Database.get(competing_system)
+        .acquire_shard_lease(lease_key, "competing-owner", 1.second)
+        .should be_nil
+      ref.ask(
+        Movie::PgSetProfile.new("Ada", Movie::Persistence::OperationId.random),
+        Movie::PgProfileReply,
+        2.seconds
+      ).await(2.seconds).name.should eq("Ada")
+      ref.ask(
+        Movie::PgGetProfile.new,
+        Movie::PgProfileReply,
+        2.seconds
+      ).await(2.seconds).name.should eq("Ada")
+    ensure
+      system.try &.shutdown
+      competing_system.try &.shutdown
+    end
+
+    it "rejects a paused stale singleton write after explicit-down relocation" do
+      suffix = UUID.random.to_s
+      cluster_name = "pg-stale-singleton-#{suffix}"
+      config = ->(name : String) do
+        Movie::Config.builder
+          .set("name", name)
+          .set("remoting.shared-secret", "singleton-test-secret")
+          .set("persistence.backend", "postgres")
+          .set("persistence.connection-uri", postgres_url)
+          .build
+      end
+      seed_system = Movie::ActorSystem(Nil).new(
+        Movie::Behaviors(Nil).same,
+        config.call("a-pg-stale-coordinator")
+      )
+      owner_system = Movie::ActorSystem(Nil).new(
+        Movie::Behaviors(Nil).same,
+        config.call("b-pg-stale-owner")
+      )
+      replacement_system = Movie::ActorSystem(Nil).new(
+        Movie::Behaviors(Nil).same,
+        config.call("c-pg-stale-replacement")
+      )
+      released = false
+      release = Channel(Nil).new(1)
+      begin
+        association = Movie::Remote::AssociationSettings.new(
+          shared_secret: "singleton-test-secret"
+        )
+        seed_remote = seed_system.enable_remoting("127.0.0.1", 0, settings: association)
+        owner_system.enable_remoting("127.0.0.1", 0, settings: association)
+        replacement_system.enable_remoting("127.0.0.1", 0, settings: association)
+        settings = ->(seeds : Array(Movie::Address), roles : Array(String)) do
+          Movie::Cluster::ClusterSettings.new(
+            cluster_name: cluster_name,
+            seed_nodes: seeds,
+            roles: roles,
+            join_retry_interval: 20.milliseconds,
+            gossip_interval: 20.milliseconds,
+            heartbeat_interval: 25.milliseconds,
+            heartbeat_timeout: 500.milliseconds
+          )
+        end
+        seed_cluster = seed_system.enable_cluster(
+          settings.call([] of Movie::Address, ["coordinator"])
+        )
+        owner_cluster = owner_system.enable_cluster(
+          settings.call([seed_remote.address], ["singleton"])
+        )
+        replacement_cluster = replacement_system.enable_cluster(
+          settings.call([seed_remote.address], ["singleton"])
+        )
+        wait_for_postgres_sharding do
+          seed_cluster.snapshot.members.count(&.status.up?) == 3 &&
+            owner_cluster.snapshot.members.count(&.status.up?) == 3 &&
+            replacement_cluster.snapshot.members.count(&.status.up?) == 3 &&
+            seed_cluster.converged? && owner_cluster.converged? && replacement_cluster.converged?
+        end
+        Movie::Remote::MessageRegistry.register(Movie::PgShardedAdd)
+        Movie::Remote::MessageRegistry.register(Movie::PgShardedGet)
+        Movie::Remote::MessageRegistry.register(Movie::PgCounterReply)
+
+        started = Channel(String).new(4)
+        entered = Channel(Nil).new(1)
+        failures = Channel(String).new(1)
+        seed_persistence = Movie::EventSourcing.get(seed_system)
+        seed_type = seed_persistence.register_entity(
+          Movie::PgStaleSingletonBehavior,
+          Movie::PgCounterCommand
+        ) do |id, store|
+          Movie::PgStaleSingletonBehavior.new(id.persistence_id, store, "seed", started)
+        end
+        owner_persistence = Movie::EventSourcing.get(owner_system)
+        owner_type = owner_persistence.register_entity(
+          Movie::PgStaleSingletonBehavior,
+          Movie::PgCounterCommand
+        ) do |id, store|
+          Movie::PgStaleSingletonBehavior.new(
+            id.persistence_id,
+            store,
+            "owner",
+            started,
+            entered,
+            release,
+            failures
+          )
+        end
+        replacement_persistence = Movie::EventSourcing.get(replacement_system)
+        replacement_type = replacement_persistence.register_entity(
+          Movie::PgStaleSingletonBehavior,
+          Movie::PgCounterCommand
+        ) do |id, store|
+          Movie::PgStaleSingletonBehavior.new(id.persistence_id, store, "replacement", started)
+        end
+        name = "stale-counter-#{suffix}"
+        seed_ref = Movie::ClusterSingleton.get(seed_system).init_event_sourced(
+          name,
+          seed_type,
+          entity_id: name,
+          roles: ["singleton"],
+          lease_duration: 500.milliseconds,
+          lease_renew_interval: 100.milliseconds,
+          activation_interval: 20.milliseconds,
+          activation_timeout: 1.second
+        )
+        owner_ref = Movie::ClusterSingleton.get(owner_system).init_event_sourced(
+          name,
+          owner_type,
+          entity_id: name,
+          roles: ["singleton"],
+          lease_duration: 500.milliseconds,
+          lease_renew_interval: 100.milliseconds,
+          activation_interval: 20.milliseconds,
+          activation_timeout: 1.second
+        )
+        replacement_ref = Movie::ClusterSingleton.get(replacement_system).init_event_sourced(
+          name,
+          replacement_type,
+          entity_id: name,
+          roles: ["singleton"],
+          lease_duration: 500.milliseconds,
+          lease_renew_interval: 100.milliseconds,
+          activation_interval: 20.milliseconds,
+          activation_timeout: 1.second
+        )
+
+        started.receive.should eq("owner")
+        seed_ref.ask(
+          Movie::PgShardedAdd.new(1, Movie::Persistence::OperationId.random),
+          Movie::PgCounterReply,
+          2.seconds
+        ).await(2.seconds).value.should eq(1)
+        stale = seed_ref.ask(
+          Movie::PgShardedAdd.new(100, Movie::Persistence::OperationId.random),
+          Movie::PgCounterReply,
+          5.seconds
+        )
+        entered.receive
+
+        seed_cluster.down(owner_cluster.self_unique_address).should be_true
+        begin
+          wait_for_postgres_sharding do
+            replacement_ref.owner == replacement_cluster.self_unique_address
+          end
+        rescue error
+          fail(
+            "singleton did not relocate after down: " \
+            "seed_members=#{seed_cluster.snapshot.members}; " \
+            "owner_members=#{owner_cluster.snapshot.members}; " \
+            "replacement_members=#{replacement_cluster.snapshot.members}; " \
+            "seed_owner=#{seed_ref.owner}; owner_owner=#{owner_ref.owner}; " \
+            "replacement_owner=#{replacement_ref.owner}; " \
+            "seed_stats=#{Movie::ClusterSingleton.get(seed_system).stats}; " \
+            "owner_stats=#{Movie::ClusterSingleton.get(owner_system).stats}; " \
+            "replacement_stats=#{Movie::ClusterSingleton.get(replacement_system).stats}; " \
+            "cause=#{error.message}"
+          )
+        end
+        started.receive.should eq("replacement")
+        replacement_ref.ask(
+          Movie::PgShardedAdd.new(2, Movie::Persistence::OperationId.random),
+          Movie::PgCounterReply,
+          2.seconds
+        ).await(2.seconds).value.should eq(3)
+
+        release.send(nil)
+        released = true
+        failures.receive.should eq(Movie::Persistence::StaleShardOwnerError.name)
+        expect_raises(Exception) { stale.await(2.seconds) }
+        replacement_ref.ask(
+          Movie::PgShardedGet.new,
+          Movie::PgCounterReply,
+          2.seconds
+        ).await(2.seconds).value.should eq(3)
+      ensure
+        release.send(nil) unless released
+        replacement_system.shutdown
+        owner_system.shutdown
+        seed_system.shutdown
+      end
     end
 
     it "bounds a shard retry queue by one shared lease deadline" do

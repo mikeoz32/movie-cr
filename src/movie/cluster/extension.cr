@@ -28,6 +28,8 @@ module Movie::Cluster
     @seen_mutex = Mutex.new
     @pending_terminal_deliveries = Set(UniqueAddress).new
     @terminal_mutex = Mutex.new
+    @departure_guards = {} of String => Proc(UniqueAddress, Bool)
+    @departure_guards_mutex = Mutex.new
     @leave_requested = Atomic(Bool).new(false)
     @heartbeat_sequence = Atomic(Int64).new(0_i64)
     @telemetry = ClusterTelemetry.new
@@ -136,6 +138,19 @@ module Movie::Cluster
 
     def subscribe(subscriber : Movie::ActorRef(ClusterEvent), replay_state : Bool = true) : Nil
       @membership.subscribe(subscriber, replay_state)
+    end
+
+    # Registers an advanced extension-level barrier for graceful departure.
+    # The callback must be non-blocking and return true only when `member` may
+    # advance from Leaving to Exiting. Exceptions fail closed for that round.
+    def register_departure_guard(name : String, &guard : UniqueAddress -> Bool) : Nil
+      raise ArgumentError.new("cluster departure guard name must not be empty") if name.empty?
+      @departure_guards_mutex.synchronize { @departure_guards[name] = guard }
+    end
+
+    # Removes a previously registered graceful-departure barrier.
+    def unregister_departure_guard(name : String) : Nil
+      @departure_guards_mutex.synchronize { @departure_guards.delete(name) }
     end
 
     def unsubscribe(subscriber : Movie::ActorRef(ClusterEvent)) : Nil
@@ -447,7 +462,9 @@ module Movie::Cluster
         .select(&.status.exiting?)
         .map(&.unique_address)
         .to_set
-      removed = @membership.advance_departures
+      removed = @membership.advance_departures do |member|
+        departure_ready?(member.unique_address)
+      end
       return if removed.empty?
 
       final_members = @membership.all_members
@@ -456,6 +473,14 @@ module Movie::Cluster
         register_terminal_delivery(member) if graceful.includes?(member)
         send_terminal_delivery(member, round, final_members, final_digest)
       end
+    end
+
+    private def departure_ready?(member : UniqueAddress) : Bool
+      guards = @departure_guards_mutex.synchronize { @departure_guards.values }
+      guards.all? { |guard| guard.call(member) }
+    rescue error
+      Log.warn(exception: error) { "Cluster departure guard failed for #{member}" }
+      false
     end
 
     private def retry_leave_request : Nil

@@ -171,6 +171,12 @@ describe "Movie persistence shard fencing" do
     ) do
       sharding.init_event_sourced(entity_type, shard_count: 16)
     end
+    expect_raises(
+      Movie::Cluster::ClusterShardingConfigurationError,
+      "clustered persistent entities require the PostgreSQL backend"
+    ) do
+      Movie::ClusterSingleton.get(system).init_event_sourced("sqlite", entity_type)
+    end
   ensure
     system.try &.shutdown
     File.delete(path) if path && File.exists?(path)

@@ -1343,4 +1343,10 @@ require "./movie/cluster"
 # Logical entity routing and ownership is a separate Akka-style extension.
 require "./movie/cluster_sharding"
 
+# One eagerly active cluster actor is composed above sharding.
+require "./movie/cluster_singleton"
+
+# Typed actor-service discovery is replicated above cluster membership.
+require "./movie/cluster_receptionist"
+
 record MainMessage, message : String

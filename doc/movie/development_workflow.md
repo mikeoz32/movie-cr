@@ -55,6 +55,8 @@ MOVIE_BENCH=1 crystal spec --release spec/movie/remote/association_benchmark_spe
 MOVIE_STRESS=1 crystal spec spec/movie/remote/stress_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_BENCH=1 crystal spec spec/movie/persistence_benchmark_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_CLUSTER_STRESS=1 crystal spec spec/movie/cluster/stress_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_SINGLETON_STRESS=1 crystal spec spec/movie/cluster/singleton_stress_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_RECEPTIONIST_STRESS=1 crystal spec spec/movie/cluster/receptionist_stress_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_CLUSTER_BENCH=1 crystal spec --release spec/movie/cluster/benchmark_spec.cr -Dpreview_mt -Dexecution_context
 crystal build benchmarks/actor_system.cr --release -Dpreview_mt -Dexecution_context -o /tmp/movie-actor-system-benchmark
 ```

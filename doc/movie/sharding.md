@@ -1,6 +1,6 @@
 # Cluster Sharding
 
-[Documentation index](README.md) · [Cluster membership](cluster.md) · [Persistence](persistence.md)
+[Documentation index](README.md) · [Cluster membership](cluster.md) · [Cluster singleton](singleton.md) · [Persistence](persistence.md)
 
 Movie cluster sharding is a separate extension above remoting and cluster membership. It gives an entity a stable logical address while its physical actor is activated on demand on the node that currently owns the entity's shard:
 
@@ -72,6 +72,8 @@ The shard count is a compatibility boundary. Choose it above the expected node c
 
 An entity actor is created only when its first message reaches the owning node. `ref.send_system(Movie::STOP)` asks the current owner to passivate that entity; the next message activates a new actor through the same logical reference. `idle_timeout` enables automatic passivation. Graceful cluster leave removes the leaving node from allocation, passivates its actors, and routes later traffic to the new owner.
 
+Infrastructure extensions may call the typed `sharding.activate(entity_type, entity_id, timeout)` control API for eager creation. Its future yields `ShardingControlAck`; `accepted` is true only when that request created a new local actor. `sharding.owner_for(entity_type, entity_id)` reads the currently observed plan and returns nil when the shard has no assigned owner. These controls obey the same coordinator, compatibility, role, handoff, and lease checks as normal routed traffic.
+
 After membership converges, the lowest `UniqueAddress` among `Up` members acts as the sharding coordinator. It owns the authoritative allocation plan and synchronizes a coordinator term plus monotonically increasing plan generation to the other nodes. A newly elected coordinator first collects versioned snapshots and then publishes a higher generation; delayed updates cannot overwrite a newer plan. Callers route first through that coordinator, which either activates locally or forwards one hop to the selected owner. Routing fails closed while there is no converged coordinator; it does not guess an owner from a node-local view.
 
 Ownership changes use an explicit handoff. The coordinator serializes routing with the ownership barrier, buffers up to 1,024 accepted deliveries per moving shard, asks the previous owner to drain already accepted mailbox work and passivate, prepares the next owner, forwards the handoff buffer in FIFO order, and only then publishes the completed plan generation. Forwarded delivery and control traffic must come from the coordinator identity authenticated by remoting, and the receiving node must already own or have prepared that shard. An `ask` forwarded by the coordinator remains a real remote ask, so success, failure, cancellation, and timeout propagate to the original caller. A three-node forwarding hop also preserves the original actor sender path. User delivery remains at-most-once because the underlying remoting contract does not replay disconnected traffic.
@@ -104,6 +106,8 @@ sharded_counters = Movie::ClusterSharding.get(system).init_event_sourced(
 ```
 
 `init_event_sourced` and `init_durable_state` require the PostgreSQL backend. SQLite is deliberately rejected because its file-local ownership cannot fence writers on different nodes.
+
+Both persistent initializers also accept the advanced `routing_name` option. It creates an independent logical sharding facade over the same registered persistence entity type, which is how Cluster Singleton isolates its shard-zero provider. Every node participating in that facade must use the same routing name and settings; changing it is a distributed compatibility boundary, not a persistence-id migration.
 
 The low-level SQLite backend implements the lease-table contract so backend conformance and fencing behavior can be tested without an external service. That primitive is not a supported clustered-ownership mode and does not make a SQLite file safe to share across nodes.
 

@@ -9,6 +9,8 @@
 - [Remoting MVP and protocol limits](remoting.md)
 - [Cluster membership and reachability](cluster.md)
 - [Cluster sharding and persistent ownership](sharding.md)
+- [Cluster singleton](singleton.md)
+- [Cluster receptionist](receptionist.md)
 - [Development workflow](development_workflow.md)
 - [Recovery backlog](backlog.md)
 
@@ -34,6 +36,8 @@
 - [Epic 18 - Reliable remoting associations](epics/epic-18-reliable-remoting-associations.md)
 - [Epic 19 - Cluster membership and reachability](epics/epic-19-cluster-membership-and-reachability.md)
 - [Epic 20 - Cluster sharding and persistent entity ownership](epics/epic-20-cluster-sharding-and-ownership.md)
+- [Epic 21 - Cluster singleton](epics/epic-21-cluster-singleton.md)
+- [Epic 22 - Cluster receptionist and service discovery](epics/epic-22-cluster-receptionist.md)
 
 ## How To Use This Folder
 

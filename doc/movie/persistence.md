@@ -1,10 +1,10 @@
 # Persistence
 
-[Documentation index](README.md) · [Configuration](configuration.md) · [Recovery backlog](backlog.md)
+[Documentation index](README.md) · [Configuration](configuration.md) · [Cluster singleton](singleton.md) · [Recovery backlog](backlog.md)
 
 Movie persistence provides backend-neutral event-sourced and durable-state actors with SQLite and PostgreSQL storage implementations. It provides typed command effects, atomic optimistic revisions, restart recovery, entity re-resolution, event manifests, snapshots, versioned migrations, safe retention, global event queries, projection checkpoints, a transactional outbox, telemetry, and isolated resilient database I/O.
 
-SQLite is local to one process. PostgreSQL is a shared journal that lets another actor-system node recover the same persistence id and arbitrates concurrent revisions across nodes. The separate [cluster sharding extension](sharding.md) adds logical ownership, relocation, leases, and transactionally validated fencing epochs for PostgreSQL-backed event-sourced and durable-state entities. Direct, unsharded persistent refs still require the application to maintain one logical owner per persistence id; if two owners write the same revision, exactly one succeeds and the other receives `Movie::Persistence::ConcurrentWriteError`.
+SQLite is local to one process. PostgreSQL is a shared journal that lets another actor-system node recover the same persistence id and arbitrates concurrent revisions across nodes. The separate [cluster sharding](sharding.md) and [cluster singleton](singleton.md) extensions add logical ownership, relocation, leases, and transactionally validated fencing epochs for PostgreSQL-backed event-sourced and durable-state entities. Direct, unsharded persistent refs still require the application to maintain one logical owner per persistence id; if two owners write the same revision, exactly one succeeds and the other receives `Movie::Persistence::ConcurrentWriteError`.
 
 ## Event-sourced behavior
 

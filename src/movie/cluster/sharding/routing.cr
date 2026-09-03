@@ -59,6 +59,58 @@ module Movie
       raise error
     end
 
+    # Eagerly creates one entity through the authoritative shard coordinator.
+    # `accepted` is true only when this request created a new actor instance.
+    def activate(
+      entity_type : Cluster::ShardedEntityType(T),
+      entity_id : String,
+      timeout : Time::Span = 2.seconds,
+    ) : Future(Cluster::ShardingControlAck) forall T
+      provider = provider_for(entity_type.name)
+      shard_id = provider.settings.partitioner.shard_for(
+        provider.name,
+        entity_id,
+        provider.settings.shard_count
+      )
+      envelope = Cluster::ShardingEnvelope.activate(
+        provider.name,
+        entity_id,
+        shard_id,
+        provider.settings.configuration_key
+      ).as_ask(timeout)
+      coordinator = routing_coordinator
+      if coordinator == @cluster.self_unique_address
+        Movie::Ask.local(
+          @system,
+          @daemon.not_nil!,
+          envelope,
+          Cluster::ShardingControlAck,
+          timeout
+        )
+      else
+        @telemetry.routed_remote
+        remote_ref(coordinator).ask(envelope, Cluster::ShardingControlAck, timeout)
+      end
+    rescue error : Cluster::NoShardOwnerError
+      @telemetry.envelope_rejected
+      raise error
+    end
+
+    # Returns the current planned owner for a typed entity, or nil while its
+    # shard has no eligible owner or no allocation plan has been observed.
+    def owner_for(
+      entity_type : Cluster::ShardedEntityType(T),
+      entity_id : String,
+    ) : Cluster::UniqueAddress? forall T
+      provider = provider_for(entity_type.name)
+      shard_id = provider.settings.partitioner.shard_for(
+        provider.name,
+        entity_id,
+        provider.settings.shard_count
+      )
+      plan_for(provider.name).try(&.[shard_id]?)
+    end
+
     def handle_envelope(
       envelope : Cluster::ShardingEnvelope,
       sender : ActorRefBase?,
@@ -68,7 +120,7 @@ module Movie
       provider = provider_for(envelope.entity_type)
       validate_settings(provider, envelope)
       case envelope.kind
-      when .user?, .passivate?
+      when .user?, .activate?, .passivate?
         handle_user_envelope(provider, envelope, sender, remote_address, remote_node_uid)
       when .passivate_shard?
         handle_passivate_shard(provider, envelope, sender, remote_address, remote_node_uid)
@@ -263,7 +315,10 @@ module Movie
       sender : ActorRefBase?,
     ) : Nil
       provider.authorize_shard(envelope.shard_id)
-      if envelope.kind.passivate?
+      if envelope.kind.activate?
+        activated = provider.activate(envelope.entity_id, envelope.shard_id)
+        Ask.reply_if_asked(sender, Cluster::ShardingControlAck.new(activated))
+      elsif envelope.kind.passivate?
         @telemetry.passivated_explicit if provider.passivate(envelope.entity_id)
       else
         provider.deliver(envelope, sender)

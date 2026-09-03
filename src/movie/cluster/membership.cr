@@ -129,9 +129,10 @@ module Movie::Cluster
       merge([member_with_status(current.unique_address, status, current.roles)]) > 0
     end
 
-    def advance_departures : Array(UniqueAddress)
+    def advance_departures(&can_advance : Member -> Bool) : Array(UniqueAddress)
       removed = [] of UniqueAddress
       active_members.each do |current|
+        next if current.status.leaving? && !can_advance.call(current)
         next_status = case current.status
                       when .leaving?         then MemberStatus::Exiting
                       when .exiting?, .down? then MemberStatus::Removed

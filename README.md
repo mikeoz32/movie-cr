@@ -1,6 +1,6 @@
 # Movie
 
-Movie is a lightweight typed actor framework for Crystal. It provides actor lifecycle and supervision, ask/futures, scheduling, bounded execution, pluggable SQLite/PostgreSQL persistence, typed streams, restart-tolerant TCP remoting associations, and static-seed cluster membership.
+Movie is a lightweight typed actor framework for Crystal. It provides actor lifecycle and supervision, ask/futures, scheduling, bounded execution, pluggable SQLite/PostgreSQL persistence, typed streams, restart-tolerant TCP remoting associations, static-seed cluster membership, sharding, cluster singletons, and typed cluster service discovery.
 
 ## Feature maturity
 
@@ -14,6 +14,8 @@ Movie is a lightweight typed actor framework for Crystal. It provides actor life
 | Remoting | Production beta | Versioned/authenticated associations, bounded reconnect, heartbeat failure detection, reliable control traffic, and at-most-once user delivery. |
 | Cluster membership | Production alpha | Static seeds, UID-safe process incarnations, convergent gossip, deterministic leadership, reachability, graceful leave, events, and manual downing. |
 | Cluster sharding | Production alpha | Logical entity refs, pluggable partition/allocation/rebalance strategies, activation/passivation, relocation, and PostgreSQL lease fencing; no automatic split-brain resolution. |
+| Cluster singleton | Production alpha | Eager role-aware ownership, stable typed proxies, graceful handoff, real-process failure coverage, and PostgreSQL-fenced persistent variants. |
+| Cluster receptionist | Production alpha | Typed service keys, UID-safe replicated listings, lifecycle cleanup, subscriptions, and real-process failure coverage. |
 
 ## Requirements and installation
 
@@ -94,7 +96,7 @@ event_sourcing = Movie::EventSourcing.get(system)
 durable_state = Movie::DurableState.get(system)
 ```
 
-`EventSourcedBehavior` and `DurableStateBehavior` use typed effects, optimistic revisions, restart-safe recovery, and post-persist callbacks. Event batches and outbox messages are atomic; snapshots enable safe journal retention; global event offsets and durable checkpoints support projections. Backend connections run on dedicated isolated connection threads with bounded retries, circuit breaking, metrics, and active readiness probes. PostgreSQL-backed entities can be registered with cluster sharding for fenced single-writer relocation. See the [persistence guide](doc/movie/persistence.md) for the complete API and cluster limits.
+`EventSourcedBehavior` and `DurableStateBehavior` use typed effects, optimistic revisions, restart-safe recovery, and post-persist callbacks. Event batches and outbox messages are atomic; snapshots enable safe journal retention; global event offsets and durable checkpoints support projections. Backend connections run on dedicated isolated connection threads with bounded retries, circuit breaking, metrics, and active readiness probes. PostgreSQL-backed entities can use cluster sharding or cluster singleton for fenced single-writer relocation. See the [persistence guide](doc/movie/persistence.md) for the complete API and cluster limits.
 
 Run the complete event-sourcing example with `crystal run examples/persistence_example.cr -Dpreview_mt -Dexecution_context`.
 
@@ -165,6 +167,16 @@ Reachability never removes a member automatically. Resolve the partition externa
 
 Event-sourced and durable-state entities can use the same surface with PostgreSQL leases and transactionally validated fencing epochs. During ambiguous partitions persistent sharding fails closed; reachability alone never grants ownership. See the [sharding guide](doc/movie/sharding.md) and [complete example](examples/cluster_sharding_example.cr).
 
+## Cluster singleton
+
+`Movie::ClusterSingleton` composes above sharding and keeps one logical actor eagerly active on one eligible node. Every node receives the same stable typed proxy; optional role filters constrain ownership without constraining callers. A graceful owner leave drains accepted work before activating the replacement, and explicit `Stop` recreates the actor behind the same proxy.
+
+Event-sourced and durable-state singleton helpers require PostgreSQL and reuse the same transactionally validated fencing epochs as persistent sharding. Reachability alone never moves ownership, and Movie still requires an external split-brain decision before explicit downing. See the [singleton guide](doc/movie/singleton.md) and [complete example](examples/cluster_singleton_example.cr).
+
+## Cluster receptionist
+
+`Movie::ClusterReceptionist` provides typed discovery for zero or more local or remote actor services. Registrations are ephemeral, watched for actor termination, replicated as authenticated per-node revisioned state, filtered by current membership reachability, and exposed through snapshots or typed listing subscriptions. It does not deploy actors, choose an owner, or change membership. See the [receptionist guide](doc/movie/receptionist.md) and [two-node example](examples/cluster_receptionist_example.cr).
+
 ## Configuration
 
 Configuration supports YAML, JSON, builders, fallbacks, and environment overrides. Public keys use dotted sections and hyphenated compound names, for example `supervision.max-restarts` and `remoting.stripe-count`.
@@ -184,7 +196,7 @@ Advanced APIs that may change more aggressively:
 - `Promise(T)` callback bridging;
 - executor protocol types and direct executor integrations;
 - persistence entity/store internals;
-- streams while they remain an MVP feature, remoting association internals while the transport remains beta, and cluster membership APIs while they remain production alpha.
+- streams while they remain an MVP feature, remoting association internals while the transport remains beta, and cluster membership, sharding, singleton, and receptionist APIs while they remain production alpha.
 
 ## Development and verification
 
@@ -205,6 +217,8 @@ MOVIE_BENCH=1 crystal spec --release spec/movie/remote/benchmark_spec.cr -Dprevi
 MOVIE_BENCH=1 crystal spec --release spec/movie/remote/association_benchmark_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_STRESS=1 crystal spec spec/movie/remote/stress_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_CLUSTER_STRESS=1 crystal spec spec/movie/cluster/stress_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_SINGLETON_STRESS=1 crystal spec spec/movie/cluster/singleton_stress_spec.cr -Dpreview_mt -Dexecution_context
+MOVIE_RECEPTIONIST_STRESS=1 crystal spec spec/movie/cluster/receptionist_stress_spec.cr -Dpreview_mt -Dexecution_context
 MOVIE_CLUSTER_BENCH=1 crystal spec --release spec/movie/cluster/benchmark_spec.cr -Dpreview_mt -Dexecution_context
 ```
 

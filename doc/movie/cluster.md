@@ -1,6 +1,6 @@
 # Cluster Membership and Reachability
 
-Movie cluster membership is a production-alpha extension layered on the normal actor and remoting runtime. It supplies static-seed discovery, process-incarnation identity, convergent membership, deterministic leadership, reachability observations, graceful leave, manual downing, typed events, and telemetry. The separate [cluster sharding extension](sharding.md) builds logical placement and PostgreSQL-fenced persistent ownership on this membership contract. Neither extension supplies automatic split-brain resolution or durable application delivery.
+Movie cluster membership is a production-alpha extension layered on the normal actor and remoting runtime. It supplies static-seed discovery, process-incarnation identity, convergent membership, deterministic leadership, reachability observations, graceful leave, manual downing, typed events, and telemetry. The separate [cluster sharding](sharding.md), [cluster singleton](singleton.md), and [cluster receptionist](receptionist.md) extensions build logical placement, PostgreSQL-fenced ownership, and typed service discovery on this membership contract. None of these extensions supplies automatic split-brain resolution or durable application delivery.
 
 ## Start a cluster
 
@@ -41,7 +41,7 @@ Each gossip round sends a canonical full-state snapshot to at most `gossip_fanou
 
 Cluster heartbeats run through the internal `/system/cluster` daemon over existing remoting connections. Elapsed silence uses a monotonic clock. A timeout adds the exact UID to the observer's local `snapshot.unreachable` set and can change its local leader view, but never changes the member's globally gossiped status.
 
-Movie deliberately has no automatic downing policy. During a partition, both sides can be alive, and a timeout cannot identify the side allowed to continue. Resolve that ambiguity externally with deployment/quorum/lease knowledge, then invoke `down(unique_address)` on the current leader. Self-down is rejected because it would stop the leader before it could disseminate the terminal record. A down request sent to another leader requires `remoting.shared-secret`; without HMAC, invoke it locally on the leader. Downing the wrong side can create split-brain behavior for ordinary actors. Persistent [cluster sharding](sharding.md) adds PostgreSQL write fencing, but still fails closed and requires an external decision about which partition may continue.
+Movie deliberately has no automatic downing policy. During a partition, both sides can be alive, and a timeout cannot identify the side allowed to continue. Resolve that ambiguity externally with deployment/quorum/lease knowledge, then invoke `down(unique_address)` on the current leader. Self-down is rejected because it would stop the leader before it could disseminate the terminal record. A down request sent to another leader requires `remoting.shared-secret`; without HMAC, invoke it locally on the leader. Downing the wrong side can create split-brain behavior for ordinary actors. Persistent [cluster sharding](sharding.md) and [cluster singleton](singleton.md) add PostgreSQL write fencing, but still fail closed and require an external decision about which partition may continue.
 
 Use `remoting.shared-secret` on every non-isolated deployment. Association identity is always checked for consistency, but without the shared secret a network peer is not cryptographically authenticated.
 
@@ -58,6 +58,8 @@ system.shutdown
 Calling `ActorSystem#shutdown` directly is an abrupt loss from the cluster's perspective. Peers will mark the UID unreachable and retain it until an operator downs it.
 
 A non-leader retries its leave request until it observes the leader-authored transition. Peers retry the final `Removed` snapshot to a gracefully leaving incarnation until its digest ACK arrives, so transient at-most-once transport loss does not strand `await_removed`. Abruptly downed members do not receive this retry treatment.
+
+Actor-system extensions that own distributed work may install a named barrier with `register_departure_guard` and remove it with `unregister_departure_guard`. A guard must be a fast, local, non-blocking check; returning false keeps the member in `Leaving`, and an exception fails closed for that reconciliation round. This is advanced extension plumbing rather than an application shutdown hook: it delays graceful leave only and never overrides explicit downing.
 
 ## Snapshots and events
 
@@ -108,3 +110,5 @@ MOVIE_CLUSTER_BENCH=1 crystal spec --release spec/movie/cluster/benchmark_spec.c
 ```
 
 The stress executable re-execs itself into real seed/joiner processes and covers startup ordering, three-node convergence, idempotent join, `SIGSTOP` reachability and recovery, graceful leave, abrupt death, explicit downing, and same-address/new-UID restart. Benchmarks report measurements without host-dependent thresholds.
+
+Cluster-wide single-owner services are documented separately in [singleton.md](singleton.md). They reuse membership convergence and sharding's departure barrier rather than introducing another membership protocol.

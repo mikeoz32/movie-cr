@@ -9,7 +9,7 @@ module Movie
           providers.each { |provider| provider.suspend_ownership(false) }
         elsif member = event.member
           if member.unique_address == @cluster.self_unique_address &&
-             (member.status.leaving? || member.status.exiting? || member.status.down? || member.status.removed?)
+             (member.status.exiting? || member.status.down? || member.status.removed?)
             providers.each { |provider| provider.suspend_ownership(true) }
           end
         end
@@ -83,13 +83,16 @@ module Movie
         next_generation = {generation, candidate.try(&.generation) || 0_i64}.max + 1_i64
         store_plan(provider, initial, coordinator, next_generation)
         broadcast_plan(provider, initial)
-        return !candidate.nil?
+        return false unless candidate
+        current = initial
       end
 
       current = current.not_nil!
       result = planner_for(provider).reconcile(current, members)
-      moves = result.allocations.compact_map do |shard_id, next_owner|
+      shard_ids = (current.keys + result.allocations.keys).uniq
+      moves = shard_ids.compact_map do |shard_id|
         previous_owner = current[shard_id]?
+        next_owner = result.allocations[shard_id]?
         next if previous_owner == next_owner
         {shard_id, previous_owner, next_owner}
       end
@@ -103,7 +106,7 @@ module Movie
       provider : Cluster::ShardedEntityProvider,
       shard_id : Int32,
       previous_owner : Cluster::UniqueAddress?,
-      next_owner : Cluster::UniqueAddress,
+      next_owner : Cluster::UniqueAddress?,
       routing_locked : Bool = false,
     ) : Nil
       key = Cluster::ShardKey.new(provider.name, shard_id)
@@ -123,18 +126,19 @@ module Movie
       provider : Cluster::ShardedEntityProvider,
       shard_id : Int32,
       previous_owner : Cluster::UniqueAddress?,
-      next_owner : Cluster::UniqueAddress,
+      next_owner : Cluster::UniqueAddress?,
       coordinator : Cluster::UniqueAddress,
       key : Cluster::ShardKey,
     ) : Nil
       spawn do
         begin
-          unless current_coordinator == coordinator && active_owner?(next_owner)
+          unless current_coordinator == coordinator &&
+                 (next_owner.nil? || active_owner?(next_owner))
             abort_handoff(provider, key)
             next
           end
           passivate_previous_owner(provider, shard_id, previous_owner, next_owner, coordinator)
-          prepare_next_owner(provider, shard_id, next_owner, coordinator)
+          prepare_next_owner(provider, shard_id, next_owner, coordinator) if next_owner
           @daemon.try &.tell_from(
             nil,
             Cluster::ShardingEnvelope.handoff_complete(
@@ -186,7 +190,7 @@ module Movie
       provider : Cluster::ShardedEntityProvider,
       shard_id : Int32,
       previous_owner : Cluster::UniqueAddress?,
-      next_owner : Cluster::UniqueAddress,
+      next_owner : Cluster::UniqueAddress?,
       coordinator : Cluster::UniqueAddress,
     ) : Nil
       return unless previous_owner
@@ -246,9 +250,7 @@ module Movie
           "Only the current sharding coordinator may complete a handoff"
         )
       end
-      next_owner = envelope.next_owner || raise Cluster::ClusterShardingConfigurationError.new(
-        "Shard handoff completion is missing its next owner"
-      )
+      next_owner = envelope.next_owner
       @routing_mutex.synchronize do
         key = Cluster::ShardKey.new(provider.name, envelope.shard_id)
         current = plan_for(provider.name) || raise Cluster::NoShardOwnerError.new(
@@ -256,7 +258,11 @@ module Movie
           envelope.shard_id
         )
         updated = current.dup
-        updated[envelope.shard_id] = next_owner
+        if next_owner
+          updated[envelope.shard_id] = next_owner
+        else
+          updated.delete(envelope.shard_id)
+        end
         store_plan(
           provider,
           updated,
@@ -268,13 +274,21 @@ module Movie
             @pending_deliveries.delete(key) || [] of Cluster::PendingShardingDelivery
           end
           pending.each do |delivery|
-            dispatch_to_owner(
-              provider,
-              delivery.envelope,
-              delivery.sender,
-              next_owner,
-              @cluster.self_unique_address
-            )
+            if next_owner
+              dispatch_to_owner(
+                provider,
+                delivery.envelope,
+                delivery.sender,
+                next_owner,
+                @cluster.self_unique_address
+              )
+            else
+              reject_envelope(
+                delivery.envelope,
+                delivery.sender,
+                Cluster::NoShardOwnerError.new(provider.name, envelope.shard_id)
+              )
+            end
           end
           drained = @handoffs_mutex.synchronize do
             if @pending_deliveries[key]?.try(&.empty?) != false
@@ -579,11 +593,6 @@ module Movie
       local_plan : Cluster::ShardAllocations?,
       local_generation : Int64,
     ) : Bool
-      peers = members.select do |member|
-        member.status.up? && member.unique_address != @cluster.self_unique_address
-      end
-      return false if peers.empty?
-
       now = Time.instant
       deadline = @plan_bootstrap_mutex.synchronize do
         if local_plan
@@ -597,6 +606,10 @@ module Movie
         end
         @plan_bootstrap_deadlines[provider.name] ||= now + 500.milliseconds
       end
+      peers = members.select do |member|
+        member.status.up? && member.unique_address != @cluster.self_unique_address
+      end
+      return false if peers.empty?
       return false if now >= deadline
 
       peers.each do |member|

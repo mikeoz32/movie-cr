@@ -18,6 +18,8 @@ module Movie::Cluster
       envelope : ShardingEnvelope,
       sender : Movie::ActorRefBase?,
     ) : Nil
+    # Returns true only when this request created a new local entity instance.
+    abstract def activate(entity_id : String, shard_id : Int32) : Bool
     abstract def passivate(entity_id : String) : Bool
     abstract def passivate_shard(shard_id : Int32) : Nil
     abstract def retain_shards(shard_ids : Set(Int32)) : Nil
@@ -58,8 +60,13 @@ module Movie::Cluster
         envelope.message.message_type,
         envelope.message.payload
       )
-      ref = entity_ref(envelope.entity_id, envelope.shard_id)
+      ref, _activated = entity_ref(envelope.entity_id, envelope.shard_id)
       ref.tell_from(sender, wrapper.unwrap(T))
+    end
+
+    def activate(entity_id : String, shard_id : Int32) : Bool
+      _ref, activated = entity_ref(entity_id, shard_id)
+      activated
     end
 
     def passivate_shard(shard_id : Int32) : Nil
@@ -130,7 +137,10 @@ module Movie::Cluster
       end
     end
 
-    private def entity_ref(entity_id : String, shard_id : Int32) : Movie::ActorRef(T)
+    private def entity_ref(
+      entity_id : String,
+      shard_id : Int32,
+    ) : Tuple(Movie::ActorRef(T), Bool)
       @mutex.synchronize do
         if @draining_shards.has_key?(shard_id)
           raise ShardHandoffInProgressError.new(name, shard_id)
@@ -138,7 +148,7 @@ module Movie::Cluster
         if current = @entities[entity_id]?
           if @system.context(current.id)
             @last_activity[entity_id] = Time.instant
-            return current
+            return {current, false}
           end
           @entities.delete(entity_id)
         end
@@ -147,6 +157,7 @@ module Movie::Cluster
         @entity_shards[entity_id] = shard_id
         @last_activity[entity_id] = Time.instant
         @entities[entity_id] = ref
+        {ref, true}
       end
     end
 

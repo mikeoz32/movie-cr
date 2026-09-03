@@ -33,8 +33,14 @@ module Movie::Cluster
         envelope.message.message_type,
         envelope.message.payload
       )
-      entity_ref(envelope.entity_id, envelope.shard_id, token)
-        .tell_from(sender, wrapper.unwrap(T))
+      ref, _activated = entity_ref(envelope.entity_id, envelope.shard_id, token)
+      ref.tell_from(sender, wrapper.unwrap(T))
+    end
+
+    def activate(entity_id : String, shard_id : Int32) : Bool
+      token = lease_for(shard_id)
+      _ref, activated = entity_ref(entity_id, shard_id, token)
+      activated
     end
 
     def passivate(entity_id : String) : Bool
@@ -233,7 +239,7 @@ module Movie::Cluster
       entity_id : String,
       shard_id : Int32,
       token : Movie::Persistence::ShardLeaseToken,
-    ) : Movie::ActorRef(T)
+    ) : Tuple(Movie::ActorRef(T), Bool)
       stale = nil.as(Movie::ActorRef(T)?)
       current = @entities_mutex.synchronize do
         if @draining_shards.has_key?(shard_id)
@@ -251,7 +257,7 @@ module Movie::Cluster
         end
         nil
       end
-      return current if current
+      return {current, false} if current
       stale.try &.send_system(Movie::STOP)
 
       resolved = @resolver.call(entity_id, token)
@@ -262,7 +268,7 @@ module Movie::Cluster
         @entity_epochs[entity_id] = token.epoch
         @last_activity[entity_id] = Time.instant
       end
-      resolved
+      {resolved, true}
     end
 
     private def remove_entities(&remove : String, Int32 -> Bool) : Array(Movie::ActorRef(T))
@@ -337,6 +343,9 @@ end
 
 module Movie
   class ClusterShardingExtension
+    # `routing_name` is an advanced logical facade name. All nodes must use the
+    # same value; changing it creates a separate sharding provider while the
+    # underlying persistence entity type and persistence ids remain unchanged.
     def init_event_sourced(
       entity_type : Persistence::EntityType(T),
       shard_count : Int32 = 256,
@@ -346,6 +355,7 @@ module Movie
       lease_duration : Time::Span = 10.seconds,
       lease_renew_interval : Time::Span = 3.seconds,
       idle_timeout : Time::Span? = nil,
+      routing_name : String = entity_type.name,
     ) : Cluster::ShardedEntityType(T) forall T
       persistence = Movie::EventSourcing.get(@system)
       init_persistent_entity(
@@ -356,12 +366,15 @@ module Movie
         rebalance,
         lease_duration,
         lease_renew_interval,
-        idle_timeout
+        idle_timeout,
+        routing_name
       ) do |entity_id, fence|
         persistence.get_entity_ref(entity_type.id(entity_id), fence)
       end
     end
 
+    # `routing_name` has the same compatibility and isolation semantics as the
+    # event-sourced overload above.
     def init_durable_state(
       entity_type : Persistence::EntityType(T),
       shard_count : Int32 = 256,
@@ -371,6 +384,7 @@ module Movie
       lease_duration : Time::Span = 10.seconds,
       lease_renew_interval : Time::Span = 3.seconds,
       idle_timeout : Time::Span? = nil,
+      routing_name : String = entity_type.name,
     ) : Cluster::ShardedEntityType(T) forall T
       persistence = Movie::DurableState.get(@system)
       init_persistent_entity(
@@ -381,7 +395,8 @@ module Movie
         rebalance,
         lease_duration,
         lease_renew_interval,
-        idle_timeout
+        idle_timeout,
+        routing_name
       ) do |entity_id, fence|
         persistence.get_entity_ref(entity_type.id(entity_id), fence)
       end
@@ -396,8 +411,10 @@ module Movie
       lease_duration : Time::Span,
       lease_renew_interval : Time::Span,
       idle_timeout : Time::Span?,
+      routing_name : String,
       &resolver : String, Persistence::ShardLeaseToken -> ActorRef(T)
     ) : Cluster::ShardedEntityType(T) forall T
+      raise ArgumentError.new("persistent sharding name must not be empty") if routing_name.empty?
       database = require_postgres_persistence!
       settings = persistent_sharding_settings(
         shard_count,
@@ -409,17 +426,17 @@ module Movie
         idle_timeout
       )
       provider = Cluster::PersistentEntityProvider(T).new(
-        entity_type.name,
+        routing_name,
         settings,
         @system,
         @cluster,
         database,
         @telemetry
       ) { |entity_id, fence| resolver.call(entity_id, fence) }
-      selected = register_provider(entity_type.name, T.name, settings, provider)
+      selected = register_provider(routing_name, T.name, settings, provider)
       synchronize_provider(selected)
       schedule_idle_sweep(selected)
-      Cluster::ShardedEntityType(T).new(entity_type.name)
+      Cluster::ShardedEntityType(T).new(routing_name)
     end
 
     private def require_postgres_persistence! : DatabaseExtension

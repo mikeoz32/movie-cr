@@ -167,6 +167,7 @@ module Movie::Cluster
 
     enum Kind
       User
+      Activate
       Passivate
       PassivateShard
       PrepareShard
@@ -289,12 +290,28 @@ module Movie::Cluster
       )
     end
 
+    def self.activate(
+      entity_type : String,
+      entity_id : String,
+      shard_id : Int32,
+      settings_key : String,
+    ) : self
+      new(
+        entity_type,
+        entity_id,
+        shard_id,
+        empty_message,
+        settings_key,
+        kind: Kind::Activate
+      )
+    end
+
     def self.passivate_shard(
       entity_type : String,
       shard_id : Int32,
       settings_key : String,
       coordinator : UniqueAddress,
-      next_owner : UniqueAddress,
+      next_owner : UniqueAddress?,
     ) : self
       new(
         entity_type,
@@ -402,7 +419,7 @@ module Movie::Cluster
       shard_id : Int32,
       settings_key : String,
       coordinator : UniqueAddress,
-      next_owner : UniqueAddress,
+      next_owner : UniqueAddress?,
     ) : self
       new(
         entity_type,

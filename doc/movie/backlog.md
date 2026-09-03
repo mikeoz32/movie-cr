@@ -28,6 +28,8 @@ Mandatory workflow for every task lives in [development_workflow.md](development
 | P0 | [Epic 18 - Reliable Remoting Associations](epics/epic-18-reliable-remoting-associations.md) | Makes remote refs restart-tolerant and adds negotiated identity, bounded reconnects, reliable control traffic, failure detection, and security hooks before cluster membership. | Completed (2026-09-01) |
 | P0 | [Epic 19 - Cluster Membership and Reachability](epics/epic-19-cluster-membership-and-reachability.md) | Adds static-seed membership, convergent gossip, deterministic leadership, reachability, graceful leave, and explicit downing above reliable remoting. | Completed (2026-09-01) |
 | P0 | [Epic 20 - Cluster Sharding and Persistent Entity Ownership](epics/epic-20-cluster-sharding-and-ownership.md) | Adds pluggable shard placement, logical entity routing, relocation, and fenced single-writer persistence. | Completed (2026-09-01) |
+| P0 | [Epic 21 - Cluster Singleton](epics/epic-21-cluster-singleton.md) | Adds one eagerly active role-aware cluster actor with stable proxy routing, graceful handoff, and PostgreSQL-fenced persistent variants. | Completed |
+| P0 | [Epic 22 - Cluster Receptionist and Service Discovery](epics/epic-22-cluster-receptionist.md) | Adds typed actor-service discovery, lifecycle cleanup, and UID-safe replicated listings required before cluster routers and distributed pub/sub. | Completed |
 
 ## Planning Rules
 
